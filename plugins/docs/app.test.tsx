@@ -55,6 +55,7 @@ function listNotesResult(
         name: "Personal",
         hostId: null,
         rootPath: "/Users/me/Notes",
+        bbProjectId: null,
       },
     ],
     vault: {
@@ -62,6 +63,7 @@ function listNotesResult(
       name: "Personal",
       hostId: null,
       rootPath: "/Users/me/Notes",
+      bbProjectId: null,
     },
     hosts: [{ id: "host_local", name: "My Mac", status: "connected" }],
     entries,

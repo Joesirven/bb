@@ -510,6 +510,41 @@ describe("Docs mention provider", () => {
       ],
     ]);
   });
+
+  it("ranks note mentions from vaults linked to the current BB project first", async () => {
+    const { harness } = await loadNotebook({
+      "roadmap.md": "# Personal Roadmap\n\nShared roadmap",
+    });
+    const linkedDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "bb-docs-linked-"),
+    );
+    temporaryDirectories.push(linkedDirectory);
+    await writeFile(
+      path.join(linkedDirectory, "roadmap.md"),
+      "# Linked Roadmap\n\nShared roadmap",
+    );
+    await harness.runCli(["vault-add", "Linked", linkedDirectory]);
+    await harness.runCli(["vault", "link", "linked", "proj_docs"]);
+    const provider = harness.registrations.mentionProviders[0]!;
+
+    await expect(
+      provider.search({
+        trigger: "@",
+        query: "roadmap",
+        projectId: "proj_docs",
+        threadId: null,
+      }),
+    ).resolves.toMatchObject([
+      {
+        id: "linked:roadmap.md",
+        title: "Linked Roadmap",
+      },
+      {
+        id: "personal:roadmap.md",
+        title: "Personal Roadmap",
+      },
+    ]);
+  });
 });
 
 describe("Docs vault operations", () => {
@@ -531,6 +566,7 @@ describe("Docs vault operations", () => {
         name: "Personal",
         hostId: null,
         rootPath: path.join(os.homedir(), "Notes"),
+        bbProjectId: null,
       },
     ]);
     await expect(
@@ -579,6 +615,54 @@ describe("Docs vault operations", () => {
     expect(harness.registrations.cli).toMatchObject({
       name: "docs",
       summary: "Discover and safely sync Docs vaults",
+    });
+  });
+
+  it("links and unlinks vaults to BB projects without requiring every vault to have one", async () => {
+    const { harness } = await loadNotebook({ "plan.md": "# Plan" });
+
+    const linked = await harness.runCli([
+      "vault",
+      "link",
+      "personal",
+      "proj_docs",
+      "--json",
+    ]);
+    expect(linked.exitCode).toBe(0);
+    expect(JSON.parse(linked.stdout)).toMatchObject({
+      id: "personal",
+      bbProjectId: "proj_docs",
+    });
+
+    const unlinked = await harness.runCli([
+      "vault",
+      "unlink",
+      "personal",
+      "--json",
+    ]);
+    expect(unlinked.exitCode).toBe(0);
+    expect(JSON.parse(unlinked.stdout)).toMatchObject({
+      id: "personal",
+      bbProjectId: null,
+    });
+  });
+
+  it("uses a linked vault for list defaults from BB project context", async () => {
+    const { harness } = await loadNotebook({ "personal.md": "# Personal" });
+    const directory = await mkdtemp(path.join(os.tmpdir(), "bb-docs-linked-"));
+    temporaryDirectories.push(directory);
+    await writeFile(path.join(directory, "linked.md"), "# Linked");
+    await harness.runCli(["vault-add", "Linked", directory]);
+    await harness.runCli(["vault", "link", "linked", "proj_docs"]);
+
+    const listed = await harness.runCli(["list", "--json"], {
+      projectId: "proj_docs",
+    });
+
+    expect(listed.exitCode).toBe(0);
+    expect(JSON.parse(listed.stdout)).toMatchObject({
+      vault: { id: "linked", bbProjectId: "proj_docs" },
+      vaults: [{ id: "linked", bbProjectId: "proj_docs" }],
     });
   });
 

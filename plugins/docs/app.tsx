@@ -11,6 +11,7 @@ import {
 } from "react";
 import {
   definePluginApp,
+  useBbContext,
   useBbNavigate,
   useRpc,
   useRealtime,
@@ -85,6 +86,7 @@ interface Vault {
   name: string;
   hostId: string | null;
   rootPath: string;
+  bbProjectId: string | null;
 }
 
 interface Host {
@@ -592,12 +594,17 @@ function TiptapEditor({
   );
 }
 
-function useNotebook(vaultId: string | null) {
+function useNotebook(vaultId: string | null, projectId: string | null) {
   const rpc = useRpc<typeof docsRpcContract>();
   const [data, setData] = useState<NotesData | null>(null);
   const refresh = useCallback(() => {
+    const input = vaultId
+      ? { vaultId }
+      : projectId
+        ? { projectId }
+        : {};
     void rpc
-      .call("listNotes", vaultId ? { vaultId } : {})
+      .call("listNotes", input)
       .then((value) => setData(parseNotesData(value)))
       .catch((error: unknown) => {
         setData((current) =>
@@ -609,7 +616,7 @@ function useNotebook(vaultId: string | null) {
             : null,
         );
       });
-  }, [rpc, vaultId]);
+  }, [projectId, rpc, vaultId]);
   useEffect(refresh, [refresh]);
   useRealtime("vault-changed", refresh);
   return { data, refresh };
@@ -1955,7 +1962,14 @@ function Tree({
             <SelectContent>
               {data.vaults.map((vault) => (
                 <SelectItem key={vault.id} value={vault.id}>
-                  {vault.name}
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate">{vault.name}</span>
+                    {vault.bbProjectId ? (
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        {vault.bbProjectId}
+                      </span>
+                    ) : null}
+                  </span>
                 </SelectItem>
               ))}
             </SelectContent>
@@ -2015,6 +2029,7 @@ function parseRoute(subPath: string): {
 function NotesPanel({ subPath }: PluginNavPanelProps) {
   const rpc = useRpc<typeof docsRpcContract>();
   const navigate = useBbNavigate();
+  const { projectId } = useBbContext();
   const route = parseRoute(subPath);
   const [vaultId, setVaultId] = useState<string | null>(route.vaultId);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
@@ -2025,7 +2040,7 @@ function NotesPanel({ subPath }: PluginNavPanelProps) {
   const [vaultRootPath, setVaultRootPath] = useState("");
   const [vaultHostId, setVaultHostId] = useState("primary");
   const [vaultError, setVaultError] = useState<string | null>(null);
-  const { data, refresh } = useNotebook(vaultId);
+  const { data, refresh } = useNotebook(vaultId, projectId);
   const activeVaultId = data?.vault.id ?? vaultId;
   const filePath =
     route.vaultId === null || route.vaultId === activeVaultId

@@ -21,13 +21,15 @@ const SYNC_STATE_VERSION = 1;
 class CliUsageError extends Error {}
 
 const DOCS_CLI_USAGE =
-  "Usage: bb docs <vaults|vault-add|vault-remove|list|read|pull|status|push|write|mkdir|move|remove>";
+  "Usage: bb docs <vaults|vault-add|vault-remove|vault link|vault unlink|list|read|pull|status|push|write|mkdir|move|remove>";
 
 const CLI_OPTIONS_BY_COMMAND: Record<string, ReadonlySet<string>> = {
   vaults: new Set(["--json"]),
   "vault-add": new Set(["--json"]),
   "vault-remove": new Set(["--json"]),
-  list: new Set(["--vault", "--json"]),
+  "vault link": new Set(["--json"]),
+  "vault unlink": new Set(["--json"]),
+  list: new Set(["--vault", "--project", "--json"]),
   read: new Set(["--vault", "--json"]),
   pull: new Set([
     "--vault",
@@ -63,6 +65,7 @@ interface Vault {
   name: string;
   hostId: string | null;
   rootPath: string;
+  bbProjectId: string | null;
 }
 
 interface VaultEntry {
@@ -132,6 +135,7 @@ const vaultSchema = z
     name: z.string().min(1),
     hostId: z.string().min(1).nullable(),
     rootPath: z.string().min(1),
+    bbProjectId: z.string().min(1).nullable(),
   })
   .strict();
 const vaultPathSchema = z.string().transform((value, context) => {
@@ -294,7 +298,9 @@ export const docsRpcContract = defineRpcContract({
       .strict(),
   },
   listNotes: {
-    input: z.object({ vaultId: vaultIdSchema }).strict(),
+    input: z
+      .object({ vaultId: vaultIdSchema, projectId: z.string().optional() })
+      .strict(),
     output: z
       .object({
         vaults: z.array(vaultSchema),
@@ -466,6 +472,14 @@ function requireString(value: unknown, field: string): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function requireBbProjectId(value: unknown, field: string): string {
+  const id = requireString(value, field);
+  if (!id.startsWith("proj_")) {
+    throw new Error(`"${field}" must be a BB project id`);
+  }
+  return id;
 }
 
 function parseOpenerSource(value: unknown): OpenerSource {
@@ -640,6 +654,10 @@ function parseVaultRow(value: unknown): Vault {
     name: requireString(row.name, "name"),
     hostId: typeof row.host_id === "string" && row.host_id ? row.host_id : null,
     rootPath: requireString(row.root_path, "root_path"),
+    bbProjectId:
+      typeof row.bb_project_id === "string" && row.bb_project_id
+        ? row.bb_project_id
+        : null,
   };
 }
 
@@ -647,6 +665,7 @@ function parseCli(argv: string[]): {
   command: string;
   positionals: string[];
   vaultId?: string;
+  projectId?: string;
   content?: string;
   into?: string;
   workspaceHostId?: string;
@@ -658,10 +677,14 @@ function parseCli(argv: string[]): {
   dryRun: boolean;
   diff: boolean;
 } {
-  const command = argv[0] ?? "help";
+  const command =
+    argv[0] === "vault" && (argv[1] === "link" || argv[1] === "unlink")
+      ? `vault ${argv[1]}`
+      : (argv[0] ?? "help");
   const allowedOptions = CLI_OPTIONS_BY_COMMAND[command];
   const positionals: string[] = [];
   let vaultId: string | undefined;
+  let projectId: string | undefined;
   let content: string | undefined;
   let recursive = false;
   let json = false;
@@ -679,12 +702,14 @@ function parseCli(argv: string[]): {
     }
     return value;
   };
-  for (let index = 1; index < argv.length; index += 1) {
+  const firstArgIndex = command.startsWith("vault ") ? 2 : 1;
+  for (let index = firstArgIndex; index < argv.length; index += 1) {
     const arg = argv[index]!;
     if (arg.startsWith("--") && allowedOptions && !allowedOptions.has(arg)) {
       throw new CliUsageError(`${arg} is not valid for bb docs ${command}`);
     }
     if (arg === "--vault") vaultId = nextValue(arg, index++);
+    else if (arg === "--project") projectId = nextValue(arg, index++);
     else if (arg === "--content") content = nextValue(arg, index++);
     else if (arg === "--into") into = nextValue(arg, index++);
     else if (arg === "--workspace-host")
@@ -704,6 +729,7 @@ function parseCli(argv: string[]): {
     command,
     positionals,
     vaultId,
+    projectId,
     content,
     into,
     workspaceHostId,
@@ -722,6 +748,8 @@ function validateCliPositionals(args: ReturnType<typeof parseCli>): void {
     vaults: { minimum: 0, maximum: 0 },
     "vault-add": { minimum: 2, maximum: 3 },
     "vault-remove": { minimum: 1, maximum: 1 },
+    "vault link": { minimum: 2, maximum: 2 },
+    "vault unlink": { minimum: 1, maximum: 1 },
     list: { minimum: 0, maximum: 0 },
     read: { minimum: 1, maximum: 1 },
     status: { minimum: 0, maximum: 1 },
@@ -777,6 +805,7 @@ export default async function plugin(bb: BbPluginApi) {
       position INTEGER NOT NULL,
       PRIMARY KEY (vault_id, parent_path, child_path)
     )`,
+    `ALTER TABLE vaults ADD COLUMN bb_project_id TEXT CHECK (bb_project_id IS NULL OR bb_project_id GLOB 'proj_*')`,
   ]);
 
   let seededDefaultVault = false;
@@ -786,30 +815,74 @@ export default async function plugin(bb: BbPluginApi) {
   ) {
     const rootPath = path.resolve(expandHome(DEFAULT_DIR));
     db.prepare(
-      "INSERT INTO vaults (id, name, host_id, root_path, created_at) VALUES (?, ?, NULL, ?, ?)",
+      "INSERT INTO vaults (id, name, host_id, root_path, created_at, bb_project_id) VALUES (?, ?, NULL, ?, ?, NULL)",
     ).run("personal", "Personal", rootPath, Date.now());
     seededDefaultVault = true;
   }
 
-  function listVaults(): Vault[] {
-    return db
+  function listVaults(filter?: { bbProjectId?: string }): Vault[] {
+    const vaults = db
       .prepare(
-        "SELECT id, name, host_id, root_path FROM vaults ORDER BY created_at, name",
+        "SELECT id, name, host_id, root_path, bb_project_id FROM vaults ORDER BY created_at, name",
       )
       .all()
       .map(parseVaultRow);
+    if (!filter?.bbProjectId) return vaults;
+    return vaults.filter((vault) => vault.bbProjectId === filter.bbProjectId);
   }
 
-  function getVault(vaultId?: string): Vault {
+  function getVault(vaultId?: string, bbProjectId?: string): Vault {
     const vaults = listVaults();
     const vault = vaultId
-      ? vaults.find((candidate) => candidate.id === vaultId)
-      : vaults[0];
+      ? vaults.find(
+          (candidate) =>
+            candidate.id === vaultId &&
+            (!bbProjectId || candidate.bbProjectId === bbProjectId),
+        )
+      : selectDefaultVault(vaults, bbProjectId);
     if (!vault)
       throw new Error(
         vaultId ? `Unknown vault: ${vaultId}` : "No vault configured",
       );
     return vault;
+  }
+
+  function selectDefaultVault(
+    vaults: readonly Vault[],
+    bbProjectId?: string,
+  ): Vault | undefined {
+    if (bbProjectId) {
+      const matches = vaults.filter(
+        (candidate) => candidate.bbProjectId === bbProjectId,
+      );
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1) {
+        throw new Error(
+          `multiple vaults are linked to BB project ${bbProjectId}; pass --vault explicitly`,
+        );
+      }
+    }
+    return vaults[0];
+  }
+
+  function linkVault(vaultId: string, bbProjectId: string): Vault {
+    const id = requireString(vaultId, "vaultId");
+    const projectId = requireBbProjectId(bbProjectId, "projectId");
+    getVault(id);
+    db.prepare("UPDATE vaults SET bb_project_id = ? WHERE id = ?").run(
+      projectId,
+      id,
+    );
+    bb.realtime.publish("vault-changed", { vaultId: id });
+    return getVault(id);
+  }
+
+  function unlinkVault(vaultId: string): Vault {
+    const id = requireString(vaultId, "vaultId");
+    getVault(id);
+    db.prepare("UPDATE vaults SET bb_project_id = NULL WHERE id = ?").run(id);
+    bb.realtime.publish("vault-changed", { vaultId: id });
+    return getVault(id);
   }
 
   function listEntryOrder(vaultId: string): string[] {
@@ -887,8 +960,11 @@ export default async function plugin(bb: BbPluginApi) {
     return notes.sort((a, b) => b.modifiedAtMs - a.modifiedAtMs);
   }
 
-  async function notebookData(vaultId?: string) {
-    const vault = getVault(vaultId);
+  async function notebookData(vaultId?: string, bbProjectId?: string) {
+    const vault = getVault(vaultId, bbProjectId);
+    const vaults = listVaults(
+      bbProjectId ? { bbProjectId } : undefined,
+    );
     try {
       const [{ entries, truncated }, hosts] = await Promise.all([
         listEntries(vault),
@@ -896,7 +972,7 @@ export default async function plugin(bb: BbPluginApi) {
       ]);
       const notes = await listNoteSummaries(vault, entries);
       return {
-        vaults: listVaults(),
+        vaults,
         vault,
         hosts,
         entries,
@@ -907,7 +983,7 @@ export default async function plugin(bb: BbPluginApi) {
       };
     } catch (error) {
       return {
-        vaults: listVaults(),
+        vaults,
         vault,
         hosts: await bb.sdk.hosts.list().catch(() => []),
         entries: [],
@@ -1497,7 +1573,7 @@ export default async function plugin(bb: BbPluginApi) {
       return syncApply(input);
     },
     async listNotes(input) {
-      return notebookData(input.vaultId);
+      return notebookData(input.vaultId, input.projectId);
     },
     async readNote(input) {
       return readFile(input.vaultId, input.path);
@@ -1617,7 +1693,7 @@ export default async function plugin(bb: BbPluginApi) {
       let counter = 2;
       while (ids.has(id)) id = `${baseId}-${counter++}`;
       db.prepare(
-        "INSERT INTO vaults (id, name, host_id, root_path, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO vaults (id, name, host_id, root_path, created_at, bb_project_id) VALUES (?, ?, ?, ?, ?, NULL)",
       ).run(id, name, hostId, resolvedRoot, Date.now());
       bb.realtime.publish("vault-changed", { vaultId: id });
       return getVault(id);
@@ -2651,9 +2727,15 @@ export default async function plugin(bb: BbPluginApi) {
         usage: "bb docs vault-remove <id>",
       },
       {
+        name: "vault",
+        summary: "Link or unlink vaults to BB projects",
+        usage:
+          "bb docs vault link <vault-id> <project-id> | bb docs vault unlink <vault-id>",
+      },
+      {
         name: "list",
         summary: "List notes and folders",
-        usage: "bb docs list [--vault <id>] [--json]",
+        usage: "bb docs list [--vault <id>] [--project <project-id>] [--json]",
       },
       {
         name: "read",
@@ -2724,8 +2806,15 @@ export default async function plugin(bb: BbPluginApi) {
           });
         else if (args.command === "vault-remove")
           result = await handlers.removeVault({ vaultId: args.positionals[0] });
+        else if (args.command === "vault link")
+          result = linkVault(args.positionals[0], args.positionals[1]);
+        else if (args.command === "vault unlink")
+          result = unlinkVault(args.positionals[0]);
         else if (args.command === "list")
-          result = await notebookData(args.vaultId);
+          result = await notebookData(
+            args.vaultId,
+            args.projectId ?? context.projectId,
+          );
         else if (args.command === "read")
           result = await readFile(args.vaultId, args.positionals[0]);
         else if (args.command === "pull") {
@@ -2835,10 +2924,17 @@ export default async function plugin(bb: BbPluginApi) {
   bb.ui.registerMentionProvider({
     id: "note",
     label: "Docs",
-    async search({ query }) {
+    async search({ query, projectId }) {
       const needle = query.trim().toLowerCase();
       const matches = [];
-      for (const vault of listVaults()) {
+      const vaults = listVaults().sort((left, right) => {
+        const leftRank =
+          projectId !== null && left.bbProjectId === projectId ? 0 : 1;
+        const rightRank =
+          projectId !== null && right.bbProjectId === projectId ? 0 : 1;
+        return leftRank - rightRank;
+      });
+      for (const vault of vaults) {
         for (const note of await listNoteSummaries(vault)) {
           if (
             needle &&
