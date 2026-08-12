@@ -109,6 +109,30 @@ function endpointUrl(serverUrl: string, path: string): string {
   return new URL(path, serverUrl).toString();
 }
 
+/**
+ * Flatten an error and its causes into one line.
+ *
+ * `fetch` rejects with the constant message "fetch failed" and puts the
+ * diagnosis (`getaddrinfo ENOTFOUND host`, `connect ECONNREFUSED …`) on
+ * `error.cause`. Reading only `.message` makes every network failure look
+ * identical, which is what made the CLI unable to tell a blocked backend from
+ * a dead one (#1189, #1216).
+ */
+function formatErrorChain(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const seen = new Set<unknown>([error]);
+  let message = error.message;
+  let cause: unknown = error.cause;
+  while (cause instanceof Error && !seen.has(cause)) {
+    seen.add(cause);
+    message += `: ${cause.message}`;
+    cause = cause.cause;
+  }
+  return message;
+}
+
 async function fetchJson<TValue>(
   args: FetchJsonArgs<TValue>,
 ): Promise<FetchJsonResult<TValue>> {
@@ -141,10 +165,9 @@ async function fetchJson<TValue>(
       value: parsed.data,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
     return {
       kind: "network-error",
-      message,
+      message: formatErrorChain(error),
     };
   } finally {
     clearTimeout(timeout);

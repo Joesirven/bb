@@ -10,10 +10,11 @@ export interface IssuePersistentHostEnrollKeyArgs {
 }
 
 /**
- * Mints an enroll key without creating a host row: the row is created at
- * enroll time (`/internal/hosts/enroll` upserts it with the daemon-reported
- * name). Minting is user-visible in the add-machine flow and may never be
- * redeemed, so a mint must not leave phantom "pending" machines behind.
+ * Mints an enroll key without creating a host row: the row is created when the
+ * daemon opens its first session (`/internal/session/open` upserts it with the
+ * daemon-reported name). Neither minting a key nor redeeming it proves a
+ * machine can reach this server, so neither one may leave a phantom "pending"
+ * machine behind.
  */
 export async function issuePersistentHostEnrollKey(
   deps: HostEnrollmentDeps,

@@ -53,8 +53,7 @@ describe("public host management", () => {
       expect(issued.expiresAt).toBeGreaterThan(Date.now());
       expect(issued.expiresAt).toBeLessThanOrEqual(Date.now() + 15 * 60 * 1000);
       // Minting must not create a host row — an unredeemed code would leave a
-      // phantom offline machine in the Machines pane. The row is born at
-      // enroll with the daemon-reported name.
+      // phantom offline machine in the Machines pane.
       expect(getHost(harness.db, issued.hostId)).toBeNull();
 
       const enrollResponse = await harness.app.request(
@@ -76,11 +75,9 @@ describe("public host management", () => {
 
       expect(enrollResponse.status).toBe(201);
       const enrolled = (await readJson(enrollResponse)) as { hostKey: string };
-      expect(getHost(harness.db, issued.hostId)).toMatchObject({
-        connectMachineId: "machine-cloud-1",
-        name: "Build Machine",
-        type: "persistent",
-      });
+      // Enrolling proves the key is good, not that the daemon can reach this
+      // server, so the machine is not listed yet.
+      expect(getHost(harness.db, issued.hostId)).toBeNull();
 
       const sessionResponse = await harness.app.request(
         "/internal/session/open",
@@ -106,9 +103,11 @@ describe("public host management", () => {
         },
       );
       expect(sessionResponse.status).toBe(201);
-      expect(getHost(harness.db, issued.hostId)?.connectMachineId).toBe(
-        "machine-cloud-2",
-      );
+      expect(getHost(harness.db, issued.hostId)).toMatchObject({
+        connectMachineId: "machine-cloud-2",
+        name: "Build Machine",
+        type: "persistent",
+      });
     });
   });
 

@@ -222,4 +222,30 @@ describe("probeBbServer", () => {
 
     expect(result.kind).toBe("unavailable");
   });
+
+  it("keeps the cause chain in the unavailable reason", async () => {
+    // `fetch` rejects with the constant "fetch failed" and hides the errno on
+    // `error.cause`. Dropping it makes an unresolvable name indistinguishable
+    // from a refused connection, which is what the failure page has to tell
+    // apart.
+    const fetchImpl = vi.fn(() =>
+      Promise.reject(
+        Object.assign(new TypeError("fetch failed"), {
+          cause: new Error("getaddrinfo ENOTFOUND private.example.internal"),
+        }),
+      ),
+    ) as unknown as ServerProbeFetch;
+
+    const result = await probeBbServer({
+      fetchImpl,
+      serverUrl: "https://private.example.internal",
+      timeoutMs: 500,
+    });
+
+    expect(result).toEqual({
+      kind: "unavailable",
+      reason: "fetch failed: getaddrinfo ENOTFOUND private.example.internal",
+      serverUrl: "https://private.example.internal",
+    });
+  });
 });

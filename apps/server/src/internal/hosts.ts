@@ -1,4 +1,4 @@
-import { getHost, upsertHost } from "@bb/db";
+import { getHost } from "@bb/db";
 import { isLoopbackAddress } from "@bb/config/loopback";
 import {
   hostDaemonEnrollKeyRequestSchema,
@@ -80,14 +80,29 @@ export function registerInternalHostRoutes(app: Hono, deps: AppDeps): void {
     },
   );
 
+  /**
+   * Exchange enrollment material for a host key. Deliberately creates no host
+   * row: the row is created when the daemon opens its first session
+   * (`/internal/session/open`), with the same daemon-reported name.
+   *
+   * Enrolling proves the key is valid, not that the daemon can reach this
+   * server. A daemon that enrolls over one path (the connect gate, or a
+   * network the machine has since left) and then cannot open its session used
+   * to leave a machine listed as "Offline, last seen never" forever —
+   * indistinguishable from a machine that once worked and is currently off.
+   * Only a completed handshake means "this machine is paired with this
+   * server", so only a completed handshake puts it in the list.
+   *
+   * `payload.hostName` is therefore unread here; see the note on it in
+   * `hostDaemonEnrollRequestSchema` for why it stays on the wire.
+   */
   post(
     "/hosts/enroll",
     hostDaemonEnrollRequestSchema,
     async (context, payload) => {
-      const connectMachineId = resolveReportedConnectMachineId(
-        context,
-        payload.connectMachineId,
-      );
+      // Validated here even though it is persisted at session open: a forged
+      // id must be refused before any key is handed out.
+      resolveReportedConnectMachineId(context, payload.connectMachineId);
       const token = requireBearerToken(context.req.header("authorization"));
       const enrollment = await deps.machineAuth.enrollHost({
         allowPublicEnrollment: true,
@@ -102,13 +117,6 @@ export function registerInternalHostRoutes(app: Hono, deps: AppDeps): void {
       assertMatchingExistingHostType({
         existingHost: getHost(deps.db, enrollment.metadata.hostId),
         requestedHostType: enrollment.metadata.hostType,
-      });
-
-      upsertHost(deps.db, deps.hub, {
-        ...(connectMachineId !== undefined ? { connectMachineId } : {}),
-        id: enrollment.metadata.hostId,
-        name: payload.hostName,
-        type: enrollment.metadata.hostType,
       });
 
       return context.json(

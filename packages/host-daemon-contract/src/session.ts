@@ -107,6 +107,15 @@ export type HostDaemonSessionOpenRequest = z.input<
 export const hostDaemonEnrollRequestSchema = z
   .object({
     hostId: z.string().min(1),
+    /**
+     * Accepted for wire compatibility only. The machine row is created when
+     * the daemon opens its first session, from the name that request carries,
+     * so enrollment no longer reads this. It stays in the schema because this
+     * object is `.strict()` and enrollment runs *before* the protocol-version
+     * handshake: dropping the field would 400 every daemon older than this
+     * server at pairing time, with no version mismatch raised to trigger their
+     * update. Delete it once no supported daemon still sends it.
+     */
     hostName: z.string().min(1),
     hostType: hostTypeSchema,
     connectMachineId: z.string().min(1).optional(),

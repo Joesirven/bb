@@ -54,6 +54,11 @@ import {
 import { createLocalViewUrl } from "./local-view.js";
 import { installApplicationMenu } from "./menu.js";
 import {
+  createConnectingView,
+  createRemoteServerLoadFailureView,
+  createServerProbeFailureView,
+} from "./remote-server-connection.js";
+import {
   DEFAULT_APPLICATION_MENU_ACCELERATORS,
   resolveApplicationMenuAccelerators,
 } from "./desktop-menu-shortcuts.js";
@@ -67,6 +72,7 @@ import {
   waitForCompatibleServer,
   type CompatibleServerProbeResult,
   type ServerProbeResult,
+  type UnavailableServerProbeResult,
 } from "./server-probe.js";
 import {
   BUILTIN_SERVER_NAME,
@@ -181,6 +187,13 @@ const OWNED_RUNTIME_KILL_TIMEOUT_MS = 1_000;
 const FOREIGN_RUNTIME_STOP_TIMEOUT_MS = 15_000;
 const FOREIGN_RUNTIME_KILL_TIMEOUT_MS = 3_000;
 const REMOTE_SYSTEM_CONFIG_POLL_INTERVAL_MS = 5 * 60 * 1000;
+/**
+ * Reachability check before pointing a window at a remote server. Longer than
+ * the local attach probe, because a remote server crosses a real network, and
+ * short enough that an unreachable host fails while the connecting view still
+ * reads as progress rather than a hang.
+ */
+const REMOTE_SERVER_PROBE_TIMEOUT_MS = 8_000;
 
 interface DesktopRuntime {
   bbProcess: BbAppProcess | null;
@@ -1165,6 +1178,10 @@ async function applyServerTarget(): Promise<void> {
     // Connect servers load as plain web pages behind a session cookie. The
     // cookie comes from the app's own machine credential when it has one, so
     // no local bb server has to run.
+    await loadRemoteConnectingView(target.server.url);
+    if (!isCurrent()) {
+      return;
+    }
     const result = await authenticateConnectTarget(
       target.server.url,
       isCurrent,
@@ -1190,17 +1207,44 @@ async function applyServerTarget(): Promise<void> {
       expiresAt: result.expiresAt,
       remoteServerUrl: target.server.url,
     });
-    bbAppLoaded = true;
-    await loadWindowUrl({ url: target.server.url });
+    const loaded = await loadRemoteServerUrl(target.server.url);
     if (!isCurrent()) {
+      return;
+    }
+    if (!loaded) {
+      refreshApplicationMenu();
       return;
     }
     startRemoteSystemConfigSync(target.server.url);
   } else {
-    // A custom server is a plain web load with no bb Connect involved.
-    bbAppLoaded = true;
-    await loadWindowUrl({ url: target.url });
+    // A custom server is a plain web load with no bb Connect involved, so this
+    // is the only place its address is checked before a window is sent at it.
+    await loadRemoteConnectingView(target.url);
     if (!isCurrent()) {
+      return;
+    }
+    // Only a network-level failure blocks the load. A server that answers but
+    // does not look like bb is loaded anyway: this probe fetches without the
+    // window's cookies, so a bb behind an authenticating gate legitimately
+    // answers it with a login page while the window itself would load fine.
+    const probe = await probeBbServer({
+      serverUrl: target.url,
+      timeoutMs: REMOTE_SERVER_PROBE_TIMEOUT_MS,
+    });
+    if (!isCurrent()) {
+      return;
+    }
+    if (probe.kind === "unavailable") {
+      await loadRemoteServerUnreachable(probe);
+      refreshApplicationMenu();
+      return;
+    }
+    const loaded = await loadRemoteServerUrl(target.url);
+    if (!isCurrent()) {
+      return;
+    }
+    if (!loaded) {
+      refreshApplicationMenu();
       return;
     }
     startRemoteSystemConfigSync(target.url);
@@ -1453,6 +1497,61 @@ async function loadBbApp(serverUrl: string): Promise<void> {
   if (shouldOpenDevTools()) {
     desktopWindowFactory?.openDevTools();
   }
+}
+
+/**
+ * Show "Connecting to <host>…" before any remote round trip.
+ *
+ * Without this the window keeps whatever it had — on a cold launch that is a
+ * blank frame — for as long as DNS and TCP take to give up, with nothing on
+ * screen to say the app is doing anything.
+ */
+async function loadRemoteConnectingView(serverUrl: string): Promise<void> {
+  bbAppLoaded = false;
+  await loadWindowUrl({
+    url: createLocalViewUrl({ viewModel: createConnectingView(serverUrl) }),
+  });
+}
+
+/**
+ * Point the windows at a remote bb server, keeping a failed navigation inside
+ * the app.
+ *
+ * `BrowserWindow.loadURL` rejects with a Chromium net error whose stack is
+ * Electron's own internals. Letting that reject unwind put those internals in
+ * front of the user as the entire error message, so failures resolve to `false`
+ * here and render a page that names the server instead.
+ */
+async function loadRemoteServerUrl(serverUrl: string): Promise<boolean> {
+  try {
+    await loadWindowUrl({ url: serverUrl });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    createDesktopLogger().warn(
+      `[desktop] could not load ${serverUrl}: ${detail}`,
+    );
+    bbAppLoaded = false;
+    await loadWindowUrl({
+      url: createLocalViewUrl({
+        viewModel: createRemoteServerLoadFailureView({ detail, serverUrl }),
+      }),
+    });
+    return false;
+  }
+  bbAppLoaded = true;
+  return true;
+}
+
+async function loadRemoteServerUnreachable(
+  probe: UnavailableServerProbeResult,
+): Promise<void> {
+  createDesktopLogger().warn(
+    `[desktop] ${probe.serverUrl} is unreachable: ${probe.reason}`,
+  );
+  bbAppLoaded = false;
+  await loadWindowUrl({
+    url: createLocalViewUrl({ viewModel: createServerProbeFailureView(probe) }),
+  });
 }
 
 function shouldOpenDevTools(): boolean {

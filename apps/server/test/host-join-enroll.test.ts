@@ -172,10 +172,9 @@ describe("host enroll routes", () => {
         hostId: enrollKeyBody.hostId,
       });
       expect(enrollBody.hostKey).toMatch(/^bbdh_/u);
-      expect(getHost(harness.db, enrollKeyBody.hostId)).toMatchObject({
-        id: enrollKeyBody.hostId,
-        name: "real-host-name",
-      });
+      // No machine row yet: a daemon that enrolls and never opens a session
+      // must not sit in the Machines list as "last seen never".
+      expect(getHost(harness.db, enrollKeyBody.hostId)).toBeNull();
 
       const replayResponse = await harness.app.request(
         "/internal/hosts/enroll",
