@@ -315,7 +315,18 @@ function getProviderErrorCategory(
 function toProviderErrorInfo(
   error: CodexErrorPayload,
 ): ProviderErrorInfo | null {
-  const errorInfo = error.codexErrorInfo;
+  // Codex currently labels reconnect attempts as responseStreamDisconnected,
+  // then degrades the same terminal failure to `other` after retries exhaust.
+  // Preserve the useful category for that exact legacy message shape.
+  const errorInfo =
+    error.codexErrorInfo === "other" &&
+    /^stream disconnected before completion(?::|$)/iu.test(error.message)
+      ? {
+          responseStreamDisconnected: {
+            httpStatusCode: null,
+          },
+        }
+      : error.codexErrorInfo;
   if (!errorInfo) {
     return null;
   }
