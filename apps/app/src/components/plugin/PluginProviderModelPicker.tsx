@@ -179,6 +179,7 @@ export function PluginProviderModelPicker({
       selectedProviderId={committedProviderId}
       onSelectedProviderChange={handleProviderChange}
       onProviderPreviewChange={handleProviderPreviewChange}
+      requireVerifiedProviderPreview
       hasMultipleProviders={providerOptions.length > 1}
       modelValue={value.model}
       modelOptions={modelOptions}

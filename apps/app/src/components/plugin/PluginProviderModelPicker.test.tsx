@@ -236,7 +236,9 @@ describe("PluginProviderModelPicker", () => {
       screen.getByRole("button", { name: /Provider and model:/ }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
-    expect(await screen.findByRole("button", { name: "Stale" })).not.toBeNull();
+    const staleModel = await screen.findByRole("button", { name: "Stale" });
+    expect((staleModel as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(staleModel);
     expect(onChange).not.toHaveBeenCalled();
 
     resolveCatalog(

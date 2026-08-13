@@ -196,6 +196,8 @@ interface ModelReasoningPickerProps {
   onSelectedProviderChange?: (value: string) => void;
   /** Reports the provider previewed for the current open picker session. */
   onProviderPreviewChange?: (value: string | null) => void;
+  /** Prevent preview selection until the provider catalog is authoritative. */
+  requireVerifiedProviderPreview?: boolean;
   hasMultipleProviders: boolean;
   // Model state
   modelValue: string;
@@ -258,6 +260,7 @@ export function ModelReasoningPicker({
   selectedProviderId,
   onSelectedProviderChange,
   onProviderPreviewChange,
+  requireVerifiedProviderPreview = false,
   hasMultipleProviders,
   modelValue,
   modelOptions,
@@ -378,6 +381,13 @@ export function ModelReasoningPicker({
     ...providerRouting,
     providerId: isPreviewing ? previewProviderId : undefined,
   });
+  const previewSelectionBlocked =
+    requireVerifiedProviderPreview &&
+    isPreviewing &&
+    (previewQuery.data === undefined ||
+      previewQuery.isPlaceholderData ||
+      previewQuery.isError ||
+      previewQuery.data.modelLoadError !== null);
 
   const previewModelOptions = useMemo((): readonly ModelPickerOption[] => {
     if (!isPreviewing) return modelOptions;
@@ -466,7 +476,9 @@ export function ModelReasoningPicker({
   const activeModelFailureMessage =
     activeModelLoadErrorMessage ?? "Could not load models.";
   const activeModelOptions = previewModelOptions;
-  const activeMoreModelOptions = previewMoreModelOptions;
+  const activeMoreModelOptions = previewSelectionBlocked
+    ? []
+    : previewMoreModelOptions;
   const hasActiveModelOptions = activeModelOptions.length > 0;
   const activeModelErrorIsProviderSpecific =
     activeModelLoadErrorMatches && activeModelLoadError !== null;
@@ -562,12 +574,18 @@ export function ModelReasoningPicker({
 
   const handleModelSelect = useCallback(
     (model: string) => {
+      if (previewSelectionBlocked) return;
       onModelChange(model, activeProviderId);
       setMoreModelsOpen(false);
       setPreviewProviderId(null);
       onProviderPreviewChange?.(null);
     },
-    [activeProviderId, onModelChange, onProviderPreviewChange],
+    [
+      activeProviderId,
+      onModelChange,
+      onProviderPreviewChange,
+      previewSelectionBlocked,
+    ],
   );
 
   // Scope Cmd+Shift+M and the cycle chords to one composer of the focused pane.
@@ -672,6 +690,7 @@ export function ModelReasoningPicker({
   );
   const handleReasoningSelect = useCallback(
     (level: ReasoningLevel) => {
+      if (previewSelectionBlocked) return;
       // A controlled parent that has not rendered the provider change yet
       // still needs a concrete model when the user immediately picks one of
       // the new provider's reasoning levels.
@@ -692,6 +711,7 @@ export function ModelReasoningPicker({
       onModelChange,
       onProviderPreviewChange,
       onReasoningChange,
+      previewSelectionBlocked,
     ],
   );
 
@@ -1029,6 +1049,7 @@ export function ModelReasoningPicker({
                       )}
                       qualifier={option.routeProviderId}
                       selected={!isPreviewing && option.value === modelValue}
+                      disabled={previewSelectionBlocked}
                       onClick={() => handleModelSelect(option.value)}
                     />
                   );
@@ -1097,6 +1118,7 @@ export function ModelReasoningPicker({
                     key={option.value}
                     label={option.label}
                     selected={!isPreviewing && option.value === reasoningValue}
+                    disabled={previewSelectionBlocked}
                     onClick={() => handleReasoningSelect(option.value)}
                   />
                 ))}
@@ -1347,6 +1369,7 @@ function MenuRowButton({
   isActive,
   id,
   role,
+  disabled,
   onPointerEnter: callerPointerEnter,
   onKeyDown: callerKeyDown,
 }: {
@@ -1357,6 +1380,7 @@ function MenuRowButton({
   isActive?: boolean;
   id?: string;
   role?: React.AriaRole;
+  disabled?: boolean;
   onPointerEnter?: PointerEventHandler<HTMLButtonElement>;
   onKeyDown?: KeyboardEventHandler<HTMLButtonElement>;
 }) {
@@ -1371,13 +1395,14 @@ function MenuRowButton({
       type="button"
       id={id}
       role={role}
+      disabled={disabled}
       // In the searchable listbox the active row is the combobox's
       // aria-activedescendant, so it carries aria-selected; reasoning/submenu
       // rows keep default button semantics.
       aria-selected={role === "option" ? Boolean(isActive) : undefined}
       onClick={onClick}
       className={cn(
-        "relative flex w-full cursor-default select-none items-center justify-between gap-3 rounded-sm px-2 text-xs outline-none hover:bg-state-hover hover:text-foreground",
+        "relative flex w-full cursor-default select-none items-center justify-between gap-3 rounded-sm px-2 text-xs outline-none hover:bg-state-hover hover:text-foreground disabled:pointer-events-none disabled:opacity-50",
         LIST_HOVER_TRANSITION,
         MENU_ITEM_LAST_HOVERED_CLASS,
         isActive && "bg-state-active",
