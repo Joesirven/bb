@@ -269,6 +269,7 @@ const NAV_PANEL_REGISTRATION_FIELDS = [
   "icon",
   "path",
   "component",
+  "experimental_rightPanel",
   "experimental_sidebarAccessory",
   "headerContent",
 ] as const satisfies readonly (keyof PluginNavPanelRegistration)[];
