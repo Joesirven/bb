@@ -476,9 +476,10 @@ export function ModelReasoningPicker({
   const activeModelFailureMessage =
     activeModelLoadErrorMessage ?? "Could not load models.";
   const activeModelOptions = previewModelOptions;
-  const activeMoreModelOptions = previewSelectionBlocked
-    ? []
-    : previewMoreModelOptions;
+  const activeMoreModelOptions = useMemo(
+    () => (previewSelectionBlocked ? [] : previewMoreModelOptions),
+    [previewSelectionBlocked, previewMoreModelOptions],
+  );
   const hasActiveModelOptions = activeModelOptions.length > 0;
   const activeModelErrorIsProviderSpecific =
     activeModelLoadErrorMatches && activeModelLoadError !== null;
