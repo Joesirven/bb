@@ -80,8 +80,9 @@ unexpected-exit recovery without feature-specific core hooks.
 
 **What it does.** `PluginNavPanelRegistration.experimental_rightPanel`
 registers plugin-defined views and explicitly enabled Browser or Terminal
-tools in BB's shared right-panel chrome. A default view can be pinned and
-opened initially. `useBbNavigate().experimental_openRightPanel(request)` opens
+tools in BB's shared right-panel chrome. A default view is pinned and opens
+initially on wide surfaces; compact drawers stay transient and closed until
+explicitly opened. `useBbNavigate().experimental_openRightPanel(request)` opens
 a registered view or enabled tool while the plugin page stays mounted; invalid
 or unavailable requests return `false`.
 

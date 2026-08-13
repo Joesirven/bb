@@ -2940,8 +2940,8 @@ declare const environmentDiffFileResponseSchema: z$1.ZodObject<{
     path: z$1.ZodString;
     content: z$1.ZodString;
     contentEncoding: z$1.ZodEnum<{
-        base64: "base64";
         utf8: "utf8";
+        base64: "base64";
     }>;
     mimeType: z$1.ZodOptional<z$1.ZodString>;
     sizeBytes: z$1.ZodNumber;
@@ -11004,7 +11004,9 @@ interface PluginNavPanelRightPanelRegistration {
     views?: readonly PluginNavPanelRightPanelViewRegistration[];
     /**
      * A registered view to keep available as the panel's pinned default tab.
-     * BB opens it on first use and preserves the user's later hide/show state.
+     * BB opens it initially on wide surfaces; compact drawers remain closed
+     * until the user or plugin explicitly opens the panel. Later hide/show state
+     * is preserved independently per owning pane.
      */
     defaultViewId?: string;
     /** Host-rendered tools this panel is allowed to open. */
