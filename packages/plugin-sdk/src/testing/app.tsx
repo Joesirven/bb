@@ -107,6 +107,10 @@ export type NavigateCall =
   | {
       method: "openThreadPanel";
       options: Parameters<BbNavigate["openThreadPanel"]>[0];
+    }
+  | {
+      method: "openBrowserTab";
+      options: Parameters<BbNavigate["openBrowserTab"]>[0];
     };
 
 export interface ComposerLog {
@@ -735,6 +739,10 @@ export interface RenderSlotOptions<
   openThreadPanel?: (
     options: Parameters<BbNavigate["openThreadPanel"]>[0],
   ) => boolean;
+  /** Host acceptance for `useBbNavigate().openBrowserTab`. */
+  openBrowserTab?: (
+    options: Parameters<BbNavigate["openBrowserTab"]>[0],
+  ) => boolean;
 }
 
 /** Host-originated inputs a slot test can drive deterministically. */
@@ -946,6 +954,13 @@ export function renderSlot<
         options: panelOptions,
       });
       return options.openThreadPanel?.(panelOptions) ?? false;
+    },
+    openBrowserTab(browserOptions) {
+      navigateCalls.push({
+        method: "openBrowserTab",
+        options: browserOptions,
+      });
+      return options.openBrowserTab?.(browserOptions) ?? false;
     },
   };
 
