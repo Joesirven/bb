@@ -29,7 +29,7 @@ The manifest is `package.json`:
   "name": "bb-plugin-hello",
   "version": "0.1.0",
   "type": "module",
-  "engines": { "bb": ">=0.9", "bbPluginSdk": "^0.4.2" },
+  "engines": { "bb": ">=0.9", "bbPluginSdk": "^0.4.3" },
   "bb": {
     "name": "Hello",
     "description": "A friendly example plugin.",
@@ -97,7 +97,7 @@ The manifest is `package.json`:
   different branded artwork and provide a dark variant when needed.
 - `engines.bb` — optional semver range checked against the bb app version.
 - `engines.bbPluginSdk` — optional semver range for the plugin SDK surface
-  (currently `0.4.2`; the scaffold writes `"^0.4.2"`). Absent means a legacy
+  (currently `0.4.3`; the scaffold writes `"^0.4.3"`). Absent means a legacy
   manifest. Managed (`git:`/`npm:`) installs **refuse** a mismatch against
   the running SDK; path installs surface it as `incompatible` at load.
   Compatible updates (`bb plugin outdated` / `bb plugin update`) only select
@@ -1274,6 +1274,30 @@ className?, leadingContent?, messageActions? }` —
   message content (e.g. a reply header) so it reads like the rest of the
   chat instead of a differently-styled bundled renderer. Renderer options
   beyond content/className stay host-internal.
+- `experimental_ProviderModelPicker` — bb's native searchable provider/model
+  picker for plugin settings and other compact forms. It is controlled:
+  `{ value: { providerId, model }, onChange, hostId?, className? }`. The host
+  reads the same live catalog as its composers, renders loading and discovery
+  failures itself, preserves selected-only retired models, and resolves a new
+  provider to its default model before emitting one coherent pair. Omit
+  `hostId` to use the primary-machine route. Reasoning and service tier are
+  deliberately outside this surface.
+
+  Alias the experimental export when using it in JSX:
+
+  ```tsx
+  import { experimental_ProviderModelPicker as ProviderModelPicker } from "@bb/plugin-sdk/app";
+
+  <ProviderModelPicker
+    value={selection}
+    onChange={setSelection}
+    hostId={hostId}
+  />;
+  ```
+
+  Experimental: the `experimental_` prefix will drop once its entry in
+  `docs/api_to_audit.md` is audited.
+
 - `experimental_NewThreadComposer` — bb's complete compose surface for
   CREATING a thread (the create-side counterpart to `ThreadChat`): prompt
   editor with @-mentions and expand, `+` attachments,
@@ -1426,8 +1450,9 @@ banners?, richText? })`. Omitted `scopes` means all thread, queued-message,
   reference: `examples/plugins/composer-customization`.
 
 UI components — **vendored shadcn source you own** (the shadcn model; the
-old host-provided component kit is REMOVED — `@bb/plugin-sdk/app` exports
-only `definePluginApp` + the hooks):
+old host-provided component kit is REMOVED — `@bb/plugin-sdk/app` exposes
+only deliberate host-product capabilities alongside `definePluginApp` and
+the hooks):
 
 - Builtin plugins in this repo import shared UI from `@bb/shared-ui` (the
   single source of truth the app also consumes and the registry generates

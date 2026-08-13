@@ -161,6 +161,42 @@ bound in `apps/app/src/lib/plugin-sdk-app-impl.tsx`.
    `PluginNewThreadComposer.test.tsx` guard this) and re-decide whether the
    re-seed-on-change rule should instead be an explicit reset nonce.
 
+## `experimental_ProviderModelPicker` (`@bb/plugin-sdk/app`)
+
+**What it does.** Renders bb's native searchable provider/model picker for a
+controlled `{ providerId, model }` value. It reads the same live provider and
+model catalog as the app's composers, supports optional `hostId` routing, and
+calls `onChange` only with a coherent pair. Selecting a provider resolves that
+provider's verified active default model before committing the change; failed,
+provisional, and empty catalogs leave the controlled value unchanged. Selecting
+a model keeps the active provider.
+
+The public contract deliberately omits reasoning level, service tier, catalog
+rows, loading state, and error callbacks. The host owns those internal shapes
+and renders loading, discovery failures, retired selected models, provider
+tabs, search, and model-route qualifiers through the existing picker.
+
+Implementation:
+`apps/app/src/components/plugin/PluginProviderModelPicker.tsx`, bound in
+`apps/app/src/lib/plugin-sdk-app-impl.tsx`.
+
+**Audit before stabilizing.**
+
+1. **Controlled-value semantics.** Confirm atomic provider/default-model
+   commits remain the least surprising contract for settings forms, including
+   retaining the previous value when the selected provider has no verified
+   active model.
+2. **Routing scope.** The component accepts `hostId`, matching the waiting
+   settings consumer. Confirm plugins do not also need environment routing
+   before freezing the prop shape.
+3. **Catalog policy ownership.** Confirm the adapter still shares the app's
+   treatment of provisional Claude catalogs, selected-only retired models,
+   custom provider logos, discovery failures, and per-model route providers.
+4. **Picker boundary.** The underlying combined picker can also render
+   reasoning and service-tier controls; this surface suppresses both. Confirm
+   a provider/model-only component remains the right primitive instead of a
+   broader controlled execution-options picker.
+
 ## `app.slots.experimental_newThreadPanelAction` (`@bb/plugin-sdk/app`)
 
 **What it does.** Adds a plugin row to the root New thread screen's

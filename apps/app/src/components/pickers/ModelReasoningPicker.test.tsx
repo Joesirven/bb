@@ -181,7 +181,7 @@ describe("ModelReasoningPicker", () => {
     );
     fireEvent.click(screen.getByText("5.2"));
 
-    expect(onModelChange).toHaveBeenCalledWith("gpt-5.2");
+    expect(onModelChange).toHaveBeenCalledWith("gpt-5.2", "codex");
     expect(screen.getByRole("dialog")).not.toBeNull();
 
     fireEvent.click(screen.getByText("High"));
@@ -212,7 +212,7 @@ describe("ModelReasoningPicker", () => {
     );
     expect(screen.getAllByText("5.5")).toHaveLength(2);
 
-    fireEvent.click(screen.getByTitle("Claude Code"));
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
 
     expect(onSelectedProviderChange).toHaveBeenCalledWith("claude-code");
     expect(await screen.findByText("Opus 4.7")).not.toBeNull();
@@ -222,7 +222,10 @@ describe("ModelReasoningPicker", () => {
     fireEvent.click(screen.getByText("Opus 4.7"));
 
     expect(onSelectedProviderChange).toHaveBeenCalledTimes(1);
-    expect(onModelChange).toHaveBeenCalledWith("claude-opus-4-7");
+    expect(onModelChange).toHaveBeenCalledWith(
+      "claude-opus-4-7",
+      "claude-code",
+    );
   });
 
   it("loads provider models on the compose-selected host", async () => {
@@ -233,7 +236,7 @@ describe("ModelReasoningPicker", () => {
         name: "Provider, model and reasoning",
       }),
     );
-    fireEvent.click(screen.getByTitle("Claude Code"));
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
 
     expect(await screen.findByText("Opus 4.7")).not.toBeNull();
   });
@@ -271,7 +274,7 @@ describe("ModelReasoningPicker", () => {
 
     fireEvent.click(apiQualifier);
 
-    expect(onModelChange).toHaveBeenCalledWith(apiModel);
+    expect(onModelChange).toHaveBeenCalledWith(apiModel, "pi");
   });
 
   it("fuzzy-filters a long model list and selects the match by keyboard", () => {
@@ -291,7 +294,7 @@ describe("ModelReasoningPicker", () => {
     fireEvent.keyDown(search, { key: "ArrowDown" });
     fireEvent.keyDown(search, { key: "Enter" });
 
-    expect(onModelChange).toHaveBeenCalledWith("o4-mini");
+    expect(onModelChange).toHaveBeenCalledWith("o4-mini", "codex");
   });
 
   it("resets retained mobile browse state after the drawer closes", () => {
@@ -349,7 +352,7 @@ describe("ModelReasoningPicker", () => {
     fireEvent.keyDown(search, { key: "ArrowDown" });
     fireEvent.keyDown(search, { key: "Enter" });
 
-    expect(onModelChange).toHaveBeenCalledWith("gpt-4.1-legacy");
+    expect(onModelChange).toHaveBeenCalledWith("gpt-4.1-legacy", "codex");
   });
 
   it("does not render the search box for short model lists", () => {

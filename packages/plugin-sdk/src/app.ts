@@ -30,10 +30,12 @@ export type {
  * unit tests, tooling) resolves the same objects when a runtime is
  * installed — and `undefined` values, not a module-load throw, when none is.
  *
- * Hooks-only surface (the host-provided UI kit was removed 2026-07-03,
- * plugin design §5.5): components are vendored shadcn-style source from the
- * BB registry (`npx shadcn add @bb/<name>`); `toast` comes from
- * `import { toast } from "sonner"` (runtime-shimmed to the host toaster).
+ * This is not a general-purpose host UI kit (plugin design §5.5): ordinary
+ * components remain vendored shadcn-style source from the BB registry
+ * (`npx shadcn add @bb/<name>`). A small set of deliberate host-product
+ * capabilities is exported when plugins must share bb's live behavior and
+ * policy, alongside the hooks. `toast` comes from `import { toast } from
+ * "sonner"` (runtime-shimmed to the host toaster).
  */
 
 interface PluginRuntimeHost {
@@ -50,6 +52,8 @@ export const ThreadChat = runtime.ThreadChat;
 export const Markdown = runtime.Markdown;
 export const experimental_NewThreadComposer =
   runtime.experimental_NewThreadComposer;
+export const experimental_ProviderModelPicker =
+  runtime.experimental_ProviderModelPicker;
 export const useRpc = runtime.useRpc;
 export const useRealtime = runtime.useRealtime;
 export const useRealtimeConnectionState = runtime.useRealtimeConnectionState;

@@ -1136,6 +1136,34 @@ export interface ThreadChatProps {
 }
 
 // ---------------------------------------------------------------------------
+// experimental_ProviderModelPicker — the host-owned provider/model picker.
+// ---------------------------------------------------------------------------
+
+/** The controlled provider/model pair selected by the picker. */
+export interface ProviderModelPickerValue {
+  providerId: string;
+  model: string;
+}
+
+/**
+ * Props of the host-owned `experimental_ProviderModelPicker` component.
+ *
+ * The picker reads bb's live provider/model catalog and renders the same
+ * searchable control used by the app's composers. Provider switches resolve
+ * to that provider's verified active default model before calling `onChange`,
+ * so each emitted value is a coherent pair. A failed or empty catalog leaves
+ * the controlled value unchanged. Pass `hostId` when the catalog should come
+ * from a particular enrolled machine; omission uses bb's primary-machine
+ * routing.
+ */
+export interface ProviderModelPickerProps {
+  value: ProviderModelPickerValue;
+  onChange(value: ProviderModelPickerValue): void;
+  hostId?: string;
+  className?: string;
+}
+
+// ---------------------------------------------------------------------------
 // experimental_NewThreadComposer — the host-owned new-thread compose surface.
 // ---------------------------------------------------------------------------
 
@@ -1392,9 +1420,9 @@ export interface PluginSdkApp {
     threadId: string,
   ): PluginSidebarThreadSplit;
   /**
-   * The host-owned chat component (see {@link ThreadChatProps}). Together
-   * with `Markdown`, the only components the SDK ships — everything else
-   * stays vendored per §5.5.
+   * The host-owned chat component (see {@link ThreadChatProps}). Host-product
+   * capabilities are exported selectively; ordinary UI stays vendored per
+   * §5.5.
    */
   ThreadChat: ComponentType<ThreadChatProps>;
   /**
@@ -1408,5 +1436,11 @@ export interface PluginSdkApp {
    * docs/api_to_audit.md for what to audit before the prefix drops.
    */
   experimental_NewThreadComposer: ComponentType<NewThreadComposerProps>;
+  /**
+   * The host-owned provider/model picker (see
+   * {@link ProviderModelPickerProps}). Experimental: see
+   * docs/api_to_audit.md for what to audit before the prefix drops.
+   */
+  experimental_ProviderModelPicker: ComponentType<ProviderModelPickerProps>;
   useComposerView(): ComposerView;
 }

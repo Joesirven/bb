@@ -51,6 +51,7 @@ import {
   type StandardSchemaV1InferInput,
   type MarkdownProps,
   type NewThreadComposerProps,
+  type ProviderModelPickerProps,
   type ThreadChatProps,
   type JsonValue,
 } from "@bb/plugin-sdk";
@@ -369,6 +370,45 @@ function TestNewThreadComposer({
   );
 }
 
+function TestProviderModelPicker({
+  value,
+  onChange,
+  hostId,
+  className,
+}: ProviderModelPickerProps) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+
+  return (
+    <div
+      data-testid="bb-provider-model-picker"
+      data-host-id={hostId ?? ""}
+      className={className}
+    >
+      <input
+        aria-label="Provider ID"
+        value={draft.providerId}
+        onChange={(event) =>
+          setDraft((current) => ({
+            ...current,
+            providerId: event.target.value,
+          }))
+        }
+      />
+      <input
+        aria-label="Model"
+        value={draft.model}
+        onChange={(event) =>
+          setDraft((current) => ({ ...current, model: event.target.value }))
+        }
+      />
+      <button type="button" onClick={() => onChange(draft)}>
+        Apply provider and model
+      </button>
+    </div>
+  );
+}
+
 const testPluginSdkApp = {
   definePluginApp,
   useRpc<
@@ -434,6 +474,7 @@ const testPluginSdkApp = {
   ThreadChat: TestThreadChat,
   Markdown: TestMarkdown,
   experimental_NewThreadComposer: TestNewThreadComposer,
+  experimental_ProviderModelPicker: TestProviderModelPicker,
   experimental_useSidebarThreads(): PluginSidebarThreadsState {
     return useSlotEnv("experimental_useSidebarThreads").sidebarThreads;
   },

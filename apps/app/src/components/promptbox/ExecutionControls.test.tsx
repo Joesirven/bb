@@ -60,7 +60,7 @@ describe("ExecutionControls", () => {
     );
 
     expect(screen.queryByText("Model")).not.toBeNull();
-    expect(screen.queryByTitle("Claude Code")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
   });
 
   it("shows provider tabs when provider changes are allowed", () => {
@@ -72,7 +72,9 @@ describe("ExecutionControls", () => {
       }),
     );
 
-    expect(screen.queryByTitle("Claude Code")).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Claude Code" }),
+    ).not.toBeNull();
   });
 
   it("keeps showing the known model when model options fail to load", () => {

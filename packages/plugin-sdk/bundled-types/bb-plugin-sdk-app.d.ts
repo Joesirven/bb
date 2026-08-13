@@ -1246,6 +1246,28 @@ interface ThreadChatProps {
      */
     messageActions?: readonly ThreadChatMessageAction[];
 }
+/** The controlled provider/model pair selected by the picker. */
+interface ProviderModelPickerValue {
+    providerId: string;
+    model: string;
+}
+/**
+ * Props of the host-owned `experimental_ProviderModelPicker` component.
+ *
+ * The picker reads bb's live provider/model catalog and renders the same
+ * searchable control used by the app's composers. Provider switches resolve
+ * to that provider's verified active default model before calling `onChange`,
+ * so each emitted value is a coherent pair. A failed or empty catalog leaves
+ * the controlled value unchanged. Pass `hostId` when the catalog should come
+ * from a particular enrolled machine; omission uses bb's primary-machine
+ * routing.
+ */
+interface ProviderModelPickerProps {
+    value: ProviderModelPickerValue;
+    onChange(value: ProviderModelPickerValue): void;
+    hostId?: string;
+    className?: string;
+}
 /**
  * Every selection the composer resolved, JSON-serializable so a plugin can
  * forward it to its own backend rpc verbatim and hand it straight to
@@ -1479,9 +1501,9 @@ interface PluginSdkApp {
      */
     experimental_useSidebarThreadSplit(threadId: string): PluginSidebarThreadSplit;
     /**
-     * The host-owned chat component (see {@link ThreadChatProps}). Together
-     * with `Markdown`, the only components the SDK ships — everything else
-     * stays vendored per §5.5.
+     * The host-owned chat component (see {@link ThreadChatProps}). Host-product
+     * capabilities are exported selectively; ordinary UI stays vendored per
+     * §5.5.
      */
     ThreadChat: ComponentType<ThreadChatProps>;
     /**
@@ -1495,6 +1517,12 @@ interface PluginSdkApp {
      * docs/api_to_audit.md for what to audit before the prefix drops.
      */
     experimental_NewThreadComposer: ComponentType<NewThreadComposerProps>;
+    /**
+     * The host-owned provider/model picker (see
+     * {@link ProviderModelPickerProps}). Experimental: see
+     * docs/api_to_audit.md for what to audit before the prefix drops.
+     */
+    experimental_ProviderModelPicker: ComponentType<ProviderModelPickerProps>;
     useComposerView(): ComposerView;
 }
 
@@ -1502,6 +1530,7 @@ declare const definePluginApp: (setup: PluginAppSetup) => PluginAppDefinition;
 declare const ThreadChat: react.ComponentType<ThreadChatProps>;
 declare const Markdown: react.ComponentType<MarkdownProps>;
 declare const experimental_NewThreadComposer: react.ComponentType<NewThreadComposerProps>;
+declare const experimental_ProviderModelPicker: react.ComponentType<ProviderModelPickerProps>;
 declare const useRpc: <Contract extends PluginRpcContract = Readonly<Record<string, PluginRpcMethodContract<StandardSchemaV1<unknown, unknown>, StandardSchemaV1<unknown, unknown>>>>>() => PluginRpcClient<Contract>;
 declare const useRealtime: (channel: string, handler: (payload: unknown) => void) => void;
 declare const useRealtimeConnectionState: () => PluginRealtimeConnectionState;
@@ -1515,5 +1544,5 @@ declare const experimental_useSidebarThreadActions: () => PluginSidebarThreadAct
 declare const experimental_useSidebarThreadPullRequest: (threadId: string) => PluginSidebarThreadPullRequestState;
 declare const experimental_useSidebarThreadSplit: (threadId: string) => PluginSidebarThreadSplit;
 
-export { Markdown, ThreadChat, definePluginApp, experimental_NewThreadComposer, experimental_useSidebarThreadActions, experimental_useSidebarThreadPullRequest, experimental_useSidebarThreadSplit, experimental_useSidebarThreads, useBbContext, useBbNavigate, useComposer, useComposerView, useRealtime, useRealtimeConnectionState, useRpc, useSettings };
-export type { BbContext, BbNavigate, ComposerCustomization, ComposerPlusMenuItem, ComposerRichTextSpec, ComposerStructuredDraft, ComposerView, JsonValue, MarkdownProps, NewThreadComposerProps, NewThreadRequest, PluginAppBuilder, PluginAppComposer, PluginAppContentScripts, PluginAppDefinition, PluginAppSetup, PluginAppSlots, PluginComposerApi, PluginComposerMention, PluginComposerScope, PluginComposerTextEffect, PluginComposerThreadRowStatus, PluginContentScriptContext, PluginContentScriptDisposer, PluginContentScriptRegistration, PluginFileOpenerProps, PluginFileOpenerRegistration, PluginFileOpenerSource, PluginHomepageSectionProps, PluginHomepageSectionRegistration, PluginMessageActionContext, PluginMessageActionRegistration, PluginMessageActionThreadPanelOptions, PluginMessageDirectiveMessage, PluginMessageDirectiveOpenWorkspaceFile, PluginMessageDirectiveProps, PluginMessageDirectiveRegistration, PluginNavPanelProps, PluginNavPanelRegistration, PluginNewThreadPanelActionContext, PluginNewThreadPanelActionRegistration, PluginNewThreadPanelProps, PluginPendingInteractionProps, PluginPendingInteractionRegistration, PluginPendingInteractionView, PluginRealtimeConnectionState, PluginRpcCallArgs, PluginRpcClient, PluginRpcContract, PluginRpcError, PluginRpcErrorCode, PluginRpcHandlers, PluginRpcIssuePathSegment, PluginRpcMethodContract, PluginRpcResult, PluginRpcValidationIssue, PluginSdkApp, PluginSettingsSectionProps, PluginSettingsSectionRegistration, PluginSettingsState, PluginSidebarFooterActionContext, PluginSidebarFooterActionProps, PluginSidebarFooterActionRegistration, PluginSidebarProject, PluginSidebarPullRequest, PluginSidebarSplitPane, PluginSidebarThread, PluginSidebarThreadActions, PluginSidebarThreadActivity, PluginSidebarThreadIndicator, PluginSidebarThreadPullRequestState, PluginSidebarThreadSplit, PluginSidebarThreadsState, PluginSidebarWorkspaceKind, PluginThreadHeaderActionProps, PluginThreadHeaderActionRegistration, PluginThreadListProps, PluginThreadListRegistration, PluginThreadPanelActionContext, PluginThreadPanelActionRegistration, PluginThreadPanelProps, StandardSchemaV1, StandardSchemaV1InferInput, StandardSchemaV1InferOutput, StandardSchemaV1Issue, StandardSchemaV1Result, ThreadChatMessageAction, ThreadChatMessageReference, ThreadChatProps };
+export { Markdown, ThreadChat, definePluginApp, experimental_NewThreadComposer, experimental_ProviderModelPicker, experimental_useSidebarThreadActions, experimental_useSidebarThreadPullRequest, experimental_useSidebarThreadSplit, experimental_useSidebarThreads, useBbContext, useBbNavigate, useComposer, useComposerView, useRealtime, useRealtimeConnectionState, useRpc, useSettings };
+export type { BbContext, BbNavigate, ComposerCustomization, ComposerPlusMenuItem, ComposerRichTextSpec, ComposerStructuredDraft, ComposerView, JsonValue, MarkdownProps, NewThreadComposerProps, NewThreadRequest, PluginAppBuilder, PluginAppComposer, PluginAppContentScripts, PluginAppDefinition, PluginAppSetup, PluginAppSlots, PluginComposerApi, PluginComposerMention, PluginComposerScope, PluginComposerTextEffect, PluginComposerThreadRowStatus, PluginContentScriptContext, PluginContentScriptDisposer, PluginContentScriptRegistration, PluginFileOpenerProps, PluginFileOpenerRegistration, PluginFileOpenerSource, PluginHomepageSectionProps, PluginHomepageSectionRegistration, PluginMessageActionContext, PluginMessageActionRegistration, PluginMessageActionThreadPanelOptions, PluginMessageDirectiveMessage, PluginMessageDirectiveOpenWorkspaceFile, PluginMessageDirectiveProps, PluginMessageDirectiveRegistration, PluginNavPanelProps, PluginNavPanelRegistration, PluginNewThreadPanelActionContext, PluginNewThreadPanelActionRegistration, PluginNewThreadPanelProps, PluginPendingInteractionProps, PluginPendingInteractionRegistration, PluginPendingInteractionView, PluginRealtimeConnectionState, PluginRpcCallArgs, PluginRpcClient, PluginRpcContract, PluginRpcError, PluginRpcErrorCode, PluginRpcHandlers, PluginRpcIssuePathSegment, PluginRpcMethodContract, PluginRpcResult, PluginRpcValidationIssue, PluginSdkApp, PluginSettingsSectionProps, PluginSettingsSectionRegistration, PluginSettingsState, PluginSidebarFooterActionContext, PluginSidebarFooterActionProps, PluginSidebarFooterActionRegistration, PluginSidebarProject, PluginSidebarPullRequest, PluginSidebarSplitPane, PluginSidebarThread, PluginSidebarThreadActions, PluginSidebarThreadActivity, PluginSidebarThreadIndicator, PluginSidebarThreadPullRequestState, PluginSidebarThreadSplit, PluginSidebarThreadsState, PluginSidebarWorkspaceKind, PluginThreadHeaderActionProps, PluginThreadHeaderActionRegistration, PluginThreadListProps, PluginThreadListRegistration, PluginThreadPanelActionContext, PluginThreadPanelActionRegistration, PluginThreadPanelProps, ProviderModelPickerProps, ProviderModelPickerValue, StandardSchemaV1, StandardSchemaV1InferInput, StandardSchemaV1InferOutput, StandardSchemaV1Issue, StandardSchemaV1Result, ThreadChatMessageAction, ThreadChatMessageReference, ThreadChatProps };

@@ -32,6 +32,12 @@ import {
   PopoverTrigger,
 } from "@bb/shared-ui/popover";
 import { Switch } from "@bb/shared-ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@bb/shared-ui/tooltip";
 import { LIST_HOVER_TRANSITION } from "@bb/shared-ui/motion";
 import {
   MENU_ITEM_LAST_HOVERED_CLASS,
@@ -188,6 +194,8 @@ interface ModelReasoningPickerProps {
   selectedProviderId: string;
   /** Omit to render the provider as locked (tabs hidden, can't switch). */
   onSelectedProviderChange?: (value: string) => void;
+  /** Reports the provider previewed for the current open picker session. */
+  onProviderPreviewChange?: (value: string | null) => void;
   hasMultipleProviders: boolean;
   // Model state
   modelValue: string;
@@ -197,7 +205,7 @@ interface ModelReasoningPickerProps {
   modelIsLoading?: boolean;
   modelLoadFailed?: boolean;
   modelLoadError?: SystemExecutionOptionsModelLoadError | null;
-  onModelChange: (value: string) => void;
+  onModelChange: (value: string, providerId: string) => void;
   /**
    * Optional case-normaliser for raw model names returned during a provider
    * handoff. The picker itself drops the brand prefix at render — callers only
@@ -214,6 +222,10 @@ interface ModelReasoningPickerProps {
   fastModeEnabled: boolean;
   onFastModeChange: (enabled: boolean) => void;
   showFastModeToggle: boolean;
+  /** Whether reasoning choices and labels render. Defaults to true. */
+  showReasoning?: boolean;
+  /** Whether composer model-picker commands and hints apply. Defaults to true. */
+  commandShortcutsEnabled?: boolean;
   serviceTierSupportByProvider?: Record<string, boolean>;
   className?: string;
   /** Render with the dim, hover-to-foreground treatment used inside the prompt box. */
@@ -245,6 +257,7 @@ export function ModelReasoningPicker({
   providerRouting,
   selectedProviderId,
   onSelectedProviderChange,
+  onProviderPreviewChange,
   hasMultipleProviders,
   modelValue,
   modelOptions,
@@ -260,6 +273,8 @@ export function ModelReasoningPicker({
   fastModeEnabled,
   onFastModeChange,
   showFastModeToggle,
+  showReasoning = true,
+  commandShortcutsEnabled = true,
   serviceTierSupportByProvider,
   className,
   muted,
@@ -272,7 +287,10 @@ export function ModelReasoningPicker({
   const isPointerCoarse = usePointerCoarse();
   const [open, setOpen] = useState(defaultOpen);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const toggleShortcut = useAppCommandShortcut("modelPicker.toggle");
+  const registeredToggleShortcut = useAppCommandShortcut("modelPicker.toggle");
+  const toggleShortcut = commandShortcutsEnabled
+    ? registeredToggleShortcut
+    : null;
   const [searchQuery, setSearchQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -346,9 +364,10 @@ export function ModelReasoningPicker({
   const selectedReasoningOption = reasoningOptions.find(
     (r) => r.value === reasoningValue,
   );
-  const triggerReasoningLabel = hasSelectedModel
-    ? (selectedReasoningOption?.label ?? null)
-    : null;
+  const triggerReasoningLabel =
+    showReasoning && hasSelectedModel
+      ? (selectedReasoningOption?.label ?? null)
+      : null;
 
   // Shares its cache key with the committed `useSystemExecutionOptions` call
   // in the caller's hook, so the controlled-provider handoff is a cache hit.
@@ -417,9 +436,11 @@ export function ModelReasoningPicker({
       }
       return options;
     }, [previewDefaultModel]);
-  const activeReasoningOptions = isPreviewing
-    ? previewReasoningOptions
-    : reasoningOptions;
+  const activeReasoningOptions = showReasoning
+    ? isPreviewing
+      ? previewReasoningOptions
+      : reasoningOptions
+    : [];
   const activeModelLoadError = isPreviewing
     ? (previewQuery.data?.modelLoadError ?? null)
     : (modelLoadError ?? null);
@@ -520,11 +541,12 @@ export function ModelReasoningPicker({
   // callback performs the same reset without changing the visible close frame.
   const resetBrowseState = useCallback(() => {
     setPreviewProviderId(null);
+    onProviderPreviewChange?.(null);
     setShowMoreModels(false);
     setMoreModelsOpen(false);
     setSearchQuery("");
     setActiveIndex(-1);
-  }, []);
+  }, [onProviderPreviewChange]);
   const handleMobileContentAnimationEnd = useCallback(
     (isOpen: boolean) => {
       if (!isOpen) {
@@ -540,11 +562,12 @@ export function ModelReasoningPicker({
 
   const handleModelSelect = useCallback(
     (model: string) => {
-      onModelChange(model);
+      onModelChange(model, activeProviderId);
       setMoreModelsOpen(false);
       setPreviewProviderId(null);
+      onProviderPreviewChange?.(null);
     },
-    [onModelChange],
+    [activeProviderId, onModelChange, onProviderPreviewChange],
   );
 
   // Scope Cmd+Shift+M and the cycle chords to one composer of the focused pane.
@@ -586,10 +609,14 @@ export function ModelReasoningPicker({
     },
     [disabled, isFocusedPane, isSplitPane],
   );
-  useAppCommandContext("modelPickerOpen", open && !disabled);
+  useAppCommandContext(
+    "modelPickerOpen",
+    commandShortcutsEnabled && open && !disabled,
+  );
   useAppCommandHandler(
     "modelPicker.toggle",
     ({ target }) => {
+      if (!commandShortcutsEnabled) return false;
       const action = resolveModelPickerToggle({
         open,
         ...resolveCommandScope(target),
@@ -612,12 +639,14 @@ export function ModelReasoningPicker({
   useAppCommandHandler(
     "modelPicker.cycleModel",
     ({ target }) => {
+      if (!commandShortcutsEnabled) return false;
       if (!ownsModelPickerChord({ open, ...resolveCommandScope(target) })) {
         return false;
       }
       const next = nextCycleValue(modelOptions, modelValue);
       if (next !== null) {
-        onModelChange(next);
+        onModelChange(next, selectedProviderId);
+        onProviderPreviewChange?.(null);
         setPreviewProviderId(null);
       }
       return true;
@@ -627,12 +656,14 @@ export function ModelReasoningPicker({
   useAppCommandHandler(
     "modelPicker.cycleReasoning",
     ({ target }) => {
+      if (!commandShortcutsEnabled) return false;
       if (!ownsModelPickerChord({ open, ...resolveCommandScope(target) })) {
         return false;
       }
       const next = nextCycleValue(reasoningOptions, reasoningValue);
       if (next !== null) {
         onReasoningChange(next);
+        onProviderPreviewChange?.(null);
         setPreviewProviderId(null);
       }
       return true;
@@ -645,15 +676,23 @@ export function ModelReasoningPicker({
       // still needs a concrete model when the user immediately picks one of
       // the new provider's reasoning levels.
       if (isPreviewing && previewDefaultModel) {
-        onModelChange(previewDefaultModel.model);
+        onModelChange(previewDefaultModel.model, activeProviderId);
       }
       onReasoningChange(level);
       // Keep the combined picker open so the model and reasoning effort can be
       // changed together without reopening it between selections.
+      onProviderPreviewChange?.(null);
       setPreviewProviderId(null);
       setMoreModelsOpen(false);
     },
-    [isPreviewing, previewDefaultModel, onModelChange, onReasoningChange],
+    [
+      activeProviderId,
+      isPreviewing,
+      previewDefaultModel,
+      onModelChange,
+      onProviderPreviewChange,
+      onReasoningChange,
+    ],
   );
 
   const handleFooterActionClick = useCallback(() => {
@@ -662,9 +701,10 @@ export function ModelReasoningPicker({
     }
     footerAction.onClick();
     setOpen(false);
+    onProviderPreviewChange?.(null);
     setPreviewProviderId(null);
     setMoreModelsOpen(false);
-  }, [footerAction]);
+  }, [footerAction, onProviderPreviewChange]);
 
   // Typing resets the highlight to "none" so a narrowing query never leaves a
   // stale row selected; the user arrows into the fresh results.
@@ -759,8 +799,10 @@ export function ModelReasoningPicker({
       size="sm"
       aria-label={
         toggleShortcut
-          ? `Provider, model and reasoning (${toggleShortcut.label})`
-          : "Provider, model and reasoning"
+          ? `${showReasoning ? "Provider, model and reasoning" : `Provider and model: ${selectedProviderLabel}, ${triggerTitleModelLabel}`} (${toggleShortcut.label})`
+          : showReasoning
+            ? "Provider, model and reasoning"
+            : `Provider and model: ${selectedProviderLabel}, ${triggerTitleModelLabel}`
       }
       aria-keyshortcuts={toggleShortcut?.ariaKeyshortcuts}
       disabled={disabled}
@@ -853,52 +895,61 @@ export function ModelReasoningPicker({
                 : "bg-surface-recessed",
             )}
           >
-            {providerOptions.map((provider) => {
-              const TabIcon = provider.icon;
-              const isActive = provider.value === activeProviderId;
-              return (
-                <button
-                  key={provider.value}
-                  type="button"
-                  title={provider.label}
-                  onClick={() => {
-                    if (provider.value !== activeProviderId) {
-                      onSelectedProviderChange?.(provider.value);
-                      setPreviewProviderId(
-                        provider.value === selectedProviderId
-                          ? null
-                          : provider.value,
-                      );
-                      // The new tab lists a different provider's models, so
-                      // drop the query and highlight from the previous tab.
-                      setSearchQuery("");
-                      setActiveIndex(-1);
-                    }
-                  }}
-                  className={cn(
-                    "flex items-center justify-center border-b-2 focus-visible:outline-none",
-                    LIST_HOVER_TRANSITION,
-                    COARSE_POINTER_PROVIDER_TAB_SIZE_CLASS,
-                    isActive
-                      ? "border-foreground text-foreground"
-                      : "border-transparent text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {TabIcon ? (
-                    <TabIcon className={COARSE_POINTER_ICON_SIZE_CLASS} />
-                  ) : (
-                    <span
-                      className={cn(
-                        "font-medium",
-                        COARSE_POINTER_TEXT_SM_CLASS,
-                      )}
-                    >
-                      {provider.label.charAt(0)}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+            <TooltipProvider>
+              {providerOptions.map((provider) => {
+                const TabIcon = provider.icon;
+                const isActive = provider.value === activeProviderId;
+                const providerButton = (
+                  <button
+                    type="button"
+                    aria-label={provider.label}
+                    aria-pressed={isActive}
+                    onClick={() => {
+                      if (provider.value !== activeProviderId) {
+                        onSelectedProviderChange?.(provider.value);
+                        onProviderPreviewChange?.(provider.value);
+                        setPreviewProviderId(
+                          provider.value === selectedProviderId
+                            ? null
+                            : provider.value,
+                        );
+                        // The new tab lists a different provider's models, so
+                        // drop the query and highlight from the previous tab.
+                        setSearchQuery("");
+                        setActiveIndex(-1);
+                      }
+                    }}
+                    className={cn(
+                      "flex items-center justify-center border-b-2 focus-visible:outline-none",
+                      LIST_HOVER_TRANSITION,
+                      COARSE_POINTER_PROVIDER_TAB_SIZE_CLASS,
+                      isActive
+                        ? "border-foreground text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {TabIcon ? (
+                      <TabIcon className={COARSE_POINTER_ICON_SIZE_CLASS} />
+                    ) : (
+                      <span
+                        className={cn(
+                          "font-medium",
+                          COARSE_POINTER_TEXT_SM_CLASS,
+                        )}
+                      >
+                        {provider.label.charAt(0)}
+                      </span>
+                    )}
+                  </button>
+                );
+                return (
+                  <Tooltip key={provider.value}>
+                    <TooltipTrigger asChild>{providerButton}</TooltipTrigger>
+                    <TooltipContent side="top">{provider.label}</TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </TooltipProvider>
           </div>
         ) : null}
 

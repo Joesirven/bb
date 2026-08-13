@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useEffect, useState } from "react";
-import { cleanup, fireEvent, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type {
@@ -22,6 +22,7 @@ import { defineRpcContract } from "../../rpc-contract.js";
 installTestPluginRuntime();
 const {
   definePluginApp,
+  experimental_ProviderModelPicker: ProviderModelPicker,
   ThreadChat,
   useComposer,
   useComposerView,
@@ -52,6 +53,38 @@ function TypedRpcPanel() {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+describe("experimental_ProviderModelPicker test runtime", () => {
+  it("applies provider and model edits as one controlled pair", () => {
+    const onChange = vi.fn();
+    const picker = render(
+      <ProviderModelPicker
+        value={{ providerId: "codex", model: "gpt-5.5" }}
+        onChange={onChange}
+        hostId="host-test"
+      />,
+    );
+
+    fireEvent.change(picker.getByRole("textbox", { name: "Provider ID" }), {
+      target: { value: "claude-code" },
+    });
+    fireEvent.change(picker.getByRole("textbox", { name: "Model" }), {
+      target: { value: "claude-opus-4-7" },
+    });
+    expect(onChange).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      picker.getByRole("button", { name: "Apply provider and model" }),
+    );
+    expect(onChange).toHaveBeenCalledWith({
+      providerId: "claude-code",
+      model: "claude-opus-4-7",
+    });
+    expect(picker.getByTestId("bb-provider-model-picker").dataset.hostId).toBe(
+      "host-test",
+    );
+  });
 });
 
 function Panel({ subPath }: PluginNavPanelProps) {

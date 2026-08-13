@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { MarkdownProps, PluginSdkApp } from "@bb/plugin-sdk";
 import { PluginNewThreadComposer } from "@/components/plugin/PluginNewThreadComposer";
+import { PluginProviderModelPicker } from "@/components/plugin/PluginProviderModelPicker";
 import { PluginThreadChat } from "@/components/plugin/PluginThreadChat";
 import { MarkdownPreview } from "@/components/ui/markdown-preview";
 import type {
@@ -58,6 +59,9 @@ export const pluginSdkAppImplementation = {
   // Experimental (see docs/api_to_audit.md): the create-side counterpart to
   // ThreadChat.
   experimental_NewThreadComposer: PluginNewThreadComposer,
+  // Experimental (see docs/api_to_audit.md): the app's provider/model catalog
+  // and native picker, without exposing internal query or option shapes.
+  experimental_ProviderModelPicker: PluginProviderModelPicker,
   // Experimental (see docs/api_to_audit.md): the sidebar thread-list data
   // plane, for plugins that replace the list itself.
   experimental_useSidebarThreads: useSidebarThreads,
