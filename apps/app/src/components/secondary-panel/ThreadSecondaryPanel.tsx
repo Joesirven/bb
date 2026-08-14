@@ -247,7 +247,14 @@ export interface ThreadSecondaryPanelProps {
    */
   browserDeck?: ReactNode;
   /** Builds a retained browser surface for a pane-local browser tab. */
-  browserDeckForTab?: (tabId: string) => ReactNode;
+  browserDeckForTab?: (
+    tabId: string,
+    pane: {
+      isFocused: boolean;
+      isVisible: boolean;
+      onFocusPane: () => void;
+    },
+  ) => ReactNode;
   /**
    * Whether the active panel tab is a browser tab. When true the deck fills the
    * content region and the normal content slot is suppressed.
@@ -625,6 +632,31 @@ export function ThreadSecondaryPanel({
     </Button>
   );
 
+  const renderConversationCollapseButton = () =>
+    conversationCollapseControl ? (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className={cn(
+              HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
+              CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
+              "shrink-0",
+              usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
+            )}
+            onClick={conversationCollapseControl.onClick}
+            aria-label={conversationCollapseControl.label}
+            aria-pressed={conversationCollapseControl.isFullScreen}
+          >
+            <Icon name={conversationCollapseControl.iconName} />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{conversationCollapseControl.label}</TooltipContent>
+      </Tooltip>
+    ) : null;
+
   const renderPanelSurface = ({
     activeSurfaceTab,
     browserSurface,
@@ -753,31 +785,7 @@ export function ThreadSecondaryPanel({
             </div>
             {showOuterControls ? (
               <div className="flex min-w-0 shrink-0 items-center gap-1">
-                {conversationCollapseControl ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className={cn(
-                          HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
-                          CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
-                          "shrink-0",
-                          usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
-                        )}
-                        onClick={conversationCollapseControl.onClick}
-                        aria-label={conversationCollapseControl.label}
-                        aria-pressed={conversationCollapseControl.isFullScreen}
-                      >
-                        <Icon name={conversationCollapseControl.iconName} />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {conversationCollapseControl.label}
-                    </TooltipContent>
-                  </Tooltip>
-                ) : null}
+                {renderConversationCollapseButton()}
                 {renderAsDrawer || inlinePanelToggle === "button" ? (
                   renderHidePanelButton()
                 ) : inlinePanelToggle === "reserved" ? (
@@ -853,6 +861,7 @@ export function ThreadSecondaryPanel({
   };
 
   const shouldEnableSidebarSplits =
+    !renderAsDrawer &&
     splitPanelStateId !== undefined &&
     splitTabModels !== undefined &&
     renderSplitTabContent !== undefined;
@@ -901,6 +910,7 @@ export function ThreadSecondaryPanel({
       }}
       onGlobalTabReorder={onFileTabReorder}
       panelStateId={splitPanelStateId}
+      renderConversationControl={renderConversationCollapseButton}
       renderHideControl={renderHidePanelButton}
       tabs={splitTabs}
       renderPane={(pane: SidebarSplitPaneRenderArgs) => {
@@ -932,7 +942,11 @@ export function ThreadSecondaryPanel({
           activeSurfaceTab: paneModel,
           browserSurface:
             isPaneBrowserActive && browserDeckForTab
-              ? browserDeckForTab(activePaneTabId)
+              ? browserDeckForTab(activePaneTabId, {
+                  isFocused: pane.isFocused,
+                  isVisible: pane.isVisible,
+                  onFocusPane: pane.onFocusPane,
+                })
               : null,
           fileSurfaceContent: paneFileContent,
           fileSurfaceContentFillsRegion:

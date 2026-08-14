@@ -62,7 +62,9 @@ type ThreadSecondaryPanelProps = Omit<
 > & {
   renderBrowserDeck?: (args: {
     activeBrowserTabId?: string | null;
+    canHandleBrowserCommands?: boolean;
     canShowNativeBrowserView: boolean;
+    onNativeFocus?: () => void;
   }) => ReactNode;
 };
 
@@ -226,14 +228,28 @@ function ThreadDetailSecondaryContentBody({
   const { renderBrowserDeck, ...threadSecondaryPanelProps } =
     stableSecondaryPanel;
   const browserDeck = useMemo(
-    () => renderBrowserDeck?.({ canShowNativeBrowserView }),
+    () =>
+      renderBrowserDeck?.({
+        canHandleBrowserCommands: canShowNativeBrowserView,
+        canShowNativeBrowserView,
+      }),
     [canShowNativeBrowserView, renderBrowserDeck],
   );
   const browserDeckForTab = useCallback(
-    (activeBrowserTabId: string) =>
+    (
+      activeBrowserTabId: string,
+      pane: {
+        isFocused: boolean;
+        isVisible: boolean;
+        onFocusPane: () => void;
+      },
+    ) =>
       renderBrowserDeck?.({
         activeBrowserTabId,
-        canShowNativeBrowserView,
+        canHandleBrowserCommands:
+          canShowNativeBrowserView && pane.isVisible && pane.isFocused,
+        canShowNativeBrowserView: canShowNativeBrowserView && pane.isVisible,
+        onNativeFocus: pane.onFocusPane,
       }),
     [canShowNativeBrowserView, renderBrowserDeck],
   );

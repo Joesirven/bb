@@ -155,7 +155,10 @@ import {
   ThreadStorageFilePreviewTabContent,
   WorkspaceFilePreviewTabContent,
 } from "@/components/secondary-panel/ThreadSecondaryPanelTabContent";
-import { BrowserTabDeck } from "@/components/secondary-panel/BrowserTabDeck";
+import {
+  BrowserTabDeck,
+  BrowserTabLifecycleObserver,
+} from "@/components/secondary-panel/BrowserTabDeck";
 import type { BrowserAddressFocusRequest } from "@/components/secondary-panel/BrowserTabContent";
 import {
   SIDE_CHAT_PLUGIN_ID,
@@ -708,10 +711,14 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
   // the deck stays mounted independently of which tab is active.
   const renderBrowserDeck = useCallback(
     ({
+      canHandleBrowserCommands,
       canShowNativeBrowserView,
+      onNativeFocus,
       activeBrowserTabId = activeBrowserTab?.id ?? null,
     }: {
+      canHandleBrowserCommands?: boolean;
       canShowNativeBrowserView: boolean;
+      onNativeFocus?: () => void;
       activeBrowserTabId?: string | null;
     }) => {
       if (browserDeckThreadId === null) {
@@ -727,6 +734,8 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
           }
           environmentId={browserDeckEnvironmentId}
           canShowNativeBrowserView={canShowNativeBrowserView}
+          canHandleBrowserCommands={canHandleBrowserCommands}
+          onNativeFocus={onNativeFocus}
           threadId={browserDeckThreadId}
           onUpdate={updateBrowserTab}
         />
@@ -2726,6 +2735,10 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
     <MarkdownLocalFileContextMenuContext.Provider
       value={getLocalFileContextMenuItems}
     >
+      <BrowserTabLifecycleObserver
+        browserTabs={browserTabs}
+        threadId={thread.id}
+      />
       <UrlOpenRoutingProvider
         openInAppBrowser={
           canOpenUrlsInAppBrowser ? openBrowserTabAndReveal : null

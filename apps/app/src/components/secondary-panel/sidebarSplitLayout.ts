@@ -18,14 +18,28 @@ import {
   type SplitSide,
 } from "@/lib/split-layout";
 import type { SplitDropTarget } from "@/lib/split-drag";
+import {
+  FIXED_PANEL_TABS_IDLE_EXPIRY_MS,
+  createGitDiffFixedPanelTab,
+  createThreadInfoFixedPanelTab,
+  getFixedPanelTabsStateStorageKey,
+} from "@/lib/fixed-panel-tabs-state";
 
 export const SIDEBAR_SPLIT_LAYOUT_STORAGE_VERSION = 1;
 export const SIDEBAR_SPLIT_LAYOUT_STORAGE_PREFIX =
   "bb.thread.secondaryPanelSplitLayout";
-export const SIDEBAR_FIXED_INFO_TAB_ID = "thread-info:thread-info:none";
-export const SIDEBAR_FIXED_DIFF_TAB_ID = "git-diff:git-diff:none";
+export const SIDEBAR_FIXED_INFO_TAB_ID = createThreadInfoFixedPanelTab().id;
+export const SIDEBAR_FIXED_DIFF_TAB_ID = createGitDiffFixedPanelTab().id;
 
 const SIDEBAR_SPLIT_PLUGIN_ID = "bb-secondary-panel-split";
+const NORMALIZED_SPLIT_SIZE_EPSILON = 1e-9;
+
+export interface SidebarSplitStorage {
+  readonly length: number;
+  getItem(key: string): string | null;
+  key(index: number): string | null;
+  removeItem(key: string): void;
+}
 
 export interface SidebarTabGroup {
   id: string;
@@ -91,6 +105,89 @@ export function createSidebarSplitState(
   };
 }
 
+function areStringArraysEqual(
+  first: readonly string[],
+  second: readonly string[],
+): boolean {
+  return (
+    first.length === second.length &&
+    first.every((value, index) => value === second[index])
+  );
+}
+
+function areLayoutNodesEqual(first: LayoutNode, second: LayoutNode): boolean {
+  if (first.type !== second.type) return false;
+  if (first.type === "pane" || second.type === "pane") {
+    return (
+      first.type === "pane" &&
+      second.type === "pane" &&
+      first.paneId === second.paneId &&
+      sidebarPaneGroupId(first) === sidebarPaneGroupId(second)
+    );
+  }
+  return (
+    first.dir === second.dir &&
+    first.sizes.length === second.sizes.length &&
+    first.sizes.every((size, index) => size === second.sizes[index]) &&
+    first.children.length === second.children.length &&
+    first.children.every((child, index) => {
+      const otherChild = second.children[index];
+      return otherChild !== undefined && areLayoutNodesEqual(child, otherChild);
+    })
+  );
+}
+
+function areSidebarSplitStatesEqual(
+  first: SidebarSplitState,
+  second: SidebarSplitState,
+): boolean {
+  const firstGroupIds = Object.keys(first.groups);
+  const secondGroupIds = Object.keys(second.groups);
+  if (
+    first.version !== second.version ||
+    first.layout.focusedPaneId !== second.layout.focusedPaneId ||
+    first.maximizedPaneId !== second.maximizedPaneId ||
+    !areStringArraysEqual(firstGroupIds, secondGroupIds) ||
+    !areLayoutNodesEqual(first.layout.root, second.layout.root)
+  ) {
+    return false;
+  }
+  return firstGroupIds.every((groupId) => {
+    const firstGroup = first.groups[groupId];
+    const secondGroup = second.groups[groupId];
+    return (
+      firstGroup !== undefined &&
+      secondGroup !== undefined &&
+      firstGroup.id === secondGroup.id &&
+      firstGroup.activeTabId === secondGroup.activeTabId &&
+      areStringArraysEqual(firstGroup.tabIds, secondGroup.tabIds)
+    );
+  });
+}
+
+function preserveSidebarSplitStateIdentity(
+  current: SidebarSplitState,
+  next: SidebarSplitState,
+): SidebarSplitState {
+  return areSidebarSplitStatesEqual(current, next) ? current : next;
+}
+
+/**
+ * True only for the exact state reconstructed when no sidebar split has ever
+ * been made. Single-pane states produced by recombination may carry a distinct
+ * tab order or identity and therefore remain persistence-worthy.
+ */
+export function isCanonicalSidebarSplitState(
+  state: SidebarSplitState,
+  availableTabIds: readonly string[],
+  activeTabId: string,
+): boolean {
+  return areSidebarSplitStatesEqual(
+    state,
+    createSidebarSplitState(availableTabIds, activeTabId),
+  );
+}
+
 export function getSidebarGroupForPane(
   state: SidebarSplitState,
   paneId: string,
@@ -115,6 +212,14 @@ export function selectSidebarTab(
   ) {
     return state;
   }
+  const maximizedPaneId = state.maximizedPaneId === null ? null : paneId;
+  if (
+    group.activeTabId === tabId &&
+    state.layout.focusedPaneId === paneId &&
+    state.maximizedPaneId === maximizedPaneId
+  ) {
+    return state;
+  }
   return {
     ...state,
     groups: {
@@ -122,7 +227,7 @@ export function selectSidebarTab(
       [groupId]: { ...group, activeTabId: tabId },
     },
     layout: setFocus(state.layout, paneId),
-    maximizedPaneId: state.maximizedPaneId === null ? null : paneId,
+    maximizedPaneId,
   };
 }
 
@@ -131,10 +236,17 @@ export function focusSidebarPane(
   paneId: string,
 ): SidebarSplitState {
   if (findPane(state.layout.root, paneId) === null) return state;
+  const maximizedPaneId = state.maximizedPaneId === null ? null : paneId;
+  if (
+    state.layout.focusedPaneId === paneId &&
+    state.maximizedPaneId === maximizedPaneId
+  ) {
+    return state;
+  }
   return {
     ...state,
     layout: setFocus(state.layout, paneId),
-    maximizedPaneId: state.maximizedPaneId === null ? null : paneId,
+    maximizedPaneId,
   };
 }
 
@@ -376,7 +488,10 @@ export function reconcileSidebarSplitState(
     const groupId = sidebarPaneGroupId(pane);
     const group = groupId === null ? undefined : groups[groupId];
     if (groupId === null || group === undefined) {
-      return createSidebarSplitState(available, activeTabId);
+      return preserveSidebarSplitStateIdentity(
+        state,
+        createSidebarSplitState(available, activeTabId),
+      );
     }
     const tabIds = group.tabIds.filter((id) => {
       if (!allowed.has(id) || seen.has(id)) return false;
@@ -405,7 +520,10 @@ export function reconcileSidebarSplitState(
   const missing = available.filter((id) => !seen.has(id));
   const focusedGroup = getSidebarGroupForPane(next, next.layout.focusedPaneId);
   if (focusedGroup === null)
-    return createSidebarSplitState(available, activeTabId);
+    return preserveSidebarSplitStateIdentity(
+      state,
+      createSidebarSplitState(available, activeTabId),
+    );
   if (missing.length > 0 || focusedGroup.tabIds.length === 0) {
     next = {
       ...next,
@@ -432,7 +550,10 @@ export function reconcileSidebarSplitState(
     ) {
       const fallbackActiveTabId = group.tabIds[0];
       if (fallbackActiveTabId === undefined) {
-        return createSidebarSplitState(available, activeTabId);
+        return preserveSidebarSplitStateIdentity(
+          state,
+          createSidebarSplitState(available, activeTabId),
+        );
       }
       next = {
         ...next,
@@ -449,7 +570,7 @@ export function reconcileSidebarSplitState(
   ) {
     next = { ...next, maximizedPaneId: null };
   }
-  return next;
+  return preserveSidebarSplitStateIdentity(state, next);
 }
 
 const paneContentSchema = z
@@ -481,6 +602,16 @@ const layoutNodeSchema: z.ZodType<LayoutNode> = z.lazy(() =>
       .refine((node) => node.sizes.length === node.children.length),
   ]),
 );
+
+function hasNormalizedSplitSizes(node: LayoutNode): boolean {
+  if (node.type === "pane") return true;
+  const total = node.sizes.reduce((sum, size) => sum + size, 0);
+  return (
+    Math.abs(total - 1) <= NORMALIZED_SPLIT_SIZE_EPSILON &&
+    node.children.every(hasNormalizedSplitSizes)
+  );
+}
+
 const sidebarSplitStateSchema: z.ZodType<SidebarSplitState> = z
   .object({
     version: z.literal(SIDEBAR_SPLIT_LAYOUT_STORAGE_VERSION),
@@ -502,10 +633,151 @@ const sidebarSplitStateSchema: z.ZodType<SidebarSplitState> = z
       .strict(),
     maximizedPaneId: z.string().min(1).nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((state, context) => {
+    const panes = listPanes(state.layout.root);
+    const paneIds = panes.map((pane) => pane.paneId);
+    const groupIds = panes.map(sidebarPaneGroupId);
+    const storedGroupIds = Object.keys(state.groups);
+
+    if (panes.length > MAX_PANES) {
+      context.addIssue({
+        code: "custom",
+        message: `A sidebar split supports at most ${MAX_PANES} panes`,
+        path: ["layout", "root"],
+      });
+    }
+    if (new Set(paneIds).size !== paneIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Sidebar pane IDs must be unique",
+        path: ["layout", "root"],
+      });
+    }
+    if (!paneIds.includes(state.layout.focusedPaneId)) {
+      context.addIssue({
+        code: "custom",
+        message: "The focused sidebar pane must exist",
+        path: ["layout", "focusedPaneId"],
+      });
+    }
+    if (
+      state.maximizedPaneId !== null &&
+      !paneIds.includes(state.maximizedPaneId)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "The maximized sidebar pane must exist",
+        path: ["maximizedPaneId"],
+      });
+    }
+    if (!hasNormalizedSplitSizes(state.layout.root)) {
+      context.addIssue({
+        code: "custom",
+        message: "Sidebar split sizes must be normalized",
+        path: ["layout", "root"],
+      });
+    }
+
+    const referencedGroupIds = groupIds.filter(
+      (groupId): groupId is string => groupId !== null,
+    );
+    if (
+      referencedGroupIds.length !== panes.length ||
+      new Set(referencedGroupIds).size !== referencedGroupIds.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Each sidebar pane must reference one unique tab group",
+        path: ["layout", "root"],
+      });
+    }
+    if (
+      referencedGroupIds.length !== storedGroupIds.length ||
+      referencedGroupIds.some((groupId) => state.groups[groupId] === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Sidebar tab groups must map one-to-one to panes",
+        path: ["groups"],
+      });
+    }
+    for (const [groupKey, group] of Object.entries(state.groups)) {
+      if (group.id !== groupKey) {
+        context.addIssue({
+          code: "custom",
+          message: "Sidebar tab group keys must match their IDs",
+          path: ["groups", groupKey, "id"],
+        });
+      }
+      if (!group.tabIds.includes(group.activeTabId)) {
+        context.addIssue({
+          code: "custom",
+          message: "A sidebar group's active tab must belong to that group",
+          path: ["groups", groupKey, "activeTabId"],
+        });
+      }
+    }
+  });
 
 export function sidebarSplitStorageKey(panelStateId: string): string {
   return `${SIDEBAR_SPLIT_LAYOUT_STORAGE_PREFIX}.${panelStateId}`;
+}
+
+function getFixedPanelTabsLastUsedAt(
+  storedValue: string | null,
+): number | null {
+  if (storedValue === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(storedValue);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const lastUsedAt = Reflect.get(parsed, "lastUsedAt");
+    return typeof lastUsedAt === "number" &&
+      Number.isInteger(lastUsedAt) &&
+      lastUsedAt >= 0
+      ? lastUsedAt
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Removes sidebar layouts when their owning fixed-tab record is absent,
+ * malformed, or older than the fixed-tab cache's established idle lifetime.
+ * The layout stays in its current raw v1 format; retention metadata continues
+ * to have one owner in the fixed-tab record.
+ */
+export function pruneSidebarSplitStorage({
+  storage,
+  now,
+}: {
+  storage: SidebarSplitStorage;
+  now: number;
+}): void {
+  const splitKeys: string[] = [];
+  const keyPrefix = `${SIDEBAR_SPLIT_LAYOUT_STORAGE_PREFIX}.`;
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index);
+    if (key?.startsWith(keyPrefix)) splitKeys.push(key);
+  }
+
+  for (const splitKey of splitKeys) {
+    const panelStateId = splitKey.slice(keyPrefix.length);
+    const fixedPanelTabsKey = getFixedPanelTabsStateStorageKey({
+      threadId: panelStateId,
+    });
+    const lastUsedAt = getFixedPanelTabsLastUsedAt(
+      storage.getItem(fixedPanelTabsKey),
+    );
+    if (
+      panelStateId.length === 0 ||
+      lastUsedAt === null ||
+      now - lastUsedAt > FIXED_PANEL_TABS_IDLE_EXPIRY_MS
+    ) {
+      storage.removeItem(splitKey);
+    }
+  }
 }
 
 export function parseSidebarSplitState(

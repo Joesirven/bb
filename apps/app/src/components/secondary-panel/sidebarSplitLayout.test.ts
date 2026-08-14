@@ -1,14 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { MAX_PANES, countPanes, listPanes } from "@/lib/split-layout";
 import {
+  FIXED_PANEL_TABS_IDLE_EXPIRY_MS,
+  createGitDiffFixedPanelTab,
+  createThreadInfoFixedPanelTab,
+  getFixedPanelTabsStateStorageKey,
+} from "@/lib/fixed-panel-tabs-state";
+import {
   SIDEBAR_FIXED_DIFF_TAB_ID,
   SIDEBAR_FIXED_INFO_TAB_ID,
   closeSidebarPane,
   createSidebarSplitState,
+  focusSidebarPane,
   getSidebarGroupForPane,
+  isCanonicalSidebarSplitState,
   moveSidebarPaneToSide,
   moveSidebarTab,
   parseSidebarSplitState,
+  pruneSidebarSplitStorage,
   reconcileSidebarSplitState,
   reorderSidebarTab,
   resizeSidebarSplit,
@@ -16,9 +25,56 @@ import {
   serializeSidebarSplitState,
   swapSidebarPanes,
   toggleSidebarPaneMaximize,
+  sidebarPaneNode,
+  sidebarSplitStorageKey,
+  type SidebarSplitState,
+  type SidebarSplitStorage,
 } from "./sidebarSplitLayout";
 
 const TABS = [SIDEBAR_FIXED_INFO_TAB_ID, SIDEBAR_FIXED_DIFF_TAB_ID, "file-a"];
+
+function createMemoryStorage(
+  initialEntries: Record<string, string>,
+): SidebarSplitStorage & { has(key: string): boolean } {
+  const entries = new Map(Object.entries(initialEntries));
+  return {
+    get length() {
+      return entries.size;
+    },
+    getItem: (key) => entries.get(key) ?? null,
+    has: (key) => entries.has(key),
+    key: (index) => [...entries.keys()][index] ?? null,
+    removeItem: (key) => {
+      entries.delete(key);
+    },
+  };
+}
+
+function persistedStateWithPaneCount(count: number): SidebarSplitState {
+  const groups = Object.fromEntries(
+    Array.from({ length: count }, (_, index) => {
+      const groupId = `group-${index}`;
+      const tabId = `tab-${index}`;
+      return [groupId, { id: groupId, tabIds: [tabId], activeTabId: tabId }];
+    }),
+  );
+  return {
+    version: 1,
+    groups,
+    layout: {
+      root: {
+        type: "split",
+        dir: "row",
+        sizes: Array.from({ length: count }, () => 1 / count),
+        children: Array.from({ length: count }, (_, index) =>
+          sidebarPaneNode(`pane-${index}`, `group-${index}`),
+        ),
+      },
+      focusedPaneId: "pane-0",
+    },
+    maximizedPaneId: null,
+  };
+}
 
 function splitOff(
   state: ReturnType<typeof createSidebarSplitState>,
@@ -35,6 +91,11 @@ function splitOff(
 }
 
 describe("sidebar split layout", () => {
+  it("derives fixed sidebar identities from the canonical fixed-panel tabs", () => {
+    expect(SIDEBAR_FIXED_INFO_TAB_ID).toBe(createThreadInfoFixedPanelTab().id);
+    expect(SIDEBAR_FIXED_DIFF_TAB_ID).toBe(createGitDiffFixedPanelTab().id);
+  });
+
   it("defaults old or invalid persisted state to the unchanged single pane", () => {
     const state = parseSidebarSplitState(
       JSON.stringify({ version: 0 }),
@@ -45,6 +106,178 @@ describe("sidebar split layout", () => {
     expect(
       getSidebarGroupForPane(state, state.layout.focusedPaneId)?.tabIds,
     ).toEqual(TABS);
+  });
+
+  it("continues to parse the current raw v1 state without an envelope", () => {
+    const split = splitOff(
+      createSidebarSplitState(TABS, SIDEBAR_FIXED_INFO_TAB_ID),
+      "file-a",
+    );
+    const parsed = parseSidebarSplitState(
+      JSON.stringify(split),
+      TABS,
+      SIDEBAR_FIXED_INFO_TAB_ID,
+    );
+    expect(parsed).toEqual(split);
+  });
+
+  it("preserves state identity for no-op reconciliation, selection, and focus", () => {
+    const state = createSidebarSplitState(TABS, SIDEBAR_FIXED_INFO_TAB_ID);
+    expect(
+      reconcileSidebarSplitState(state, TABS, SIDEBAR_FIXED_INFO_TAB_ID),
+    ).toBe(state);
+    expect(
+      selectSidebarTab(
+        state,
+        state.layout.focusedPaneId,
+        SIDEBAR_FIXED_INFO_TAB_ID,
+      ),
+    ).toBe(state);
+    expect(focusSidebarPane(state, state.layout.focusedPaneId)).toBe(state);
+  });
+
+  it("recognizes only the exact reconstructible unsplit default", () => {
+    const canonical = createSidebarSplitState(TABS, SIDEBAR_FIXED_INFO_TAB_ID);
+    expect(
+      isCanonicalSidebarSplitState(canonical, TABS, SIDEBAR_FIXED_INFO_TAB_ID),
+    ).toBe(true);
+
+    const differentIdentity = createSidebarSplitState(
+      TABS,
+      SIDEBAR_FIXED_INFO_TAB_ID,
+      { groupId: "group-restored", paneId: "pane-restored" },
+    );
+    expect(
+      isCanonicalSidebarSplitState(
+        differentIdentity,
+        TABS,
+        SIDEBAR_FIXED_INFO_TAB_ID,
+      ),
+    ).toBe(false);
+
+    const reordered = createSidebarSplitState(
+      [...TABS].reverse(),
+      SIDEBAR_FIXED_INFO_TAB_ID,
+    );
+    expect(
+      isCanonicalSidebarSplitState(reordered, TABS, SIDEBAR_FIXED_INFO_TAB_ID),
+    ).toBe(false);
+  });
+
+  it("prunes split records with the fixed-tab cache's 14-day retention", () => {
+    const now = 50 * 24 * 60 * 60 * 1000;
+    const freshThreadId = "thread-fresh";
+    const boundaryThreadId = "thread-boundary";
+    const expiredThreadId = "thread-expired";
+    const missingThreadId = "thread-missing";
+    const freshSplitKey = sidebarSplitStorageKey(freshThreadId);
+    const boundarySplitKey = sidebarSplitStorageKey(boundaryThreadId);
+    const expiredSplitKey = sidebarSplitStorageKey(expiredThreadId);
+    const missingSplitKey = sidebarSplitStorageKey(missingThreadId);
+    const storage = createMemoryStorage({
+      [freshSplitKey]: "fresh-layout",
+      [boundarySplitKey]: "boundary-layout",
+      [expiredSplitKey]: "expired-layout",
+      [missingSplitKey]: "orphaned-layout",
+      [getFixedPanelTabsStateStorageKey({ threadId: freshThreadId })]:
+        JSON.stringify({ lastUsedAt: now - 1_000 }),
+      [getFixedPanelTabsStateStorageKey({ threadId: boundaryThreadId })]:
+        JSON.stringify({
+          lastUsedAt: now - FIXED_PANEL_TABS_IDLE_EXPIRY_MS,
+        }),
+      [getFixedPanelTabsStateStorageKey({ threadId: expiredThreadId })]:
+        JSON.stringify({
+          lastUsedAt: now - FIXED_PANEL_TABS_IDLE_EXPIRY_MS - 1,
+        }),
+      unrelated: "keep-me",
+    });
+
+    pruneSidebarSplitStorage({ storage, now });
+
+    expect(storage.has(freshSplitKey)).toBe(true);
+    expect(storage.has(boundarySplitKey)).toBe(true);
+    expect(storage.has(expiredSplitKey)).toBe(false);
+    expect(storage.has(missingSplitKey)).toBe(false);
+    expect(storage.has("unrelated")).toBe(true);
+  });
+
+  it("rejects persisted layouts that exceed the shared pane cap", () => {
+    const oversized = persistedStateWithPaneCount(MAX_PANES + 1);
+    const availableTabIds = Array.from(
+      { length: MAX_PANES + 1 },
+      (_, index) => `tab-${index}`,
+    );
+    const parsed = parseSidebarSplitState(
+      JSON.stringify(oversized),
+      availableTabIds,
+      "tab-0",
+    );
+    expect(isCanonicalSidebarSplitState(parsed, availableTabIds, "tab-0")).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    {
+      name: "duplicate pane ids",
+      mutate: (state: SidebarSplitState) => {
+        if (state.layout.root.type === "split") {
+          const second = state.layout.root.children[1];
+          if (second?.type === "pane") second.paneId = "pane-0";
+        }
+      },
+    },
+    {
+      name: "duplicate group references",
+      mutate: (state: SidebarSplitState) => {
+        if (state.layout.root.type === "split") {
+          state.layout.root.children[1] = sidebarPaneNode("pane-1", "group-0");
+        }
+      },
+    },
+    {
+      name: "a stale focused pane",
+      mutate: (state: SidebarSplitState) => {
+        state.layout.focusedPaneId = "pane-missing";
+      },
+    },
+    {
+      name: "a mismatched group key and id",
+      mutate: (state: SidebarSplitState) => {
+        const group = state.groups["group-0"];
+        if (group !== undefined) group.id = "group-renamed";
+      },
+    },
+    {
+      name: "an orphan group",
+      mutate: (state: SidebarSplitState) => {
+        state.groups.orphan = {
+          id: "orphan",
+          tabIds: ["orphan-tab"],
+          activeTabId: "orphan-tab",
+        };
+      },
+    },
+    {
+      name: "non-normalized split sizes",
+      mutate: (state: SidebarSplitState) => {
+        if (state.layout.root.type === "split") {
+          state.layout.root.sizes = [0.75, 0.75];
+        }
+      },
+    },
+  ])("falls back safely for $name", ({ mutate }) => {
+    const malformed = persistedStateWithPaneCount(2);
+    mutate(malformed);
+    const availableTabIds = ["tab-0", "tab-1"];
+    const parsed = parseSidebarSplitState(
+      JSON.stringify(malformed),
+      availableTabIds,
+      "tab-0",
+    );
+    expect(isCanonicalSidebarSplitState(parsed, availableTabIds, "tab-0")).toBe(
+      true,
+    );
   });
 
   it("round-trips a split and reconciles newly opened tabs into the focused pane", () => {

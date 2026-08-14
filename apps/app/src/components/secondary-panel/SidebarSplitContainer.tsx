@@ -50,9 +50,11 @@ import {
   createSidebarSplitState,
   focusSidebarPane,
   getSidebarGroupForPane,
+  isCanonicalSidebarSplitState,
   moveSidebarPaneToSide,
   moveSidebarTab,
   parseSidebarSplitState,
+  pruneSidebarSplitStorage,
   reconcileSidebarSplitState,
   reorderSidebarTab,
   resizeSidebarSplit,
@@ -77,12 +79,15 @@ export interface SidebarSplitTabDescriptor {
 
 export interface SidebarSplitPaneRenderArgs {
   group: SidebarTabGroup;
+  isFocused: boolean;
   isSplitPane: boolean;
+  isVisible: boolean;
   onBeginTabDrag: (
     tabId: string,
     event: ReactPointerEvent<HTMLElement>,
   ) => void;
   onReorderTab: (request: SecondaryPanelTabReorderRequest) => void;
+  onFocusPane: () => void;
   onSelectTab: (tabId: string) => void;
   paneId: string;
 }
@@ -92,6 +97,7 @@ interface SidebarSplitContainerProps {
   onActivateTab: (tabId: string) => void;
   onGlobalTabReorder: (request: SecondaryPanelTabReorderRequest) => void;
   panelStateId: string;
+  renderConversationControl: () => ReactNode;
   renderHideControl: () => ReactNode;
   renderPane: (args: SidebarSplitPaneRenderArgs) => ReactNode;
   tabs: readonly SidebarSplitTabDescriptor[];
@@ -102,139 +108,199 @@ export function SidebarSplitContainer({
   onActivateTab,
   onGlobalTabReorder,
   panelStateId,
+  renderConversationControl,
   renderHideControl,
   renderPane,
   tabs,
 }: SidebarSplitContainerProps) {
   const availableTabIds = useMemo(() => tabs.map((tab) => tab.id), [tabs]);
   const storageKey = sidebarSplitStorageKey(panelStateId);
+  const [initialStorageValue] = useState<string | null>(() =>
+    typeof window === "undefined"
+      ? null
+      : window.localStorage.getItem(storageKey),
+  );
   const [state, setState] = useState<SidebarSplitState>(() =>
     typeof window === "undefined"
       ? createSidebarSplitState(availableTabIds, activeTabId)
       : parseSidebarSplitState(
-          window.localStorage.getItem(storageKey),
+          initialStorageValue,
           availableTabIds,
           activeTabId,
         ),
   );
-  const nextGroupSequence = useRef(1);
+  const stateRef = useRef(state);
+  const lastPersistedValueRef = useRef({
+    storageKey,
+    value: initialStorageValue,
+  });
   const previousActiveTabId = useRef(activeTabId);
   const dimsInactiveSplits = useAtomValue(dimInactiveSplitsAtom);
   const paneCount = countPanes(state.layout.root);
   const hasMultiplePanes = paneCount > 1;
 
   useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
     const shouldFollowExternalSelection =
       previousActiveTabId.current !== activeTabId;
     previousActiveTabId.current = activeTabId;
-    setState((current) => {
-      const reconciled = reconcileSidebarSplitState(
-        current,
-        availableTabIds,
-        activeTabId,
-      );
-      if (!shouldFollowExternalSelection) return reconciled;
-      const activePane = listPanes(reconciled.layout.root).find((pane) =>
-        getSidebarGroupForPane(reconciled, pane.paneId)?.tabIds.includes(
-          activeTabId,
-        ),
-      );
-      return activePane === undefined
+    const current = stateRef.current;
+    const reconciled = reconcileSidebarSplitState(
+      current,
+      availableTabIds,
+      activeTabId,
+    );
+    const activePane = shouldFollowExternalSelection
+      ? listPanes(reconciled.layout.root).find((pane) =>
+          getSidebarGroupForPane(reconciled, pane.paneId)?.tabIds.includes(
+            activeTabId,
+          ),
+        )
+      : undefined;
+    const next =
+      activePane === undefined
         ? reconciled
         : selectSidebarTab(reconciled, activePane.paneId, activeTabId);
-    });
+    if (next !== current) {
+      stateRef.current = next;
+      setState(next);
+    }
   }, [activeTabId, availableTabIds]);
 
   useEffect(() => {
-    window.localStorage.setItem(storageKey, serializeSidebarSplitState(state));
-  }, [state, storageKey]);
+    pruneSidebarSplitStorage({
+      storage: window.localStorage,
+      now: Date.now(),
+    });
+    lastPersistedValueRef.current = {
+      storageKey,
+      value: window.localStorage.getItem(storageKey),
+    };
+  }, [storageKey]);
 
-  const activateFocusedGroup = useCallback(
-    (next: SidebarSplitState) => {
-      const group = getSidebarGroupForPane(next, next.layout.focusedPaneId);
-      if (group !== null) onActivateTab(group.activeTabId);
+  useEffect(() => {
+    const persistedValue = isCanonicalSidebarSplitState(
+      state,
+      availableTabIds,
+      activeTabId,
+    )
+      ? null
+      : serializeSidebarSplitState(state);
+    const previous = lastPersistedValueRef.current;
+    if (
+      previous.storageKey === storageKey &&
+      previous.value === persistedValue
+    ) {
+      return;
+    }
+    if (persistedValue === null) {
+      window.localStorage.removeItem(storageKey);
+    } else {
+      window.localStorage.setItem(storageKey, persistedValue);
+    }
+    lastPersistedValueRef.current = { storageKey, value: persistedValue };
+  }, [activeTabId, availableTabIds, state, storageKey]);
+
+  const commitState = useCallback(
+    (
+      update: (current: SidebarSplitState) => SidebarSplitState,
+      activateFocusedTab = false,
+    ) => {
+      const current = stateRef.current;
+      const next = update(current);
+      if (next === current) return current;
+      stateRef.current = next;
+      setState(next);
+      if (activateFocusedTab) {
+        const focusedGroup = getSidebarGroupForPane(
+          next,
+          next.layout.focusedPaneId,
+        );
+        if (focusedGroup !== null && focusedGroup.activeTabId !== activeTabId) {
+          onActivateTab(focusedGroup.activeTabId);
+        }
+      }
+      return next;
     },
-    [onActivateTab],
+    [activeTabId, onActivateTab],
   );
 
   const selectTab = useCallback(
     (paneId: string, tabId: string) => {
-      setState((current) => selectSidebarTab(current, paneId, tabId));
-      onActivateTab(tabId);
+      commitState((current) => selectSidebarTab(current, paneId, tabId));
+      if (tabId !== activeTabId) onActivateTab(tabId);
     },
-    [onActivateTab],
+    [activeTabId, commitState, onActivateTab],
   );
 
   const focusPane = useCallback(
     (paneId: string) => {
-      setState((current) => {
-        const next = focusSidebarPane(current, paneId);
-        if (next !== current) activateFocusedGroup(next);
-        return next;
-      });
+      commitState((current) => focusSidebarPane(current, paneId), true);
     },
-    [activateFocusedGroup],
+    [commitState],
   );
 
   const closePane = useCallback(
     (paneId: string) => {
-      setState((current) => {
-        const next = closeSidebarPane(current, paneId);
-        if (next !== current) activateFocusedGroup(next);
-        return next;
-      });
+      commitState((current) => closeSidebarPane(current, paneId), true);
     },
-    [activateFocusedGroup],
+    [commitState],
   );
 
-  const toggleMaximize = useCallback((paneId: string) => {
-    setState((current) => toggleSidebarPaneMaximize(current, paneId));
-  }, []);
+  const toggleMaximize = useCallback(
+    (paneId: string) => {
+      commitState((current) => toggleSidebarPaneMaximize(current, paneId));
+    },
+    [commitState],
+  );
 
-  const movePaneToSide = useCallback((paneId: string, side: SplitSide) => {
-    setState((current) => {
-      const rects = computePaneRects(current.layout.root);
-      const target = listPanes(current.layout.root)
-        .filter((pane) => pane.paneId !== paneId)
-        .sort((first, second) => {
-          const a = rects.get(first.paneId);
-          const b = rects.get(second.paneId);
-          if (a === undefined || b === undefined) return 0;
-          const edge = (rect: typeof a) => {
-            switch (side) {
-              case "left":
-                return rect.x;
-              case "right":
-                return -(rect.x + rect.w);
-              case "top":
-                return rect.y;
-              case "bottom":
-                return -(rect.y + rect.h);
-            }
-          };
-          return edge(a) - edge(b);
-        })[0];
-      return target === undefined
-        ? current
-        : moveSidebarPaneToSide(current, paneId, target.paneId, side);
-    });
-  }, []);
+  const movePaneToSide = useCallback(
+    (paneId: string, side: SplitSide) => {
+      commitState((current) => {
+        const rects = computePaneRects(current.layout.root);
+        const target = listPanes(current.layout.root)
+          .filter((pane) => pane.paneId !== paneId)
+          .sort((first, second) => {
+            const a = rects.get(first.paneId);
+            const b = rects.get(second.paneId);
+            if (a === undefined || b === undefined) return 0;
+            const edge = (rect: typeof a) => {
+              switch (side) {
+                case "left":
+                  return rect.x;
+                case "right":
+                  return -(rect.x + rect.w);
+                case "top":
+                  return rect.y;
+                case "bottom":
+                  return -(rect.y + rect.h);
+              }
+            };
+            return edge(a) - edge(b);
+          })[0];
+        return target === undefined
+          ? current
+          : moveSidebarPaneToSide(current, paneId, target.paneId, side);
+      }, true);
+    },
+    [commitState],
+  );
 
   const moveTab = useCallback(
     (sourcePaneId: string, tabId: string, target: SplitDropTarget) => {
-      setState((current) => {
-        let groupId: string;
-        do {
-          groupId = `group-split-${nextGroupSequence.current++}`;
-        } while (current.groups[groupId] !== undefined);
-        const next = moveSidebarTab(current, sourcePaneId, tabId, target, {
-          groupId,
-        });
-        if (next !== current) activateFocusedGroup(next);
-        return next;
-      });
+      const groupId = nextSidebarSplitGroupId(stateRef.current);
+      commitState(
+        (current) =>
+          moveSidebarTab(current, sourcePaneId, tabId, target, {
+            groupId,
+          }),
+        true,
+      );
     },
-    [activateFocusedGroup],
+    [commitState],
   );
 
   const beginTabDrag = useCallback(
@@ -315,13 +381,18 @@ export function SidebarSplitContainer({
         shouldEngage: (x, y) =>
           Math.hypot(x - startX, y - startY) > PANE_DRAG_ENGAGE_DISTANCE_PX,
         onEngage: restoreMaximize
-          ? () => setState((current) => ({ ...current, maximizedPaneId: null }))
+          ? () =>
+              commitState((current) =>
+                current.maximizedPaneId === null
+                  ? current
+                  : { ...current, maximizedPaneId: null },
+              )
           : undefined,
         decide: (targetPaneId, zone) =>
           decidePaneDrop({ zone, isSelf: targetPaneId === paneId }),
         onDrop: (target) => {
-          setState((current) => {
-            const next =
+          commitState(
+            (current) =>
               target.zone === "center"
                 ? swapSidebarPanes(current, paneId, target.paneId)
                 : moveSidebarPaneToSide(
@@ -329,26 +400,29 @@ export function SidebarSplitContainer({
                     paneId,
                     target.paneId,
                     target.zone,
-                  );
-            if (next !== current) activateFocusedGroup(next);
-            return next;
-          });
+                  ),
+            true,
+          );
         },
         onEnd: restoreMaximize
           ? () =>
-              setState((current) => ({
-                ...current,
-                maximizedPaneId: current.layout.focusedPaneId,
-              }))
+              commitState((current) =>
+                current.maximizedPaneId === current.layout.focusedPaneId
+                  ? current
+                  : {
+                      ...current,
+                      maximizedPaneId: current.layout.focusedPaneId,
+                    },
+              )
           : undefined,
       });
     },
-    [activateFocusedGroup, state.layout.root, state.maximizedPaneId],
+    [commitState, state.layout.root, state.maximizedPaneId],
   );
 
   const reorderTab = useCallback(
     (paneId: string, request: SecondaryPanelTabReorderRequest) => {
-      setState((current) =>
+      commitState((current) =>
         reorderSidebarTab(
           current,
           paneId,
@@ -358,16 +432,16 @@ export function SidebarSplitContainer({
       );
       onGlobalTabReorder(request);
     },
-    [onGlobalTabReorder],
+    [commitState, onGlobalTabReorder],
   );
 
   const resize = useCallback(
     (path: SplitPath, childIndex: number, fraction: number) => {
-      setState((current) =>
+      commitState((current) =>
         resizeSidebarSplit(current, path, childIndex, fraction),
       );
     },
-    [],
+    [commitState],
   );
 
   const firstPane = listPanes(state.layout.root)[0];
@@ -378,10 +452,13 @@ export function SidebarSplitContainer({
     // eslint-disable-next-line react-hooks/refs
     return renderPane({
       group,
+      isFocused: true,
       isSplitPane: false,
+      isVisible: true,
       onBeginTabDrag: (tabId, event) =>
         beginTabDrag(firstPane.paneId, tabId, event),
       onReorderTab: (request) => reorderTab(firstPane.paneId, request),
+      onFocusPane: () => focusPane(firstPane.paneId),
       onSelectTab: (tabId) => selectTab(firstPane.paneId, tabId),
       paneId: firstPane.paneId,
     });
@@ -397,6 +474,7 @@ export function SidebarSplitContainer({
         dimsInactiveSplits={dimsInactiveSplits}
         focusedPaneId={state.layout.focusedPaneId}
         maximizedPaneId={state.maximizedPaneId}
+        renderConversationControl={renderConversationControl}
         renderHideControl={renderHideControl}
         renderPane={renderPane}
         state={state}
@@ -443,6 +521,7 @@ interface SidebarSplitTreeProps {
   onSelectTab: (paneId: string, tabId: string) => void;
   onToggleMaximize: (paneId: string) => void;
   path: number[];
+  renderConversationControl: () => ReactNode;
   renderHideControl: () => ReactNode;
   renderPane: (args: SidebarSplitPaneRenderArgs) => ReactNode;
   state: SidebarSplitState;
@@ -462,7 +541,7 @@ function SidebarSplitTree(props: SidebarSplitTreeProps) {
       )}
     >
       {node.children.map((child, index) => (
-        <Fragment key={`${props.path.join("-")}-${index}`}>
+        <Fragment key={sidebarSplitSubtreeKey(child)}>
           {index > 0 ? (
             <SidebarSplitDivider
               dir={node.dir}
@@ -510,7 +589,9 @@ function SidebarSplitLeaf(
     props.tabs.find((tab) => tab.id === group.activeTabId) ?? props.tabs[0];
   if (activeDescriptor === undefined) return null;
   const reserveOuterControl =
-    isMaximized || (props.isTopRow && props.isRightEdge);
+    props.maximizedPaneId !== null
+      ? isMaximized
+      : props.isTopRow && props.isRightEdge;
   const context: PaneContextValue = {
     paneId: pane.paneId,
     isFocused,
@@ -604,16 +685,20 @@ function SidebarSplitLeaf(
                 >
                   <Icon name="ClosePluginPane" />
                 </Button>
+                {reserveOuterControl ? props.renderConversationControl() : null}
                 {reserveOuterControl ? props.renderHideControl() : null}
               </>
             }
           />
           {props.renderPane({
             group,
+            isFocused,
             isSplitPane: true,
+            isVisible: !hiddenByMaximize,
             onBeginTabDrag: (tabId, event) =>
               props.onBeginTabDrag(pane.paneId, tabId, event),
             onReorderTab: (request) => props.onReorderTab(pane.paneId, request),
+            onFocusPane: () => props.onFocusPane(pane.paneId),
             onSelectTab: (tabId) => props.onSelectTab(pane.paneId, tabId),
             paneId: pane.paneId,
           })}
@@ -679,7 +764,10 @@ function SidebarSplitDivider({
         previousGrow + nextGrow > 0
           ? previousGrow + nextGrow
           : 1;
+      const previousFlex = previous.style.flex;
+      const nextFlex = next.style.flex;
       let pendingFraction: number | null = null;
+      let finished = false;
       const move = (moveEvent: PointerEvent) => {
         const pointer = horizontal ? moveEvent.clientX : moveEvent.clientY;
         const fraction = clampSplitPairFraction((pointer - start) / span);
@@ -687,21 +775,26 @@ function SidebarSplitDivider({
         previous.style.flex = `${pairTotal * fraction} 1 0px`;
         next.style.flex = `${pairTotal * (1 - fraction)} 1 0px`;
       };
-      const finish = () => {
+      const finish = (commit: boolean) => {
+        if (finished) return;
+        finished = true;
         delete divider.dataset.dragging;
         hitTarget.removeEventListener("pointermove", move);
-        hitTarget.removeEventListener("pointerup", finish);
+        hitTarget.removeEventListener("pointerup", onUp);
         hitTarget.removeEventListener("pointercancel", cancel);
         clearResizeCursor();
         document.body.style.userSelect = "";
-        if (pendingFraction !== null) onResize(pendingFraction);
+        if (commit && pendingFraction !== null) {
+          onResize(pendingFraction);
+          return;
+        }
+        previous.style.flex = previousFlex;
+        next.style.flex = nextFlex;
       };
-      const cancel = () => {
-        pendingFraction = null;
-        finish();
-      };
+      const onUp = () => finish(true);
+      const cancel = () => finish(false);
       hitTarget.addEventListener("pointermove", move);
-      hitTarget.addEventListener("pointerup", finish);
+      hitTarget.addEventListener("pointerup", onUp);
       hitTarget.addEventListener("pointercancel", cancel);
     },
     [horizontal, onResize],
@@ -733,4 +826,16 @@ function SidebarSplitDivider({
       />
     </div>
   );
+}
+
+function nextSidebarSplitGroupId(state: SidebarSplitState): string {
+  let sequence = 1;
+  while (state.groups[`group-split-${sequence}`] !== undefined) sequence += 1;
+  return `group-split-${sequence}`;
+}
+
+function sidebarSplitSubtreeKey(node: LayoutNode): string {
+  return listPanes(node)
+    .map((pane) => `${pane.paneId}:${sidebarPaneGroupId(pane) ?? "unknown"}`)
+    .join("|");
 }

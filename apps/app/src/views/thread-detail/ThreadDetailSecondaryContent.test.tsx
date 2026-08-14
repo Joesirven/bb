@@ -27,7 +27,14 @@ const drawerShellState = vi.hoisted(() => ({
 }));
 const secondaryPanelMockState = vi.hoisted(() => ({
   browserDeckForTab: undefined as
-    | ((activeBrowserTabId: string) => ReactNode)
+    | ((
+        activeBrowserTabId: string,
+        pane: {
+          isFocused: boolean;
+          isVisible: boolean;
+          onFocusPane: () => void;
+        },
+      ) => ReactNode)
     | undefined,
 }));
 
@@ -310,10 +317,11 @@ function makeThread(
 }
 
 function createBrowserDeckRenderer(order?: string[]): RenderBrowserDeck {
-  return vi.fn(({ canShowNativeBrowserView }) => {
+  return vi.fn(({ canHandleBrowserCommands, canShowNativeBrowserView }) => {
     order?.push(`render:${String(canShowNativeBrowserView)}`);
     return (
       <div
+        data-can-handle-browser-commands={String(canHandleBrowserCommands)}
         data-can-show-native-browser-view={String(canShowNativeBrowserView)}
         data-testid="browser-deck"
       />
@@ -554,14 +562,17 @@ describe("ThreadDetailSecondaryContent compact drawer settling", () => {
     });
 
     expect(renderBrowserDeck).toHaveBeenLastCalledWith({
+      canHandleBrowserCommands: true,
       canShowNativeBrowserView: true,
     });
     view.rerenderWith({ isFocusedHosted: false });
     expect(renderBrowserDeck).toHaveBeenLastCalledWith({
+      canHandleBrowserCommands: false,
       canShowNativeBrowserView: false,
     });
     view.rerenderWith({ isFocusedHosted: true });
     expect(renderBrowserDeck).toHaveBeenLastCalledWith({
+      canHandleBrowserCommands: true,
       canShowNativeBrowserView: true,
     });
     expect(order.filter((entry) => entry.startsWith("render:"))).toEqual([
@@ -583,10 +594,58 @@ describe("ThreadDetailSecondaryContent compact drawer settling", () => {
     const browserDeckForTab = secondaryPanelMockState.browserDeckForTab;
     expect(browserDeckForTab).toBeDefined();
     if (browserDeckForTab === undefined) return;
-    render(<>{browserDeckForTab("browser-split")}</>);
+    const onFocusPane = vi.fn();
+    render(
+      <>
+        {browserDeckForTab("browser-split", {
+          isFocused: true,
+          isVisible: true,
+          onFocusPane,
+        })}
+      </>,
+    );
     expect(renderBrowserDeck).toHaveBeenLastCalledWith({
       activeBrowserTabId: "browser-split",
+      canHandleBrowserCommands: true,
       canShowNativeBrowserView: true,
+      onNativeFocus: expect.any(Function),
+    });
+    const focusedDeckArgs = vi.mocked(renderBrowserDeck).mock.calls.at(-1)?.[0];
+    focusedDeckArgs?.onNativeFocus?.();
+    expect(onFocusPane).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    render(
+      <>
+        {browserDeckForTab("browser-split", {
+          isFocused: false,
+          isVisible: true,
+          onFocusPane: vi.fn(),
+        })}
+      </>,
+    );
+    expect(renderBrowserDeck).toHaveBeenLastCalledWith({
+      activeBrowserTabId: "browser-split",
+      canHandleBrowserCommands: false,
+      canShowNativeBrowserView: true,
+      onNativeFocus: expect.any(Function),
+    });
+
+    cleanup();
+    render(
+      <>
+        {browserDeckForTab("browser-split", {
+          isFocused: true,
+          isVisible: false,
+          onFocusPane: vi.fn(),
+        })}
+      </>,
+    );
+    expect(renderBrowserDeck).toHaveBeenLastCalledWith({
+      activeBrowserTabId: "browser-split",
+      canHandleBrowserCommands: false,
+      canShowNativeBrowserView: false,
+      onNativeFocus: expect.any(Function),
     });
   });
 
@@ -796,6 +855,7 @@ describe("ThreadDetailSecondaryContent compact drawer settling", () => {
     });
 
     expect(compactRenderBrowserDeck).toHaveBeenLastCalledWith({
+      canHandleBrowserCommands: false,
       canShowNativeBrowserView: false,
     });
     realizeDrawerPanel(frames);
@@ -804,6 +864,7 @@ describe("ThreadDetailSecondaryContent compact drawer settling", () => {
       frames.flushAll();
     });
     expect(compactRenderBrowserDeck).toHaveBeenLastCalledWith({
+      canHandleBrowserCommands: true,
       canShowNativeBrowserView: true,
     });
 
@@ -818,12 +879,14 @@ describe("ThreadDetailSecondaryContent compact drawer settling", () => {
     });
 
     expect(wideRenderBrowserDeck).toHaveBeenLastCalledWith({
+      canHandleBrowserCommands: false,
       canShowNativeBrowserView: false,
     });
 
     wideView.rerenderWith({ isSecondaryPanelOpen: true });
 
     expect(wideRenderBrowserDeck).toHaveBeenLastCalledWith({
+      canHandleBrowserCommands: true,
       canShowNativeBrowserView: true,
     });
     expect(dispatchBrowserViewBoundsSync).toHaveBeenCalledTimes(1);

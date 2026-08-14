@@ -9,12 +9,14 @@ import {
 import {
   BB_DESKTOP_BROWSER_ATTACH_CHANNEL,
   BB_DESKTOP_BROWSER_DETACH_CHANNEL,
+  BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
   BB_DESKTOP_BROWSER_GO_BACK_CHANNEL,
   BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
   BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
   BB_DESKTOP_BROWSER_RELOAD_CHANNEL,
   BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
   BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
+  BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
   BB_DESKTOP_BROWSER_STOP_CHANNEL,
 } from "../src/desktop-browser-ipc.js";
 import { registerDesktopBrowserIpc } from "../src/desktop-browser-main-ipc.js";
@@ -94,6 +96,7 @@ class RecordingDesktopBrowserViewManager implements DesktopBrowserViewManager {
   public readonly destroyAllCalls: string[] = [];
   public readonly detachCalls: DetachCall[] = [];
   public readonly endWindowResizeCalls: WindowResizeCall[] = [];
+  public readonly focusCalls: TabCommandCall[] = [];
   public readonly goBackCalls: TabCommandCall[] = [];
   public readonly goForwardCalls: TabCommandCall[] = [];
   public readonly navigateCalls: NavigateCall[] = [];
@@ -101,6 +104,7 @@ class RecordingDesktopBrowserViewManager implements DesktopBrowserViewManager {
   public readonly reloadCalls: TabCommandCall[] = [];
   public readonly setBoundsCalls: SetBoundsCall[] = [];
   public readonly setVisibleCalls: SetVisibleCall[] = [];
+  public readonly setVisibleWithoutFocusCalls: SetVisibleCall[] = [];
   public readonly stopCalls: TabCommandCall[] = [];
 
   attach(args: AttachCall): void {
@@ -121,6 +125,10 @@ class RecordingDesktopBrowserViewManager implements DesktopBrowserViewManager {
 
   endWindowResize(hostWindow: WindowResizeCall): void {
     this.endWindowResizeCalls.push(hostWindow);
+  }
+
+  focus(args: TabCommandCall): void {
+    this.focusCalls.push(args);
   }
 
   goBack(args: TabCommandCall): void {
@@ -149,6 +157,10 @@ class RecordingDesktopBrowserViewManager implements DesktopBrowserViewManager {
 
   setVisible(args: SetVisibleCall): void {
     this.setVisibleCalls.push(args);
+  }
+
+  setVisibleWithoutFocus(args: SetVisibleCall): void {
+    this.setVisibleWithoutFocusCalls.push(args);
   }
 
   stop(args: TabCommandCall): void {
@@ -228,6 +240,11 @@ describe("registerDesktopBrowserIpc", () => {
       payload: { tabId: "browser:a" },
       sender: renderer.sender,
     });
+    sendBrowserIpc({
+      channel: BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
+      payload: { tabId: "browser:a" },
+      sender: renderer.sender,
+    });
 
     expect(manager.attachCalls).toHaveLength(1);
     expect(manager.attachCalls[0]?.hostWindow).toBe(renderer.hostWindow);
@@ -236,6 +253,9 @@ describe("registerDesktopBrowserIpc", () => {
     expect(manager.navigateCalls[0]?.hostWindow).toBe(renderer.hostWindow);
     expect(manager.navigateCalls[0]?.request).toEqual(navigateRequest);
     expect(manager.reloadCalls).toEqual([
+      { hostWindow: renderer.hostWindow, tabId: "browser:a" },
+    ]);
+    expect(manager.focusCalls).toEqual([
       { hostWindow: renderer.hostWindow, tabId: "browser:a" },
     ]);
   });
@@ -312,6 +332,11 @@ describe("registerDesktopBrowserIpc", () => {
       sender: renderer.sender,
     });
     sendBrowserIpc({
+      channel: BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
+      payload: visibleRequest,
+      sender: renderer.sender,
+    });
+    sendBrowserIpc({
       channel: BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
       payload: visibleRequest,
       sender: renderer.sender,
@@ -319,6 +344,7 @@ describe("registerDesktopBrowserIpc", () => {
 
     for (const channel of [
       BB_DESKTOP_BROWSER_DETACH_CHANNEL,
+      BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
       BB_DESKTOP_BROWSER_GO_BACK_CHANNEL,
       BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
       BB_DESKTOP_BROWSER_RELOAD_CHANNEL,
@@ -356,6 +382,9 @@ describe("registerDesktopBrowserIpc", () => {
       { hostWindow: renderer.hostWindow, request: boundsRequest },
     ]);
     expect(manager.setVisibleCalls).toEqual([
+      { hostWindow: renderer.hostWindow, request: visibleRequest },
+    ]);
+    expect(manager.setVisibleWithoutFocusCalls).toEqual([
       { hostWindow: renderer.hostWindow, request: visibleRequest },
     ]);
     expect(manager.detachCalls).toEqual([

@@ -18,6 +18,8 @@ import {
 import {
   BB_DESKTOP_BROWSER_ATTACH_CHANNEL,
   BB_DESKTOP_BROWSER_DETACH_CHANNEL,
+  BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
+  BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
   BB_DESKTOP_BROWSER_GO_BACK_CHANNEL,
   BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
   BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
@@ -26,6 +28,7 @@ import {
   BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
   BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
   BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
+  BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
   BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
   BB_DESKTOP_BROWSER_STATE_CHANNEL,
   BB_DESKTOP_BROWSER_STOP_CHANNEL,
@@ -227,9 +230,11 @@ describe("desktop preload browser API", () => {
     expect(Object.keys(api.browser).sort()).toEqual([
       "attach",
       "detach",
+      "focus",
       "goBack",
       "goForward",
       "navigate",
+      "onFocus",
       "onOpenTab",
       "onScopedOpenTab",
       "onSnapshot",
@@ -237,6 +242,7 @@ describe("desktop preload browser API", () => {
       "reload",
       "setBounds",
       "setVisible",
+      "setVisibleWithoutFocus",
       "stop",
     ]);
     expect(api.browser).not.toHaveProperty("send");
@@ -249,8 +255,10 @@ describe("desktop preload browser API", () => {
     api.browser.goForward("browser:a");
     api.browser.reload("browser:a");
     api.browser.stop("browser:a");
+    api.browser.focus?.("browser:a");
     api.browser.setBounds(boundsRequest);
     api.browser.setVisible(visibleRequest);
+    api.browser.setVisibleWithoutFocus?.(visibleRequest);
     api.setTheme("dark");
     await api.checkForUpdates();
     await expect(api.getWindowState?.()).resolves.toEqual({
@@ -285,11 +293,19 @@ describe("desktop preload browser API", () => {
         payload: { tabId: "browser:a" },
       },
       {
+        channel: BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
+        payload: { tabId: "browser:a" },
+      },
+      {
         channel: BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
         payload: boundsRequest,
       },
       {
         channel: BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
+        payload: visibleRequest,
+      },
+      {
+        channel: BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
         payload: visibleRequest,
       },
       { channel: BB_DESKTOP_SET_THEME_CHANNEL, payload: "dark" },
@@ -346,6 +362,7 @@ describe("desktop preload browser API", () => {
     const states: BbDesktopBrowserState[] = [];
     const openTabs: BbDesktopBrowserOpenTabRequest[] = [];
     const scopedOpenTabs: BbDesktopBrowserScopedOpenTabRequest[] = [];
+    const focusedTabs: string[] = [];
     const snapshots: BbDesktopBrowserSnapshot[] = [];
     let closeWindowRequestCount = 0;
     let openNewTabCount = 0;
@@ -381,6 +398,9 @@ describe("desktop preload browser API", () => {
     api.browser.onScopedOpenTab?.((request) => {
       scopedOpenTabs.push(request);
     });
+    api.browser.onFocus?.((tabId) => {
+      focusedTabs.push(tabId);
+    });
     api.browser.onSnapshot?.((nextSnapshot) => {
       snapshots.push(nextSnapshot);
     });
@@ -411,6 +431,10 @@ describe("desktop preload browser API", () => {
       payload: { tabId: "", url: "https://example.com/scoped-popup" },
     });
     emitIpcPayload({
+      channel: BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
+      payload: { tabId: "", extra: true },
+    });
+    emitIpcPayload({
       channel: BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
       payload: { tabId: "browser:a", dataUrl: 42 },
     });
@@ -429,6 +453,10 @@ describe("desktop preload browser API", () => {
     emitIpcPayload({
       channel: BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
       payload: scopedOpenTab,
+    });
+    emitIpcPayload({
+      channel: BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
+      payload: { tabId: "browser:a" },
     });
     emitIpcPayload({
       channel: BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
@@ -458,6 +486,7 @@ describe("desktop preload browser API", () => {
     expect(states).toEqual([state]);
     expect(openTabs).toEqual([openTab]);
     expect(scopedOpenTabs).toEqual([scopedOpenTab]);
+    expect(focusedTabs).toEqual(["browser:a"]);
     expect(snapshots).toEqual([snapshot]);
     expect(windowStates).toEqual([{ isFullScreen: true }]);
     expect(closeWindowRequestCount).toBe(1);

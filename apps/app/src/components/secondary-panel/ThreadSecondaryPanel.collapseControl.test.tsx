@@ -4,14 +4,24 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PanelGroup } from "react-resizable-panels";
 import { TooltipProvider } from "@bb/shared-ui/tooltip";
+import { SidebarProvider } from "@/components/ui/sidebar";
 import {
   createThreadInfoFixedPanelTab,
   createWorkspaceFilePreviewFixedPanelTab,
 } from "@/lib/fixed-panel-tabs-state";
+import {
+  createSidebarSplitState,
+  moveSidebarTab,
+  serializeSidebarSplitState,
+  sidebarSplitStorageKey,
+} from "./sidebarSplitLayout";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { ThreadSecondaryPanel } from "./ThreadSecondaryPanel";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
 
 const noop = () => {};
 
@@ -125,6 +135,80 @@ describe("ThreadSecondaryPanel compact file content", () => {
 
     expect(screen.getByLabelText("Retained file content")).toBe(fileContent);
   });
+
+  it("renders one active body without changing the saved wide split", () => {
+    const { wrapper: Wrapper } = createQueryClientTestHarness();
+    const activeTab = createWorkspaceFilePreviewFixedPanelTab({
+      environmentId: "env-test",
+      projectId: "project-test",
+      tab: {
+        lineRange: null,
+        path: "src/index.ts",
+        source: { kind: "working-tree" },
+        statusLabel: null,
+      },
+    });
+    const panelStateId = "thread-compact-split";
+    const initial = createSidebarSplitState(
+      [createThreadInfoFixedPanelTab().id, activeTab.id],
+      activeTab.id,
+    );
+    const split = moveSidebarTab(
+      initial,
+      initial.layout.focusedPaneId,
+      activeTab.id,
+      { paneId: initial.layout.focusedPaneId, zone: "right" },
+      { groupId: "group-file" },
+    );
+    const storedSplit = serializeSidebarSplitState(split);
+    const storageKey = sidebarSplitStorageKey(panelStateId);
+    window.localStorage.setItem(storageKey, storedSplit);
+    const renderSplitTabContent = vi.fn(() => (
+      <input aria-label="Unexpected split body" />
+    ));
+
+    render(
+      <Wrapper>
+        <TooltipProvider>
+          <ThreadSecondaryPanel
+            activeTab={activeTab}
+            canUseGitUi={false}
+            fileTabs={[
+              {
+                id: activeTab.id,
+                filename: "index.ts",
+                isActive: true,
+                leadingVisual: null,
+                statusLabel: null,
+                onSelect: noop,
+                onClose: noop,
+              },
+            ]}
+            fileTabContent={<input aria-label="Compact active body" />}
+            isConversationCollapsed={false}
+            isOpen
+            metadataContent={null}
+            onClose={noop}
+            onCollapse={noop}
+            onFileTabReorder={noop}
+            onOpenNewTab={noop}
+            onPanelChange={noop}
+            onPanelFocus={noop}
+            onToggleConversationCollapse={noop}
+            renderAsDrawer
+            renderSplitTabContent={renderSplitTabContent}
+            splitPanelStateId={panelStateId}
+            splitTabModels={[activeTab]}
+          />
+        </TooltipProvider>
+      </Wrapper>,
+    );
+
+    expect(screen.getAllByLabelText("Compact active body")).toHaveLength(1);
+    expect(screen.queryByLabelText("Unexpected split body")).toBeNull();
+    expect(renderSplitTabContent).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(storageKey)).toBe(storedSplit);
+  });
 });
 
 // The full-screen control is the ONLY way back once the conversation is hidden
@@ -174,6 +258,87 @@ describe("ThreadSecondaryPanel full-screen control", () => {
     expect(control.getAttribute("aria-pressed")).toBe("true");
 
     fireEvent.click(control);
+    expect(onToggleConversationCollapse).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps one conversation restore control in the split outer header", () => {
+    const { wrapper: Wrapper } = createQueryClientTestHarness();
+    const fileTab = createWorkspaceFilePreviewFixedPanelTab({
+      environmentId: "env-test",
+      projectId: "project-test",
+      tab: {
+        lineRange: null,
+        path: "src/index.ts",
+        source: { kind: "working-tree" },
+        statusLabel: null,
+      },
+    });
+    const panelStateId = "thread-fullscreen-split";
+    const initial = createSidebarSplitState(
+      [createThreadInfoFixedPanelTab().id, fileTab.id],
+      fileTab.id,
+    );
+    const split = moveSidebarTab(
+      initial,
+      initial.layout.focusedPaneId,
+      fileTab.id,
+      { paneId: initial.layout.focusedPaneId, zone: "right" },
+      { groupId: "group-file" },
+    );
+    window.localStorage.setItem(
+      sidebarSplitStorageKey(panelStateId),
+      serializeSidebarSplitState(split),
+    );
+    const onToggleConversationCollapse = vi.fn();
+
+    render(
+      <Wrapper>
+        <SidebarProvider>
+          <TooltipProvider>
+            <PanelGroup direction="horizontal">
+              <ThreadSecondaryPanel
+                activeTab={fileTab}
+                canUseGitUi={false}
+                fileTabs={[
+                  {
+                    id: fileTab.id,
+                    filename: "index.ts",
+                    isActive: true,
+                    leadingVisual: null,
+                    statusLabel: null,
+                    onSelect: noop,
+                    onClose: noop,
+                  },
+                ]}
+                isConversationCollapsed
+                isOpen
+                metadataContent={null}
+                onClose={noop}
+                onCollapse={noop}
+                onFileTabReorder={noop}
+                onOpenNewTab={noop}
+                onPanelChange={noop}
+                onPanelFocus={noop}
+                onToggleConversationCollapse={onToggleConversationCollapse}
+                renderAsDrawer={false}
+                renderSplitTabContent={() => null}
+                splitPanelStateId={panelStateId}
+                splitTabModels={[fileTab]}
+              />
+            </PanelGroup>
+          </TooltipProvider>
+        </SidebarProvider>
+      </Wrapper>,
+    );
+
+    const restoreControls = screen.getAllByRole("button", {
+      name: "Exit Full Screen",
+    });
+    expect(restoreControls).toHaveLength(1);
+    const restoreControl = restoreControls[0];
+    if (restoreControl === undefined)
+      throw new Error("Missing restore control");
+    fireEvent.click(restoreControl);
     expect(onToggleConversationCollapse).toHaveBeenCalledTimes(1);
   });
 });
