@@ -61,6 +61,7 @@ type ThreadSecondaryPanelProps = Omit<
   | "browserDeck"
 > & {
   renderBrowserDeck?: (args: {
+    activeBrowserTabId?: string | null;
     canShowNativeBrowserView: boolean;
   }) => ReactNode;
 };
@@ -228,6 +229,14 @@ function ThreadDetailSecondaryContentBody({
     () => renderBrowserDeck?.({ canShowNativeBrowserView }),
     [canShowNativeBrowserView, renderBrowserDeck],
   );
+  const browserDeckForTab = useCallback(
+    (activeBrowserTabId: string) =>
+      renderBrowserDeck?.({
+        activeBrowserTabId,
+        canShowNativeBrowserView,
+      }),
+    [canShowNativeBrowserView, renderBrowserDeck],
+  );
 
   const horizontalPanelGroupRef = useRef<ImperativePanelGroupHandle | null>(
     null,
@@ -291,6 +300,7 @@ function ThreadDetailSecondaryContentBody({
         <ThreadSecondaryPanel
           {...threadSecondaryPanelProps}
           browserDeck={browserDeck}
+          browserDeckForTab={browserDeckForTab}
           renderAsDrawer={false}
           isConversationCollapsed={isConversationCollapsedActive}
           onToggleConversationCollapse={onToggleConversationCollapse}
@@ -309,6 +319,7 @@ function ThreadDetailSecondaryContentBody({
       ) : null,
     [
       browserDeck,
+      browserDeckForTab,
       isConversationCollapsedActive,
       metadataContent,
       onToggleConversationCollapse,
@@ -322,6 +333,7 @@ function ThreadDetailSecondaryContentBody({
     <ThreadSecondaryPanel
       {...threadSecondaryPanelProps}
       browserDeck={browserDeck}
+      browserDeckForTab={browserDeckForTab}
       renderAsDrawer={true}
       isConversationCollapsed={false}
       onToggleConversationCollapse={onToggleConversationCollapse}

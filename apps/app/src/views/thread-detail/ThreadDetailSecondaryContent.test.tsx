@@ -25,6 +25,11 @@ type DrawerShellCallback = (open: boolean) => void;
 const drawerShellState = vi.hoisted(() => ({
   onContentAnimationEnd: undefined as DrawerShellCallback | undefined,
 }));
+const secondaryPanelMockState = vi.hoisted(() => ({
+  browserDeckForTab: undefined as
+    | ((activeBrowserTabId: string) => ReactNode)
+    | undefined,
+}));
 
 vi.mock("@/lib/browser-view-bounds-sync", () => ({
   dispatchBrowserViewBoundsSync: vi.fn(),
@@ -138,11 +143,13 @@ vi.mock(
 
     const ThreadSecondaryPanel = ({
       browserDeck,
+      browserDeckForTab,
       inlinePanelToggle,
       isOpen,
       renderAsDrawer,
-    }: ComponentProps<typeof actual.ThreadSecondaryPanel>) =>
-      React.createElement(
+    }: ComponentProps<typeof actual.ThreadSecondaryPanel>) => {
+      secondaryPanelMockState.browserDeckForTab = browserDeckForTab;
+      return React.createElement(
         "section",
         {
           "data-open": String(isOpen),
@@ -153,6 +160,7 @@ vi.mock(
         },
         browserDeck,
       );
+    };
 
     return { ...actual, ThreadSecondaryPanel };
   },
@@ -473,6 +481,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.clearAllMocks();
   drawerShellState.onContentAnimationEnd = undefined;
+  secondaryPanelMockState.browserDeckForTab = undefined;
 });
 
 beforeEach(() => {
@@ -560,6 +569,25 @@ describe("ThreadDetailSecondaryContent compact drawer settling", () => {
       "render:false",
       "render:true",
     ]);
+  });
+
+  it("keeps a split browser pane pinned to its own tab and readiness gate", () => {
+    const renderBrowserDeck = createBrowserDeckRenderer();
+    renderThreadDetail({
+      isCompactViewport: false,
+      isSecondaryPanelOpen: true,
+      renderBrowserDeck,
+      threadId: "thread-1",
+    });
+
+    const browserDeckForTab = secondaryPanelMockState.browserDeckForTab;
+    expect(browserDeckForTab).toBeDefined();
+    if (browserDeckForTab === undefined) return;
+    render(<>{browserDeckForTab("browser-split")}</>);
+    expect(renderBrowserDeck).toHaveBeenLastCalledWith({
+      activeBrowserTabId: "browser-split",
+      canShowNativeBrowserView: true,
+    });
   });
 
   it("orders open-animation completion, rAF, bounds sync, and drawer settled true", () => {

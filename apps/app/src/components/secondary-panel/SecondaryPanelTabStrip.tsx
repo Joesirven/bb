@@ -1,6 +1,7 @@
 import {
   type CSSProperties,
   type MouseEventHandler,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
   useCallback,
   useEffect,
@@ -75,6 +76,10 @@ const INITIAL_OVERFLOW_STATE: TabStripOverflowState = {
 
 export interface SecondaryPanelTabStripProps {
   fileTabs: SecondaryPanelFileTab[];
+  onBeginTabDrag?: (
+    tabId: string,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => void;
   onReorderTab: SecondaryPanelTabReorderHandler;
   usesDesktopChrome: boolean;
   activeTreatment?: "fill" | "underline";
@@ -85,6 +90,10 @@ interface SortableFileTabProps {
   activeTabRef: RefObject<HTMLDivElement | null>;
   dragDisabled: boolean;
   noDragClass: string | null;
+  onBeginTabDrag?: (
+    tabId: string,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => void;
   tab: SecondaryPanelFileTab;
 }
 
@@ -99,6 +108,7 @@ interface SortableFileTabProps {
  */
 export function SecondaryPanelTabStrip({
   fileTabs,
+  onBeginTabDrag,
   onReorderTab,
   usesDesktopChrome,
   activeTreatment = "fill",
@@ -400,6 +410,7 @@ export function SecondaryPanelTabStrip({
               activeTabRef={activeTabRef}
               dragDisabled={dragDisabled}
               noDragClass={noDragClass}
+              onBeginTabDrag={onBeginTabDrag}
               tab={tab}
             />
           ))}
@@ -427,6 +438,7 @@ export function SecondaryPanelTabStrip({
       fileTabs,
       dragDisabled,
       noDragClass,
+      onBeginTabDrag,
       draggingTab,
       activeTreatment,
     ],
@@ -505,6 +517,7 @@ function SortableFileTab({
   activeTabRef,
   dragDisabled,
   noDragClass,
+  onBeginTabDrag,
   tab,
 }: SortableFileTabProps) {
   const { isDragging, listeners, setNodeRef, transform, transition } =
@@ -512,6 +525,8 @@ function SortableFileTab({
       id: tab.id,
       disabled: dragDisabled,
     });
+  const { onPointerDown: sortablePointerDown, ...sortableListeners } =
+    listeners ?? {};
   const setTabRef = useCallback(
     (element: HTMLDivElement | null) => {
       setNodeRef(element);
@@ -541,7 +556,11 @@ function SortableFileTab({
         isDragging && "opacity-40",
         noDragClass,
       )}
-      {...listeners}
+      onPointerDown={(event) => {
+        onBeginTabDrag?.(tab.id, event);
+        sortablePointerDown?.(event);
+      }}
+      {...sortableListeners}
     >
       <FileTab tab={tab} activeTreatment={activeTreatment} />
     </div>

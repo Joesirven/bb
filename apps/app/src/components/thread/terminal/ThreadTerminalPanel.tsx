@@ -14,6 +14,7 @@ interface ThreadTerminalPanelProps {
   onOpenLink?: MarkdownPreviewLinkHandler;
   onSelectionAddToChat?: (text: string) => void;
   panelStateId?: string;
+  terminalId?: string;
   target: ThreadTerminalTarget;
 }
 
@@ -26,6 +27,7 @@ export function ThreadTerminalPanel({
   onOpenLink,
   onSelectionAddToChat,
   panelStateId,
+  terminalId,
   target,
 }: ThreadTerminalPanelProps) {
   const terminalController = useThreadTerminalController({
@@ -33,6 +35,7 @@ export function ThreadTerminalPanel({
     isPanelOpen,
     isPanelPersistedOpen,
     panelStateId,
+    preferredTerminalId: terminalId,
     target,
   });
 

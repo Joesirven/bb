@@ -46,6 +46,8 @@ export interface ThreadTerminalControllerArgs {
   isPanelOpen: boolean;
   isPanelPersistedOpen: boolean;
   panelStateId?: string;
+  /** Pins this controller to one pane-owned terminal without changing global tab selection. */
+  preferredTerminalId?: string;
   target: ThreadTerminalTarget;
 }
 
@@ -166,6 +168,7 @@ export function useThreadTerminalController({
   isPanelOpen,
   isPanelPersistedOpen,
   panelStateId,
+  preferredTerminalId,
   target,
 }: ThreadTerminalControllerArgs): ThreadTerminalController {
   const queryClient = useQueryClient();
@@ -285,8 +288,12 @@ export function useThreadTerminalController({
     [retainedTerminalViewId, sessions],
   );
   const activeTerminalId = useMemo(
-    () => pickActiveTerminalId(visibleSessions, activeFixedTerminalId),
-    [activeFixedTerminalId, visibleSessions],
+    () =>
+      pickActiveTerminalId(
+        visibleSessions,
+        preferredTerminalId ?? activeFixedTerminalId,
+      ),
+    [activeFixedTerminalId, preferredTerminalId, visibleSessions],
   );
   const activeSession =
     visibleSessions.find((session) => session.id === activeTerminalId) ?? null;
@@ -321,7 +328,10 @@ export function useThreadTerminalController({
     if (!isPanelOpen || terminalsQuery.isLoading || terminalsQuery.error) {
       return;
     }
-    if (activeFixedTerminalId === activeTerminalId) {
+    if (
+      preferredTerminalId !== undefined ||
+      activeFixedTerminalId === activeTerminalId
+    ) {
       return;
     }
     setActiveFixedTerminal(activeTerminalId);
@@ -329,6 +339,7 @@ export function useThreadTerminalController({
     activeFixedTerminalId,
     activeTerminalId,
     isPanelOpen,
+    preferredTerminalId,
     setActiveFixedTerminal,
     terminalsQuery.error,
     terminalsQuery.isLoading,

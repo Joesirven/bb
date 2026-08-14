@@ -1,6 +1,7 @@
 import {
   type CSSProperties,
   type FocusEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type TransitionEvent,
   useCallback,
@@ -75,13 +76,27 @@ import {
 import { useDesktopWindowState } from "@/hooks/useDesktopWindowState";
 import { useOptionalIsSidebarShowing } from "@/components/ui/sidebar.js";
 import { IframeDragGuardOverlay } from "@/lib/iframe-drag-guard";
-import type { SecondaryFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+import {
+  createGitDiffFixedPanelTab,
+  createThreadInfoFixedPanelTab,
+  type SecondaryFileFixedPanelTab,
+  type SecondaryFixedPanelTab,
+} from "@/lib/fixed-panel-tabs-state";
 import { useAppCommandShortcut } from "@/components/commands/AppCommandProvider";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
 import type { AppShortcutPresentation } from "@/lib/app-keybindings";
 import { TabPill } from "@/components/ui/tab-pill";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@bb/shared-ui/tooltip";
 import { dispatchBrowserViewBoundsSync } from "@/lib/browser-view-bounds-sync";
+import {
+  SidebarSplitContainer,
+  type SidebarSplitPaneRenderArgs,
+  type SidebarSplitTabDescriptor,
+} from "./SidebarSplitContainer";
+import {
+  SIDEBAR_FIXED_DIFF_TAB_ID,
+  SIDEBAR_FIXED_INFO_TAB_ID,
+} from "./sidebarSplitLayout";
 export type {
   GitDiffDisplayMode,
   GitDiffSelectionOption,
@@ -231,11 +246,19 @@ export interface ThreadSecondaryPanelProps {
    * tests with no browser tabs.
    */
   browserDeck?: ReactNode;
+  /** Builds a retained browser surface for a pane-local browser tab. */
+  browserDeckForTab?: (tabId: string) => ReactNode;
   /**
    * Whether the active panel tab is a browser tab. When true the deck fills the
    * content region and the normal content slot is suppressed.
    */
   isBrowserTabActive?: boolean;
+  /** Stable thread/panel id enabling persisted tab tear-out splits. */
+  splitPanelStateId?: string;
+  /** Rich tab models used to render pane-local content after a split. */
+  splitTabModels?: readonly SecondaryFileFixedPanelTab[];
+  renderSplitTabContent?: (tab: SecondaryFileFixedPanelTab) => ReactNode;
+  splitTabContentFillsRegion?: (tab: SecondaryFileFixedPanelTab) => boolean;
   isOpen: boolean;
   showConversationCollapseControl?: boolean;
   showGitDiffTab?: boolean;
@@ -333,7 +356,12 @@ export function ThreadSecondaryPanel({
   fileTabContentFillsRegion,
   onFileTabReorder,
   browserDeck,
+  browserDeckForTab,
   isBrowserTabActive = false,
+  splitPanelStateId,
+  splitTabModels,
+  renderSplitTabContent,
+  splitTabContentFillsRegion,
   isOpen,
   showConversationCollapseControl = true,
   showGitDiffTab = true,
@@ -363,9 +391,6 @@ export function ThreadSecondaryPanel({
   const diffShortcut = useAppCommandShortcut("diff.toggle");
   const activeFileTab = fileTabs?.find((tab) => tab.isActive);
   const visibleFileTabs = fileTabs?.filter((tab) => tab.isHidden !== true);
-  const hasActiveFileTab = activeFileTab !== undefined;
-  const isTerminalTabActive =
-    activeTab?.kind === "terminal" && hasActiveFileTab;
   const hideControl = resolveSecondaryPanelHideControl();
   // The conversation-collapse toggle only exists on a wide viewport; the drawer
   // layout fills the screen and cannot collapse the conversation.
@@ -455,7 +480,6 @@ export function ThreadSecondaryPanel({
   const activeFixedPanel =
     resolveActiveFixedPanel({ activeTab, canUseGitUi }) ?? "thread-info";
   const isDiffPanelActive = activeFixedPanel === "git-diff";
-  const showsGitDiffToolbar = isDiffPanelActive && !hasActiveFileTab;
   const shouldShowGitDiffTab = canUseGitUi && showGitDiffTab !== false;
   // Keep file content mounted across every close. The compact views defer the
   // first full panel mount, then retain it inside their persistent drawer.
@@ -557,6 +581,397 @@ export function ThreadSecondaryPanel({
     onPanelFocus();
   };
 
+  interface PanelSurfaceArgs {
+    activeSurfaceTab: SecondaryFixedPanelTab | null;
+    browserSurface: ReactNode;
+    fileSurfaceContent: ReactNode;
+    fileSurfaceContentFillsRegion: boolean;
+    fileSurfaceTabs: SecondaryPanelFileTab[] | undefined;
+    isBrowserSurfaceActive: boolean;
+    onBeginTabDrag?: (
+      tabId: string,
+      event: ReactPointerEvent<HTMLElement>,
+    ) => void;
+    onSelectSurfaceTab?: (tabId: string) => void;
+    onSurfaceFileTabReorder: SecondaryPanelTabReorderHandler;
+    showDiffSurfaceTab: boolean;
+    showInfoSurfaceTab: boolean;
+    showOuterControls: boolean;
+  }
+
+  const renderHidePanelButton = () => (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className={cn(
+        SECONDARY_PANEL_HIDE_ICON_BUTTON_CLASS,
+        "relative",
+        usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
+      )}
+      onClick={onClose}
+      aria-label={
+        togglePanelShortcut
+          ? `${hideControl.label} (${togglePanelShortcut.label})`
+          : hideControl.label
+      }
+      aria-keyshortcuts={togglePanelShortcut?.ariaKeyshortcuts}
+    >
+      <Icon name={hideControl.iconName} />
+      <AppCommandShortcutHint
+        shortcut={togglePanelShortcut}
+        className="absolute right-full mr-1"
+      />
+    </Button>
+  );
+
+  const renderPanelSurface = ({
+    activeSurfaceTab,
+    browserSurface,
+    fileSurfaceContent,
+    fileSurfaceContentFillsRegion,
+    fileSurfaceTabs,
+    isBrowserSurfaceActive,
+    onBeginTabDrag,
+    onSelectSurfaceTab,
+    onSurfaceFileTabReorder,
+    showDiffSurfaceTab,
+    showInfoSurfaceTab,
+    showOuterControls,
+  }: PanelSurfaceArgs) => {
+    const activeSurfaceFileTab = fileSurfaceTabs?.find((tab) => tab.isActive);
+    const visibleSurfaceFileTabs = fileSurfaceTabs?.filter(
+      (tab) => tab.isHidden !== true,
+    );
+    const hasActiveSurfaceFileTab = activeSurfaceFileTab !== undefined;
+    const activeSurfaceFixedPanel =
+      resolveActiveFixedPanel({ activeTab: activeSurfaceTab, canUseGitUi }) ??
+      "thread-info";
+    const isSurfaceDiffActive = activeSurfaceFixedPanel === "git-diff";
+    const showsSurfaceDiffToolbar =
+      isSurfaceDiffActive && !hasActiveSurfaceFileTab;
+    const isSurfaceTerminalActive =
+      activeSurfaceTab?.kind === "terminal" && hasActiveSurfaceFileTab;
+
+    return (
+      <>
+        <div
+          className={getSecondaryPanelChromeStackClassName(
+            showsSurfaceDiffToolbar,
+          )}
+        >
+          <div
+            data-testid="thread-secondary-panel-top-chrome"
+            className={cn(
+              CHROME_ROW_CLASS,
+              "min-w-0 justify-between gap-2 px-4",
+              usesDesktopChrome && MACOS_WINDOW_DRAG_CLASS,
+              usesDesktopChrome && MACOS_CHROME_CONTROL_AXIS_CLASS,
+            )}
+          >
+            <div
+              className={cn(
+                "flex min-w-0 flex-1 items-center gap-1",
+                `transition-[padding] ${PANEL_COLLAPSE_TRANSITION_CLASS}`,
+                showOuterControls && collapsedPanelTrafficLightReserveClassName,
+              )}
+              role="toolbar"
+              aria-label="Right panel views"
+            >
+              {showInfoSurfaceTab ? (
+                <PinnedIconTab
+                  ariaLabel="Show thread info panel"
+                  isActive={
+                    activeSurfaceFixedPanel === "thread-info" &&
+                    !hasActiveSurfaceFileTab
+                  }
+                  label="Info"
+                  leadingVisual={<Icon name="Info" />}
+                  onClick={() => {
+                    if (onSelectSurfaceTab) {
+                      onSelectSurfaceTab(SIDEBAR_FIXED_INFO_TAB_ID);
+                    } else {
+                      onPanelChange("thread-info");
+                    }
+                  }}
+                  onPointerDown={
+                    onBeginTabDrag
+                      ? (event) =>
+                          onBeginTabDrag(SIDEBAR_FIXED_INFO_TAB_ID, event)
+                      : undefined
+                  }
+                  title="Thread info"
+                  usesDesktopChrome={usesDesktopChrome}
+                  activeTreatment="fill"
+                />
+              ) : null}
+              {showDiffSurfaceTab ? (
+                <PinnedIconTab
+                  ariaLabel={
+                    diffShortcut
+                      ? `Show diff panel (${diffShortcut.label})`
+                      : "Show diff panel"
+                  }
+                  ariaKeyshortcuts={diffShortcut?.ariaKeyshortcuts}
+                  isActive={isSurfaceDiffActive && !hasActiveSurfaceFileTab}
+                  label="Diff"
+                  leadingVisual={<Icon name="FileDiff" />}
+                  onClick={() => {
+                    if (onSelectSurfaceTab) {
+                      onSelectSurfaceTab(SIDEBAR_FIXED_DIFF_TAB_ID);
+                    } else {
+                      onPanelChange("git-diff");
+                    }
+                  }}
+                  onPointerDown={
+                    onBeginTabDrag
+                      ? (event) =>
+                          onBeginTabDrag(SIDEBAR_FIXED_DIFF_TAB_ID, event)
+                      : undefined
+                  }
+                  title="Diff"
+                  usesDesktopChrome={usesDesktopChrome}
+                  activeTreatment="fill"
+                />
+              ) : null}
+              {visibleSurfaceFileTabs && visibleSurfaceFileTabs.length > 0 ? (
+                <SecondaryPanelTabStrip
+                  fileTabs={visibleSurfaceFileTabs}
+                  onBeginTabDrag={onBeginTabDrag}
+                  onReorderTab={onSurfaceFileTabReorder}
+                  usesDesktopChrome={usesDesktopChrome}
+                  activeTreatment="fill"
+                />
+              ) : null}
+              {showNewTabButton ? (
+                <NewTabButton
+                  onOpenNewTab={onOpenNewTab}
+                  shortcut={newTabShortcut}
+                  usesDesktopChrome={usesDesktopChrome}
+                />
+              ) : null}
+            </div>
+            {showOuterControls ? (
+              <div className="flex min-w-0 shrink-0 items-center gap-1">
+                {conversationCollapseControl ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className={cn(
+                          HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
+                          CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
+                          "shrink-0",
+                          usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
+                        )}
+                        onClick={conversationCollapseControl.onClick}
+                        aria-label={conversationCollapseControl.label}
+                        aria-pressed={conversationCollapseControl.isFullScreen}
+                      >
+                        <Icon name={conversationCollapseControl.iconName} />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {conversationCollapseControl.label}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : null}
+                {renderAsDrawer || inlinePanelToggle === "button" ? (
+                  renderHidePanelButton()
+                ) : inlinePanelToggle === "reserved" ? (
+                  <div
+                    aria-hidden
+                    className={getReservedInlinePanelToggleClassName(
+                      usesDesktopChrome,
+                    )}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {showsSurfaceDiffToolbar ? (
+            <GitDiffToolbar
+              selectionValue={gitDiffSelectValue}
+              selectionOptions={gitDiffSelectOptions}
+              onSelectionChange={onGitDiffSelectionChange}
+              isSelectorDisabled={
+                isDiffFilesLoading || gitDiffTarget === undefined
+              }
+              stats={gitDiffStats}
+              areAllFilesCollapsed={areAllCollapsed}
+              isCollapseAllDisabled={!hasFiles || isDiffFilesLoading}
+              onToggleAllCollapsed={toggleAllCollapsed}
+              displayMode={gitDiffDisplayMode}
+              onDisplayModeChange={handleGitDiffDisplayModeChange}
+              lineOverflowMode={gitDiffLineOverflowMode}
+              onLineOverflowModeChange={setGitDiffLineOverflowMode}
+            />
+          ) : null}
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-sidebar">
+          {browserSurface}
+          {isBrowserSurfaceActive ? null : hasActiveSurfaceFileTab ? (
+            <div
+              className={
+                isSurfaceTerminalActive || fileSurfaceContentFillsRegion
+                  ? "min-h-0 flex-1 overflow-hidden"
+                  : cn(PANEL_SCROLL_SLOT_CLASS, "pb-3")
+              }
+              data-file-preview-scroll-container={
+                isSurfaceTerminalActive || fileSurfaceContentFillsRegion
+                  ? undefined
+                  : ""
+              }
+            >
+              {fileSurfaceContent ?? (
+                <EmptyStatePanel className="mx-4 rounded-lg">
+                  No file preview content provided.
+                </EmptyStatePanel>
+              )}
+            </div>
+          ) : isSurfaceDiffActive ? (
+            <GitDiffTabContent
+              environmentId={environmentId}
+              target={gitDiffTarget}
+              isDiffPanelActive={isSurfaceDiffActive}
+              gitDiffViewOptions={gitDiffViewOptions}
+              onClearPendingGitDiffIntent={onClearPendingGitDiffIntent}
+              onOpenFileInEditor={onOpenFileInEditor}
+              onOpenFilePreview={onOpenFilePreview}
+              onSelectionAddToChat={onSelectionAddToChat}
+              pendingGitDiffScrollPath={pendingGitDiffScrollPath}
+              workspaceRootPath={workspaceRootPath}
+            />
+          ) : (
+            <ThreadInfoTabContent metadataContent={metadataContent} />
+          )}
+        </div>
+      </>
+    );
+  };
+
+  const shouldEnableSidebarSplits =
+    splitPanelStateId !== undefined &&
+    splitTabModels !== undefined &&
+    renderSplitTabContent !== undefined;
+  const splitTabs = shouldEnableSidebarSplits
+    ? ([
+        ...(showInfoTab
+          ? [
+              {
+                id: SIDEBAR_FIXED_INFO_TAB_ID,
+                label: "Info",
+                leadingVisual: <Icon name="Info" />,
+              },
+            ]
+          : []),
+        ...(shouldShowGitDiffTab
+          ? [
+              {
+                id: SIDEBAR_FIXED_DIFF_TAB_ID,
+                label: "Diff",
+                leadingVisual: <Icon name="FileDiff" />,
+              },
+            ]
+          : []),
+        ...(visibleFileTabs ?? []).map((tab) => ({
+          id: tab.id,
+          label: tab.filename,
+          leadingVisual: tab.leadingVisual,
+        })),
+      ] satisfies SidebarSplitTabDescriptor[])
+    : [];
+  const globalActiveTabId =
+    activeFileTab?.id ??
+    (isDiffPanelActive ? SIDEBAR_FIXED_DIFF_TAB_ID : SIDEBAR_FIXED_INFO_TAB_ID);
+  const panelSurface = shouldEnableSidebarSplits ? (
+    <SidebarSplitContainer
+      key={splitPanelStateId}
+      activeTabId={globalActiveTabId}
+      onActivateTab={(tabId) => {
+        if (tabId === SIDEBAR_FIXED_INFO_TAB_ID) {
+          onPanelChange("thread-info");
+        } else if (tabId === SIDEBAR_FIXED_DIFF_TAB_ID) {
+          onPanelChange("git-diff");
+        } else {
+          fileTabs?.find((tab) => tab.id === tabId)?.onSelect();
+        }
+      }}
+      onGlobalTabReorder={onFileTabReorder}
+      panelStateId={splitPanelStateId}
+      renderHideControl={renderHidePanelButton}
+      tabs={splitTabs}
+      renderPane={(pane: SidebarSplitPaneRenderArgs) => {
+        const activePaneTabId = pane.group.activeTabId;
+        const paneModel =
+          activePaneTabId === SIDEBAR_FIXED_INFO_TAB_ID
+            ? createThreadInfoFixedPanelTab()
+            : activePaneTabId === SIDEBAR_FIXED_DIFF_TAB_ID
+              ? createGitDiffFixedPanelTab()
+              : (splitTabModels.find((tab) => tab.id === activePaneTabId) ??
+                null);
+        const paneFileTabs = pane.group.tabIds
+          .map((tabId) => fileTabs?.find((tab) => tab.id === tabId))
+          .filter((tab): tab is SecondaryPanelFileTab => tab !== undefined)
+          .map((tab) => ({
+            ...tab,
+            isActive: tab.id === activePaneTabId,
+            onSelect: () => pane.onSelectTab(tab.id),
+          }));
+        const isPaneBrowserActive = paneModel?.kind === "browser";
+        const paneFileContent =
+          paneModel !== null &&
+          paneModel.kind !== "thread-info" &&
+          paneModel.kind !== "git-diff" &&
+          paneModel.kind !== "browser"
+            ? renderSplitTabContent(paneModel)
+            : undefined;
+        return renderPanelSurface({
+          activeSurfaceTab: paneModel,
+          browserSurface:
+            isPaneBrowserActive && browserDeckForTab
+              ? browserDeckForTab(activePaneTabId)
+              : null,
+          fileSurfaceContent: paneFileContent,
+          fileSurfaceContentFillsRegion:
+            paneModel !== null &&
+            paneModel.kind !== "thread-info" &&
+            paneModel.kind !== "git-diff" &&
+            splitTabContentFillsRegion !== undefined
+              ? splitTabContentFillsRegion(paneModel)
+              : false,
+          fileSurfaceTabs: paneFileTabs,
+          isBrowserSurfaceActive: isPaneBrowserActive,
+          onBeginTabDrag: pane.onBeginTabDrag,
+          onSelectSurfaceTab: pane.onSelectTab,
+          onSurfaceFileTabReorder: pane.onReorderTab,
+          showDiffSurfaceTab: pane.group.tabIds.includes(
+            SIDEBAR_FIXED_DIFF_TAB_ID,
+          ),
+          showInfoSurfaceTab: pane.group.tabIds.includes(
+            SIDEBAR_FIXED_INFO_TAB_ID,
+          ),
+          showOuterControls: !pane.isSplitPane,
+        });
+      }}
+    />
+  ) : (
+    renderPanelSurface({
+      activeSurfaceTab: activeTab,
+      browserSurface: browserDeck,
+      fileSurfaceContent: fileTabContent,
+      fileSurfaceContentFillsRegion: fileTabContentFillsRegion ?? false,
+      fileSurfaceTabs: fileTabs,
+      isBrowserSurfaceActive: isBrowserTabActive,
+      onSurfaceFileTabReorder: onFileTabReorder,
+      showDiffSurfaceTab: shouldShowGitDiffTab,
+      showInfoSurfaceTab: showInfoTab,
+      showOuterControls: true,
+    })
+  );
+
   const asideMarkup = (
     <aside
       ref={panelRef}
@@ -621,218 +1036,7 @@ export function ThreadSecondaryPanel({
       )}
     >
       <IframeDragGuardOverlay active={isSecondaryPanelResizing} />
-      <div
-        className={getSecondaryPanelChromeStackClassName(showsGitDiffToolbar)}
-      >
-        <div
-          data-testid="thread-secondary-panel-top-chrome"
-          className={cn(
-            CHROME_ROW_CLASS,
-            "min-w-0 justify-between gap-2 px-4",
-            usesDesktopChrome && MACOS_WINDOW_DRAG_CLASS,
-            usesDesktopChrome && MACOS_CHROME_CONTROL_AXIS_CLASS,
-          )}
-        >
-          <div
-            className={cn(
-              "flex min-w-0 flex-1 items-center gap-1",
-              // When this panel owns the window's top-left (conversation
-              // collapsed, on either thread surface, with the sidebar
-              // collapsed), reserve the traffic-light
-              // safe area so the leading controls clear the lights and the
-              // pinned sidebar trigger. The padding must animate on the SAME
-              // timing/easing as the panel's collapse slide
-              // (PANEL_COLLAPSE_TRANSITION_CLASS): the panel's left edge starts
-              // well right of 120px and both ease to their endpoints together,
-              // so the combined inset (panel-left + px-4 + padding) decreases
-              // monotonically to exactly 120px and never dips below it
-              // mid-animation. A faster/looser padding transition would let the
-              // panel reach the left edge before the padding fills, briefly
-              // sliding the leading controls back under the lights/trigger.
-              `transition-[padding] ${PANEL_COLLAPSE_TRANSITION_CLASS}`,
-              collapsedPanelTrafficLightReserveClassName,
-            )}
-            // A toolbar, not a tablist: the pinned Info view, Diff control, and
-            // open-view pills are toggle buttons (`aria-pressed`) rather than
-            // `role="tab"` widgets backed by tabpanels, so `role="tablist"`
-            // would be malformed. Toolbar semantics describe this compact row
-            // without claiming the unimplemented tab contract.
-            role="toolbar"
-            aria-label="Right panel views"
-          >
-            {showInfoTab ? (
-              <PinnedIconTab
-                ariaLabel="Show thread info panel"
-                isActive={
-                  activeFixedPanel === "thread-info" && !hasActiveFileTab
-                }
-                label="Info"
-                leadingVisual={<Icon name="Info" />}
-                onClick={() => onPanelChange("thread-info")}
-                title="Thread info"
-                usesDesktopChrome={usesDesktopChrome}
-                activeTreatment="fill"
-              />
-            ) : null}
-            {shouldShowGitDiffTab ? (
-              <PinnedIconTab
-                ariaLabel={
-                  diffShortcut
-                    ? `Show diff panel (${diffShortcut.label})`
-                    : "Show diff panel"
-                }
-                ariaKeyshortcuts={diffShortcut?.ariaKeyshortcuts}
-                isActive={isDiffPanelActive && !hasActiveFileTab}
-                label="Diff"
-                leadingVisual={<Icon name="FileDiff" />}
-                onClick={() => onPanelChange("git-diff")}
-                title="Diff"
-                usesDesktopChrome={usesDesktopChrome}
-                activeTreatment="fill"
-              />
-            ) : null}
-            {visibleFileTabs && visibleFileTabs.length > 0 ? (
-              <SecondaryPanelTabStrip
-                fileTabs={visibleFileTabs}
-                onReorderTab={onFileTabReorder}
-                usesDesktopChrome={usesDesktopChrome}
-                activeTreatment="fill"
-              />
-            ) : null}
-            {showNewTabButton ? (
-              <NewTabButton
-                onOpenNewTab={onOpenNewTab}
-                shortcut={newTabShortcut}
-                usesDesktopChrome={usesDesktopChrome}
-              />
-            ) : null}
-          </div>
-          <div className="flex min-w-0 shrink-0 items-center gap-1">
-            {conversationCollapseControl ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className={cn(
-                      HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
-                      CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
-                      "shrink-0",
-                      usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
-                    )}
-                    onClick={conversationCollapseControl.onClick}
-                    aria-label={conversationCollapseControl.label}
-                    aria-pressed={conversationCollapseControl.isFullScreen}
-                  >
-                    <Icon name={conversationCollapseControl.iconName} />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {conversationCollapseControl.label}
-                </TooltipContent>
-              </Tooltip>
-            ) : null}
-            {renderAsDrawer || inlinePanelToggle === "button" ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  SECONDARY_PANEL_HIDE_ICON_BUTTON_CLASS,
-                  "relative",
-                  usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
-                )}
-                onClick={onClose}
-                aria-label={
-                  togglePanelShortcut
-                    ? `${hideControl.label} (${togglePanelShortcut.label})`
-                    : hideControl.label
-                }
-                aria-keyshortcuts={togglePanelShortcut?.ariaKeyshortcuts}
-              >
-                <Icon name={hideControl.iconName} />
-                <AppCommandShortcutHint
-                  shortcut={togglePanelShortcut}
-                  className="absolute right-full mr-1"
-                />
-              </Button>
-            ) : inlinePanelToggle === "reserved" ? (
-              // A toggle pinned outside the panel owns show/hide on this surface
-              // (root compose's fixed overlay); reserve this slot's footprint so
-              // the tab strip stays clear and the pinned toggle lands over it.
-              // Under macOS desktop chrome the slot must carve itself out of the
-              // window-drag chrome row so the pinned toggle stays clickable; see
-              // getReservedInlinePanelToggleClassName.
-              <div
-                aria-hidden
-                className={getReservedInlinePanelToggleClassName(
-                  usesDesktopChrome,
-                )}
-              />
-            ) : null}
-          </div>
-        </div>
-        {showsGitDiffToolbar ? (
-          <GitDiffToolbar
-            selectionValue={gitDiffSelectValue}
-            selectionOptions={gitDiffSelectOptions}
-            onSelectionChange={onGitDiffSelectionChange}
-            isSelectorDisabled={
-              isDiffFilesLoading || gitDiffTarget === undefined
-            }
-            stats={gitDiffStats}
-            areAllFilesCollapsed={areAllCollapsed}
-            isCollapseAllDisabled={!hasFiles || isDiffFilesLoading}
-            onToggleAllCollapsed={toggleAllCollapsed}
-            displayMode={gitDiffDisplayMode}
-            onDisplayModeChange={handleGitDiffDisplayModeChange}
-            lineOverflowMode={gitDiffLineOverflowMode}
-            onLineOverflowModeChange={setGitDiffLineOverflowMode}
-          />
-        ) : null}
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-sidebar">
-        {/*
-          The browser deck owns native-view visibility/retention and renders
-          content only when a browser tab is active. The normal content slot is
-          suppressed in that case because the deck fills the region.
-        */}
-        {browserDeck}
-        {isBrowserTabActive ? null : hasActiveFileTab ? (
-          <div
-            className={
-              isTerminalTabActive || fileTabContentFillsRegion
-                ? "min-h-0 flex-1 overflow-hidden"
-                : cn(PANEL_SCROLL_SLOT_CLASS, "pb-3")
-            }
-            data-file-preview-scroll-container={
-              isTerminalTabActive || fileTabContentFillsRegion ? undefined : ""
-            }
-          >
-            {fileTabContent ?? (
-              <EmptyStatePanel className="mx-4 rounded-lg">
-                No file preview content provided.
-              </EmptyStatePanel>
-            )}
-          </div>
-        ) : isDiffPanelActive ? (
-          <GitDiffTabContent
-            environmentId={environmentId}
-            target={gitDiffTarget}
-            isDiffPanelActive={isDiffPanelActive}
-            gitDiffViewOptions={gitDiffViewOptions}
-            onClearPendingGitDiffIntent={onClearPendingGitDiffIntent}
-            onOpenFileInEditor={onOpenFileInEditor}
-            onOpenFilePreview={onOpenFilePreview}
-            onSelectionAddToChat={onSelectionAddToChat}
-            pendingGitDiffScrollPath={pendingGitDiffScrollPath}
-            workspaceRootPath={workspaceRootPath}
-          />
-        ) : (
-          <ThreadInfoTabContent metadataContent={metadataContent} />
-        )}
-      </div>
+      {panelSurface}
     </aside>
   );
 
@@ -908,6 +1112,7 @@ interface PinnedIconTabProps {
   label: string;
   leadingVisual: ReactNode;
   onClick: () => void;
+  onPointerDown?: (event: ReactPointerEvent<HTMLElement>) => void;
   title: string;
   usesDesktopChrome: boolean;
 }
@@ -920,6 +1125,7 @@ function PinnedIconTab({
   label,
   leadingVisual,
   onClick,
+  onPointerDown,
   title,
   usesDesktopChrome,
 }: PinnedIconTabProps) {
@@ -932,6 +1138,7 @@ function PinnedIconTab({
             "shrink-0",
             usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
           )}
+          onPointerDown={onPointerDown}
         >
           <TabPill
             label={label}

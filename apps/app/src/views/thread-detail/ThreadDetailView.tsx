@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useNavigate } from "react-router-dom";
 import { useAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
@@ -200,7 +207,6 @@ import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
 import { useThreadUnreadDividerState } from "./useThreadUnreadDividerState";
 import {
   buildTerminalSyncedSecondaryFileTabs,
-  findActiveTerminalIdInSecondaryFileTabs,
   getRetainedTerminalTabId,
   syncTerminalTabsInFixedPanelState,
 } from "@/components/secondary-panel/terminalPanelTabs";
@@ -229,7 +235,10 @@ import {
   useTouchFixedPanelTabsState,
   useUpdateFixedPanelTabsState,
 } from "@/lib/fixed-panel-tabs";
-import { createNewTabFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+import {
+  createNewTabFixedPanelTab,
+  type SecondaryFileFixedPanelTab,
+} from "@/lib/fixed-panel-tabs-state";
 import { isRootThread } from "./threadParentSelectorOptions";
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
 import { ThreadTerminalPanel } from "@/components/thread/terminal/ThreadTerminalPanel";
@@ -647,18 +656,13 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
     activeBrowserTab,
     activeHostFileLineRange,
     activeHostFilePath,
-    activeStorageFileLineRange,
     activeStorageFilePath,
-    activeWorkspaceFileLineRange,
     activeWorkspaceFilePath,
-    activeWorkspaceFileSource,
-    activeWorkspaceFileStatusLabel,
     activePluginPanelTab,
     browserTabs,
     clearActiveFileTabs,
     activateTab,
     closeTab,
-    isNewTabActive,
     openTab,
     openPluginPanel,
     orderedSecondaryFileTabs,
@@ -703,14 +707,20 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
   // each one keeps a live native view that must persist across tab switches, so
   // the deck stays mounted independently of which tab is active.
   const renderBrowserDeck = useCallback(
-    ({ canShowNativeBrowserView }: { canShowNativeBrowserView: boolean }) => {
+    ({
+      canShowNativeBrowserView,
+      activeBrowserTabId = activeBrowserTab?.id ?? null,
+    }: {
+      canShowNativeBrowserView: boolean;
+      activeBrowserTabId?: string | null;
+    }) => {
       if (browserDeckThreadId === null) {
         return null;
       }
       return (
         <BrowserTabDeck
           browserTabs={browserTabs}
-          activeBrowserTabId={activeBrowserTab?.id ?? null}
+          activeBrowserTabId={activeBrowserTabId}
           addressFocusRequest={browserAddressFocusRequest}
           onAddressFocusRequestConsumed={
             handleBrowserAddressFocusRequestConsumed
@@ -2230,34 +2240,6 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
     }
     return false;
   });
-  const workspaceFileCopyPath = activeWorkspaceFilePath
-    ? resolveAbsoluteFilePath({
-        path: activeWorkspaceFilePath,
-        rootPath: workspacePreviewRootPath,
-      })
-    : null;
-  const storageFileCopyPath = activeStorageFilePath
-    ? resolveAbsoluteFilePath({
-        path: activeStorageFilePath,
-        rootPath: threadStorageRootPath,
-      })
-    : null;
-  // Relative links inside a previewed markdown file resolve against the file's
-  // own directory, mirroring how the file's links would resolve on disk.
-  const workspaceFileLinkBaseDir = workspaceFileCopyPath
-    ? getAbsoluteDirname({ path: workspaceFileCopyPath })
-    : undefined;
-  const storageFileLinkBaseDir = storageFileCopyPath
-    ? getAbsoluteDirname({ path: storageFileCopyPath })
-    : undefined;
-  const hostFileLinkBaseDir = activeHostFilePath
-    ? getAbsoluteDirname({ path: activeHostFilePath })
-    : undefined;
-  const hostFileLinkRootPath = resolveHostFilePreviewLinkRootPath({
-    baseDir: hostFileLinkBaseDir,
-    threadStorageRootPath,
-    workspaceRootPath: workspacePreviewRootPath,
-  });
   // Right-click local file links: per-open native app choices, optional
   // preview/plugin viewer choices, and utility copy actions. Left-click behavior
   // stays unchanged.
@@ -2349,51 +2331,6 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
       handleOpenTimelineLocalFileLink,
       openPathInFileTarget,
       pluginFileOpeners,
-    ],
-  );
-  const workspaceMarkdownLinkRouting = useMemo(
-    () =>
-      buildMarkdownPreviewLinkRouting({
-        baseDir: workspaceFileLinkBaseDir,
-        onOpenLink: handleOpenTimelineLink,
-        onOpenLocalFileLink: handleOpenTimelineLocalFileLink,
-        rootPath: workspacePreviewRootPath,
-      }),
-    [
-      handleOpenTimelineLink,
-      handleOpenTimelineLocalFileLink,
-      workspaceFileLinkBaseDir,
-      workspacePreviewRootPath,
-    ],
-  );
-  const hostMarkdownLinkRouting = useMemo(
-    () =>
-      buildMarkdownPreviewLinkRouting({
-        baseDir: hostFileLinkBaseDir,
-        onOpenLink: handleOpenTimelineLink,
-        onOpenLocalFileLink: handleOpenTimelineLocalFileLink,
-        rootPath: hostFileLinkRootPath,
-      }),
-    [
-      handleOpenTimelineLink,
-      handleOpenTimelineLocalFileLink,
-      hostFileLinkBaseDir,
-      hostFileLinkRootPath,
-    ],
-  );
-  const storageMarkdownLinkRouting = useMemo(
-    () =>
-      buildMarkdownPreviewLinkRouting({
-        baseDir: storageFileLinkBaseDir,
-        onOpenLink: handleOpenTimelineLink,
-        onOpenLocalFileLink: handleOpenTimelineLocalFileLink,
-        rootPath: threadStorageRootPath,
-      }),
-    [
-      handleOpenTimelineLink,
-      handleOpenTimelineLocalFileLink,
-      storageFileLinkBaseDir,
-      threadStorageRootPath,
     ],
   );
   const handleOpenFilePreview = useCallback<OpenFilePreviewHandler>(
@@ -2646,81 +2583,144 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
       thread={thread}
     />
   );
-  const activeTerminalId = findActiveTerminalIdInSecondaryFileTabs({
-    activeTabId: activeFixedSecondaryTabId,
-    tabs: syncedOrderedSecondaryFileTabs,
-  });
-  const fileTabContent = activeTerminalId ? (
-    <ThreadTerminalPanel
-      autoFocus={shouldAutoFocusTerminal}
-      canCreateTerminal={canCreateTerminal}
-      isPanelOpen={isSecondaryPanelOpen}
-      isPanelPersistedOpen={isPersistedSecondaryPanelOpen}
-      onAutoFocusHandled={handleTerminalAutoFocusHandled}
-      onOpenLink={handleOpenTimelineLink}
-      onSelectionAddToChat={handleSelectionAddToChat}
-      target={{ kind: "thread", threadId: thread.id }}
-    />
-  ) : isNewTabActive ? (
-    <NewTabPage
-      autoFocus={shouldAutoFocusNewTab}
-      projectId={projectId ?? undefined}
-      environmentId={thread.environmentId ?? null}
-      currentThreadId={thread.id}
-      onAutoFocusHandled={handleNewTabAutoFocusHandled}
-      onSelect={handleSelectFileSearchResult}
-      onOpenBrowser={handleOpenBrowser}
-      onStartTerminal={canCreateTerminal ? handleStartTerminal : undefined}
-      pluginActions={pluginPanelActions}
-    />
-  ) : activeWorkspaceFilePath ? (
-    <WorkspaceFilePreviewTabContent
-      activePath={activeWorkspaceFilePath}
-      copyPath={workspaceFileCopyPath}
-      environmentId={thread.environmentId}
-      lineRange={activeWorkspaceFileLineRange}
-      markdownLinkRouting={workspaceMarkdownLinkRouting}
-      onOpenInEditor={handleOpenFileInEditor}
-      onSelectionAddToChat={handleSelectionAddToChat}
-      source={activeWorkspaceFileSource}
-      statusLabel={activeWorkspaceFileStatusLabel}
-      threadId={thread.id}
-    />
-  ) : activeHostFilePath ? (
-    <HostFilePreviewTabContent
-      activePath={activeHostFilePath}
-      copyPath={activeHostFilePath}
-      environmentId={thread.environmentId}
-      lineRange={activeHostFileLineRange}
-      markdownLinkRouting={hostMarkdownLinkRouting}
-      onOpenInEditor={handleOpenHostFileInEditor}
-      onSelectionAddToChat={handleSelectionAddToChat}
-      threadId={thread.id}
-    />
-  ) : activeStorageFilePath ? (
-    <ThreadStorageFilePreviewTabContent
-      activePath={activeStorageFilePath}
-      copyPath={storageFileCopyPath}
-      lineRange={activeStorageFileLineRange}
-      markdownLinkRouting={storageMarkdownLinkRouting}
-      onOpenInEditor={handleOpenStorageFileInEditor}
-      onSelectionAddToChat={handleSelectionAddToChat}
-      threadId={thread.id}
-    />
-  ) : activePluginPanelTab ? (
-    <ThreadTimelineNavigationProvider
-      environmentId={thread.environmentId}
-      onOpenLink={handleOpenTimelineLink}
-      onOpenLocalFileLink={handleOpenTimelineLocalFileLink}
-      resolveMentionLink={resolveMentionLink}
-      workspaceRootPath={environment?.path ?? undefined}
-    >
-      <PluginPanelTabContent
-        tab={activePluginPanelTab}
-        context={{ kind: "thread", threadId: thread.id }}
-      />
-    </ThreadTimelineNavigationProvider>
-  ) : undefined;
+  const renderSplitTabContent = (
+    tab: SecondaryFileFixedPanelTab,
+  ): ReactNode => {
+    switch (tab.kind) {
+      case "browser":
+        return null;
+      case "terminal":
+        return (
+          <ThreadTerminalPanel
+            autoFocus={
+              tab.id === activeFixedSecondaryTabId && shouldAutoFocusTerminal
+            }
+            canCreateTerminal={canCreateTerminal}
+            isPanelOpen={isSecondaryPanelOpen}
+            isPanelPersistedOpen={isPersistedSecondaryPanelOpen}
+            onAutoFocusHandled={handleTerminalAutoFocusHandled}
+            onOpenLink={handleOpenTimelineLink}
+            onSelectionAddToChat={handleSelectionAddToChat}
+            target={{ kind: "thread", threadId: thread.id }}
+            terminalId={tab.terminalId}
+          />
+        );
+      case "new-tab":
+        return (
+          <NewTabPage
+            autoFocus={
+              tab.id === activeFixedSecondaryTabId && shouldAutoFocusNewTab
+            }
+            projectId={projectId ?? undefined}
+            environmentId={thread.environmentId ?? null}
+            currentThreadId={thread.id}
+            onAutoFocusHandled={handleNewTabAutoFocusHandled}
+            onSelect={handleSelectFileSearchResult}
+            onOpenBrowser={handleOpenBrowser}
+            onStartTerminal={
+              canCreateTerminal ? handleStartTerminal : undefined
+            }
+            pluginActions={pluginPanelActions}
+          />
+        );
+      case "workspace-file-preview": {
+        const copyPath = resolveAbsoluteFilePath({
+          path: tab.path,
+          rootPath: workspacePreviewRootPath,
+        });
+        return (
+          <WorkspaceFilePreviewTabContent
+            activePath={tab.path}
+            copyPath={copyPath}
+            environmentId={tab.environmentId}
+            lineRange={tab.lineRange}
+            markdownLinkRouting={buildMarkdownPreviewLinkRouting({
+              baseDir: copyPath
+                ? getAbsoluteDirname({ path: copyPath })
+                : undefined,
+              onOpenLink: handleOpenTimelineLink,
+              onOpenLocalFileLink: handleOpenTimelineLocalFileLink,
+              rootPath: workspacePreviewRootPath,
+            })}
+            onOpenInEditor={handleOpenFileInEditor}
+            onSelectionAddToChat={handleSelectionAddToChat}
+            source={tab.source}
+            statusLabel={tab.statusLabel}
+            threadId={thread.id}
+          />
+        );
+      }
+      case "host-file-preview": {
+        const baseDir = getAbsoluteDirname({ path: tab.path });
+        return (
+          <HostFilePreviewTabContent
+            activePath={tab.path}
+            copyPath={tab.path}
+            environmentId={tab.environmentId}
+            lineRange={tab.lineRange}
+            markdownLinkRouting={buildMarkdownPreviewLinkRouting({
+              baseDir,
+              onOpenLink: handleOpenTimelineLink,
+              onOpenLocalFileLink: handleOpenTimelineLocalFileLink,
+              rootPath: resolveHostFilePreviewLinkRootPath({
+                baseDir,
+                threadStorageRootPath,
+                workspaceRootPath: workspacePreviewRootPath,
+              }),
+            })}
+            onOpenInEditor={handleOpenHostFileInEditor}
+            onSelectionAddToChat={handleSelectionAddToChat}
+            threadId={thread.id}
+          />
+        );
+      }
+      case "thread-storage-file-preview": {
+        const copyPath = resolveAbsoluteFilePath({
+          path: tab.path,
+          rootPath: threadStorageRootPath,
+        });
+        return (
+          <ThreadStorageFilePreviewTabContent
+            activePath={tab.path}
+            copyPath={copyPath}
+            lineRange={tab.lineRange}
+            markdownLinkRouting={buildMarkdownPreviewLinkRouting({
+              baseDir: copyPath
+                ? getAbsoluteDirname({ path: copyPath })
+                : undefined,
+              onOpenLink: handleOpenTimelineLink,
+              onOpenLocalFileLink: handleOpenTimelineLocalFileLink,
+              rootPath: threadStorageRootPath,
+            })}
+            onOpenInEditor={handleOpenStorageFileInEditor}
+            onSelectionAddToChat={handleSelectionAddToChat}
+            threadId={thread.id}
+          />
+        );
+      }
+      case "plugin-panel":
+        return (
+          <ThreadTimelineNavigationProvider
+            environmentId={thread.environmentId}
+            onOpenLink={handleOpenTimelineLink}
+            onOpenLocalFileLink={handleOpenTimelineLocalFileLink}
+            resolveMentionLink={resolveMentionLink}
+            workspaceRootPath={environment?.path ?? undefined}
+          >
+            <PluginPanelTabContent
+              tab={tab}
+              context={{ kind: "thread", threadId: thread.id }}
+            />
+          </ThreadTimelineNavigationProvider>
+        );
+    }
+  };
+  const activeFileTabModel = syncedOrderedSecondaryFileTabs.find(
+    (tab) => tab.id === activeFixedSecondaryTabId,
+  );
+  const fileTabContent = activeFileTabModel
+    ? renderSplitTabContent(activeFileTabModel)
+    : undefined;
   const isBrowserTabActive = activeBrowserTab !== null;
   const threadDetailContent = (
     <MarkdownLocalFileContextMenuContext.Provider
@@ -2800,6 +2800,16 @@ function ThreadDetailViewInternal(props: ThreadDetailViewInternalProps) {
                 (candidate) =>
                   candidate.pluginId === activePluginPanelTab.pluginId &&
                   candidate.id === activePluginPanelTab.actionId,
+              )?.layout === "flush",
+            splitPanelStateId: thread.id,
+            splitTabModels: syncedOrderedSecondaryFileTabs,
+            renderSplitTabContent,
+            splitTabContentFillsRegion: (tab) =>
+              tab.kind === "plugin-panel" &&
+              pluginThreadPanelActions.find(
+                (candidate) =>
+                  candidate.pluginId === tab.pluginId &&
+                  candidate.id === tab.actionId,
               )?.layout === "flush",
             renderBrowserDeck,
             isBrowserTabActive,
