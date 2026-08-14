@@ -175,7 +175,7 @@ Messaging:
   turn. Use --mode queue for non-urgent follow-ups that can wait until the agent
   is free.
 
-  bb thread stop [id]                      Stop an active or provisioning thread
+  bb thread stop [id]                      Stop work and release the agent runtime
   bb thread retry [id]                     Continue a subscription-limited turn
     --self                                 Target current thread
     --request-id <id>                      Require an exact failed request id
@@ -204,7 +204,13 @@ Ownership:
     --clear-parent-thread                  Remove parent assignment
     --section <id>                         Move into a section
     --clear-section                        Remove section assignment
+    --model <model>                        Set the sticky model for the next and later turns
+    --reasoning-level <level>              Set the sticky reasoning level (provider-dependent)
     --visibility <visibility>              Set visible or hidden
+
+  Model and reasoning updates stay within the thread's current provider. BB
+  validates them against that provider's current model catalog, applies them on
+  the next turn, and keeps using them on later turns until changed.
 
   bb thread read [id]                      Mark read
   bb thread unread [id]                    Mark unread
@@ -229,6 +235,13 @@ Lifecycle:
 
   bb thread archive [id]                   Archive a thread (and children/hidden forks)
     --self                                 Archive current thread
+
+  `thread stop` preserves the thread history, metadata, environment, and future
+  resume behavior. It stops active work and releases an idle agent runtime.
+  The command succeeds when no runtime is loaded. Archive a finished hidden
+  worker first, then stop it to release memory promptly. A stop that only
+  releases an idle runtime adds no interruption: it leaves the timeline and any
+  pending interaction of that thread untouched.
 
   bb thread unarchive [id]                 Unarchive a thread
     --self                                 Unarchive current thread

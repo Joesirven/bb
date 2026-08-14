@@ -44,7 +44,6 @@ import {
   type PaneContextValue,
 } from "@/views/thread-detail/PaneContext";
 import { PaneMaximizeButton } from "@/views/thread-detail/PaneMaximizeButton";
-import { SplitDimmingButton } from "@/views/thread-detail/SplitDimmingButton";
 import {
   closeSidebarPane,
   createSidebarSplitState,
@@ -670,7 +669,6 @@ function SidebarSplitLeaf(
             }
             actions={
               <>
-                <SplitDimmingButton />
                 <PaneMaximizeButton />
                 <Button
                   type="button"

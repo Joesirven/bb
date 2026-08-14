@@ -38,6 +38,7 @@ import {
 import { useHostDaemon } from "@/hooks/useHostDaemon";
 import { UsageLimitsSettingsSection } from "@/components/settings/UsageLimitsSettingsSection";
 import { SidebarThreadListSetting } from "@/components/settings/SidebarThreadListSetting";
+import { SplitDimmingSetting } from "@/components/settings/SplitDimmingSetting";
 import { useSettingsNavState } from "@/components/settings/settings-nav";
 import { PluginSettingsPage } from "@/components/plugin/PluginSettings";
 import { FileOpenersSettingsSection } from "@/components/settings/FileOpenersSettingsSection";
@@ -48,6 +49,7 @@ import { KeyboardSettingsSection } from "@/components/settings/KeyboardSettingsS
 import { MachinesSettingsSection } from "@/components/settings/MachinesSettingsSection";
 import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedThreadsSettingsSection";
 import { CliSkillsSettingsSection } from "@/components/settings/CliSkillsSettingsSection";
+import { MarketplacesSettingsSection } from "@/components/settings/MarketplacesSettingsSection";
 import {
   useUpdateGeneralSettings,
   useUpdateAppearance,
@@ -210,9 +212,11 @@ export interface ExperimentsSettingsSectionProps {
   claudeCodeMockCliTrafficEnabled: boolean;
   editMessagesEnabled: boolean;
   newOnboardingEnabled: boolean;
+  providerSessionReapingEnabled: boolean;
   onClaudeCodeMockCliTrafficEnabledChange: (enabled: boolean) => void;
   onEditMessagesEnabledChange: (enabled: boolean) => void;
   onNewOnboardingEnabledChange: (enabled: boolean) => void;
+  onProviderSessionReapingEnabledChange: (enabled: boolean) => void;
 }
 
 const THEME_PREFERENCE_OPTIONS: ReadonlyArray<ThemePreferenceOption> = [
@@ -761,6 +765,7 @@ export function AppearanceSettingsSection({
           faviconColor={faviconColor}
           onFaviconColorChange={onFaviconColorChange}
         />
+        <SplitDimmingSetting />
       </div>
     </SettingsSection>
   );
@@ -952,14 +957,18 @@ export function ProviderSettingsSection({
 const CLAUDE_CODE_MOCK_CLI_TRAFFIC_EXPERIMENT_LABEL = "Mock CLI Traffic";
 const EDIT_MESSAGES_EXPERIMENT_LABEL = "Edit messages";
 const NEW_ONBOARDING_EXPERIMENT_LABEL = "New onboarding";
+const PROVIDER_SESSION_REAPING_EXPERIMENT_LABEL =
+  "Idle provider session release";
 export function ExperimentsSettingsSection({
   claudeCodeMockCliTrafficEnabled,
   disabled,
   editMessagesEnabled,
   newOnboardingEnabled,
+  providerSessionReapingEnabled,
   onClaudeCodeMockCliTrafficEnabledChange,
   onEditMessagesEnabledChange,
   onNewOnboardingEnabledChange,
+  onProviderSessionReapingEnabledChange,
 }: ExperimentsSettingsSectionProps) {
   return (
     <SettingsSection
@@ -1001,6 +1010,18 @@ export function ExperimentsSettingsSection({
             disabled={disabled}
             onCheckedChange={onNewOnboardingEnabledChange}
             aria-label={NEW_ONBOARDING_EXPERIMENT_LABEL}
+          />
+        </SettingsWithControl>
+
+        <SettingsWithControl
+          label={PROVIDER_SESSION_REAPING_EXPERIMENT_LABEL}
+          description="Release restorable provider sessions after 30 idle minutes. A change can take up to five minutes."
+        >
+          <Switch
+            checked={providerSessionReapingEnabled}
+            disabled={disabled}
+            onCheckedChange={onProviderSessionReapingEnabledChange}
+            aria-label={PROVIDER_SESSION_REAPING_EXPERIMENT_LABEL}
           />
         </SettingsWithControl>
       </div>
@@ -1175,8 +1196,17 @@ export function SettingsView() {
             newOnboarding: enabled,
           })
         }
+        providerSessionReapingEnabled={experiments.providerSessionReaping}
+        onProviderSessionReapingEnabledChange={(enabled) =>
+          updateExperimentsMutation.mutate({
+            ...experiments,
+            providerSessionReaping: enabled,
+          })
+        }
       />
     );
+  } else if (activeSection === "marketplaces") {
+    content = <MarketplacesSettingsSection />;
   } else if (activeSection === "community") {
     content = <CommunitySettingsSection />;
   } else if (activeSection === "archived") {

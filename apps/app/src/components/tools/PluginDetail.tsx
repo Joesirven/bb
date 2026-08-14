@@ -23,13 +23,13 @@ import { formatHomePathForDisplay } from "@bb/shared-ui/lib/utils";
 import { Icon } from "@bb/shared-ui/icon";
 import { Link } from "react-router-dom";
 import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
-import { PluginIcon } from "@/components/plugin/PluginIcon";
 import {
   PluginDetailReleaseControl,
   PluginDetailReleaseStatus,
   pluginHasUpdateSurfaces,
 } from "@/components/plugin/management/PluginUpdatesCard";
 import {
+  CatalogEntryIcon,
   formatAbsoluteDate,
   PluginLogo,
 } from "@/components/plugin/management/plugin-ui";
@@ -62,9 +62,10 @@ import { usePluginSlots } from "@/lib/plugin-slots";
 import { useClipboardCopy } from "@/lib/clipboard";
 
 function pluginSourceLabel(plugin: PluginListItem): string | null {
-  return plugin.provenance === "builtin" || plugin.provenance === "catalog"
-    ? "BB Official"
-    : null;
+  // Only plugins that ship inside the app wear the pill. A catalog install
+  // can come from any marketplace, and the list DTO does not say which, so
+  // claiming BB Official for all of them would be a wrong trust signal.
+  return plugin.provenance === "builtin" ? "BB Official" : null;
 }
 
 /** Passive provenance shown beside an installed plugin's name. */
@@ -130,16 +131,31 @@ export function CatalogPluginDetail({
   return (
     <ResourceDetailPage
       maxWidthClassName="max-w-5xl"
-      leading={
-        <PluginIcon
-          pluginId={entry.pluginId}
-          icon={entry.icon}
-          className="size-full"
-        />
-      }
+      leading={<CatalogEntryIcon entry={entry} className="size-full" />}
       title={entry.displayName}
-      titleMeta={<ProvenancePill label="BB Official" />}
-      metadata={<span>{entry.category}</span>}
+      titleMeta={<ProvenancePill label={entry.marketplaceDisplayName} />}
+      metadata={
+        <>
+          <span>{entry.category}</span>
+          {entry.author === null ? null : (
+            <span>
+              {" · By: "}
+              {entry.author.url === null ? (
+                entry.author.name
+              ) : (
+                <a
+                  href={entry.author.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline underline-offset-2"
+                >
+                  {entry.author.name}
+                </a>
+              )}
+            </span>
+          )}
+        </>
+      }
       actions={
         <ResourceInstallControl
           accessibleLabel={`Install ${entry.displayName}`}

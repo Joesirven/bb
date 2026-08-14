@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useDebounceValue } from "usehooks-ts";
 import {
@@ -26,7 +27,6 @@ import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { appToast } from "@/components/ui/app-toast";
 import { TOOLS_PAGE_BAND_CLASSES } from "@/components/tools/tools-navigation";
-import { pluginIconName } from "@/components/plugin/PluginIcon";
 import { BrowseArchetypeCards } from "@/components/plugin/browse-hero/BrowseArchetypeCards";
 import { nextComposerRequestNonce } from "@/components/plugin/browse-hero/browse-hero-archetypes";
 import { BrowseHeroCarousel } from "@/components/plugin/browse-hero/BrowseHeroCarousel";
@@ -40,7 +40,7 @@ import {
 } from "@/hooks/queries/plugin-catalog-queries";
 import { removePlugin } from "@/hooks/queries/plugin-settings-queries";
 import type { AddPluginInitial } from "./AddPluginDialog";
-import { PlaceholderBadge } from "./plugin-ui";
+import { CatalogEntryIcon } from "./plugin-ui";
 
 /**
  * The Browse page: hero → one CTA row (create + install-from-source) → then
@@ -62,19 +62,33 @@ export function BrowsePluginsTab({
   const [query, setQuery] = useState("");
   // Example cards and the page button open the hero's inline composer through
   // this request; nonces make a repeated click on the same card still land.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const creationViewActive = searchParams.get("view") === "create";
   const [heroRequest, setHeroRequest] = useState<{
     nonce: number;
     seed?: string;
     close?: boolean;
-  } | null>(null);
+  } | null>(() =>
+    creationViewActive ? { nonce: nextComposerRequestNonce() } : null,
+  );
+  const [requestedCreationView, setRequestedCreationView] =
+    useState(creationViewActive);
   const [composing, setComposing] = useState(false);
   const openComposer = (seed?: string) =>
     setHeroRequest({
       nonce: nextComposerRequestNonce(),
       ...(seed === undefined ? {} : { seed }),
     });
-  const closeComposer = () =>
-    setHeroRequest({ nonce: nextComposerRequestNonce(), close: true });
+  // Creation is a real navigation entry so the app shell's existing sidebar
+  // Back control owns the return to Browse. POP/forward navigation then drives
+  // the inline composer without adding another page-local back affordance.
+  if (requestedCreationView !== creationViewActive) {
+    setRequestedCreationView(creationViewActive);
+    setHeroRequest({
+      nonce: nextComposerRequestNonce(),
+      ...(creationViewActive ? {} : { close: true }),
+    });
+  }
   // The composer lives in the hero at the top; opening it from a card further
   // down must bring it into view or the click appears to do nothing.
   useEffect(() => {
@@ -93,7 +107,10 @@ export function BrowsePluginsTab({
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [debouncedQuery] = useDebounceValue(query.trim(), 300);
   const searchQuery = usePluginCatalogSearch(debouncedQuery, { enabled: true });
-  const entries = searchQuery.data ?? [];
+  // Browse offers installs, so an entry this BB cannot install is noise here.
+  // The search API still returns incompatible entries with their reasons for
+  // the CLI, where the "requires newer bb" status is the useful signal.
+  const entries = (searchQuery.data ?? []).filter((entry) => entry.compatible);
   const availableCategories: string[] = [];
   for (const entry of entries) {
     if (!availableCategories.includes(entry.category)) {
@@ -109,17 +126,15 @@ export function BrowsePluginsTab({
     id: name,
     label: name,
   }));
-  const visibleEntries = (
+  const visibleEntries =
     categories.length === 0
       ? entries
-      : entries.filter((entry) => categories.includes(entry.category))
-  )
-    .slice()
-    .sort((left, right) => {
-      const result = left.displayName.localeCompare(right.displayName);
-      if (result !== 0) return sortDirection === "asc" ? result : -result;
-      return left.entryId.localeCompare(right.entryId);
-    });
+      : entries.filter((entry) => categories.includes(entry.category));
+  const groups = groupByMarketplace(visibleEntries, sortDirection);
+  // One group is the ordinary case (only BB Official is registered): naming it
+  // would add page chrome that tells the user nothing. A second marketplace is
+  // exactly when the origin of an entry starts to matter.
+  const showMarketplaceHeadings = groups.length > 1;
 
   return (
     <ResourceCollectionViewport scrollId="plugins-browse-results">
@@ -131,12 +146,16 @@ export function BrowsePluginsTab({
       <div className={cn("space-y-7", TOOLS_PAGE_BAND_CLASSES)}>
         {/* The create control sits at the page's top right, like every other
             collection's actions row; the hero keeps only its showcase. */}
-        <div className="flex justify-end">
+        <div className="flex items-center justify-end gap-3">
           <div className="flex items-stretch">
             <Button
-              aria-pressed={composing}
               className="rounded-r-none"
-              onClick={() => (composing ? closeComposer() : openComposer())}
+              onClick={() => {
+                if (creationViewActive) return;
+                const nextSearchParams = new URLSearchParams(searchParams);
+                nextSearchParams.set("view", "create");
+                setSearchParams(nextSearchParams);
+              }}
             >
               <Icon name="MessageSquarePlus" className="size-3.5" />
               Create a plugin
@@ -235,25 +254,39 @@ export function BrowsePluginsTab({
                 />
               ) : (
                 <div className="space-y-3">
-                  {visibleEntries.length === 0 ? (
+                  {groups.length === 0 ? (
                     <ResourceListState
                       state="empty"
                       message="No plugins match these filters."
                     />
                   ) : (
-                    <ResourceBrowseGrid className="grid-cols-[repeat(auto-fill,minmax(min(100%,18rem),1fr))] gap-2">
-                      {visibleEntries.map((entry) => (
-                        <BrowseCard
-                          key={entry.entryId}
-                          entry={entry}
-                          installedPluginId={
-                            entry.installed ? entry.pluginId : null
-                          }
-                          onInstall={onInstall}
-                          onOpenPlugin={onOpenPlugin}
-                        />
-                      ))}
-                    </ResourceBrowseGrid>
+                    groups.map((group) => (
+                      <section key={group.marketplace} className="space-y-3">
+                        {showMarketplaceHeadings ? (
+                          <h2 className="flex items-baseline gap-2 text-sm font-medium text-foreground">
+                            {group.displayName}
+                            {group.official ? null : (
+                              <span className="text-2xs font-normal text-subtle-foreground">
+                                third-party marketplace
+                              </span>
+                            )}
+                          </h2>
+                        ) : null}
+                        <ResourceBrowseGrid className="grid-cols-[repeat(auto-fill,minmax(min(100%,18rem),1fr))] gap-2">
+                          {group.entries.map((entry) => (
+                            <BrowseCard
+                              key={`${entry.marketplace}/${entry.entryId}`}
+                              entry={entry}
+                              installedPluginId={
+                                entry.installed ? entry.pluginId : null
+                              }
+                              onInstall={onInstall}
+                              onOpenPlugin={onOpenPlugin}
+                            />
+                          ))}
+                        </ResourceBrowseGrid>
+                      </section>
+                    ))
                   )}
                 </div>
               )}
@@ -263,6 +296,47 @@ export function BrowsePluginsTab({
       </div>
     </ResourceCollectionViewport>
   );
+}
+
+interface MarketplaceGroup {
+  marketplace: string;
+  displayName: string;
+  official: boolean;
+  entries: PluginCatalogSearchEntry[];
+}
+
+/**
+ * Group the catalog the way the store reads it: by marketplace (the server
+ * returns the official one first), as a flat grid within each one. Category
+ * stays a filter, not a layout. Encounter order is the server's order, so
+ * grouping never reshuffles it.
+ */
+function groupByMarketplace(
+  entries: readonly PluginCatalogSearchEntry[],
+  sortDirection: "asc" | "desc",
+): MarketplaceGroup[] {
+  const groups: MarketplaceGroup[] = [];
+  for (const entry of entries) {
+    let group = groups.find((item) => item.marketplace === entry.marketplace);
+    if (group === undefined) {
+      group = {
+        marketplace: entry.marketplace,
+        displayName: entry.marketplaceDisplayName,
+        official: entry.official,
+        entries: [],
+      };
+      groups.push(group);
+    }
+    group.entries.push(entry);
+  }
+  for (const group of groups) {
+    group.entries.sort((left, right) => {
+      const result = left.displayName.localeCompare(right.displayName);
+      if (result !== 0) return sortDirection === "asc" ? result : -result;
+      return left.entryId.localeCompare(right.entryId);
+    });
+  }
+  return groups;
 }
 
 function BrowseCard({
@@ -298,28 +372,32 @@ function BrowseCard({
     },
   });
 
-  const leading = (
-    <PlaceholderBadge
-      className="size-6"
-      iconName={pluginIconName(entry.icon)}
-    />
-  );
+  const leading = <CatalogEntryIcon entry={entry} className="size-6" />;
   const description =
     entry.description.length > 0 ? entry.description : undefined;
   const descriptionArea = (
     <span className="block min-h-[2lh]">{description}</span>
   );
+  // Why an entry cannot be installed outranks who wrote it.
   const byline =
     !entry.compatible && entry.incompatibleReason !== null ? (
       <span className="text-warning-text">{entry.incompatibleReason}</span>
+    ) : entry.author !== null ? (
+      <span>By: {entry.author.name}</span>
     ) : undefined;
+  const footerMeta = entry.official ? undefined : (
+    <span className="text-2xs text-subtle-foreground">
+      {entry.marketplaceDisplayName}
+    </span>
+  );
   const headerAction =
     installedPluginId !== null ? (
       <ResourceInstallControl
         accessibleLabel={`Uninstall ${entry.displayName}`}
+        icon="Check"
         pending={uninstall.isPending}
         presentation="icon"
-        tooltip={`Uninstall ${entry.displayName}`}
+        tooltip={`Installed — uninstall ${entry.displayName}`}
         className="border-transparent bg-transparent text-[color:color-mix(in_oklab,var(--success)_72%,var(--ink))] shadow-none hover:border-transparent hover:bg-transparent hover:text-[color:color-mix(in_oklab,var(--success)_72%,var(--ink))] focus-visible:border-transparent focus-visible:bg-transparent focus-visible:text-[color:color-mix(in_oklab,var(--success)_72%,var(--ink))]"
         onAction={() => setConfirmingUninstall(true)}
       />
@@ -332,8 +410,10 @@ function BrowseCard({
         onAction={() =>
           onInstall({
             entryId: entry.entryId,
+            marketplace: entry.marketplace,
             displayName: entry.displayName,
             icon: entry.icon,
+            iconUrl: entry.iconUrl,
             source: entry.source,
           })
         }
@@ -348,6 +428,7 @@ function BrowseCard({
         title={entry.displayName}
         description={descriptionArea}
         byline={byline}
+        footerMeta={footerMeta}
         headerAction={headerAction}
         openLabel={`Open ${entry.displayName} details`}
         onOpen={() => onOpenPlugin(entry.pluginId)}
