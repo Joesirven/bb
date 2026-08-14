@@ -1,3 +1,8 @@
+// Version 131 carries Claude's terminal-failure drain suppression through the
+// provider bridge. Older daemons can otherwise keep translating trailing SDK
+// output under the prior event semantics after the server has accepted the
+// failed turn as retryable.
+//
 // Version 130 makes every provider plugin-declared on the wire. Two changes,
 // both of which an older daemon rejects outright:
 //
@@ -22,7 +27,7 @@
 //
 // The version mismatch is what triggers the enrolled daemon's automatic update
 // instead of an `invalid-message` reconnect loop.
-export const HOST_DAEMON_PROTOCOL_VERSION = 130 as const;
+export const HOST_DAEMON_PROTOCOL_VERSION = 131 as const;
 
 /**
  * Absolute ceiling for any executable artifact delivered to a host daemon —
