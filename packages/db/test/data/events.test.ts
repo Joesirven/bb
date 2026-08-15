@@ -18,6 +18,7 @@ import {
   appendStoredThreadEventInTransaction,
   appendStoredThreadEventsInTransaction,
   findStoredEventRow,
+  findFirstStoredTurnInputAcceptedRow,
   findStoredTimelineWindowByteBudgetFloor,
   getActiveStoredTurnId,
   getHighWaterMarks,
@@ -1431,6 +1432,47 @@ describe("events", () => {
 
     expect(rowsByThreadId.get(thread.id)?.sequence).toBe(5);
     expect(rowsByThreadId.get(otherThread.id)?.sequence).toBe(1);
+  });
+
+  it("finds the first accepted input for one exact turn", () => {
+    const { db, thread } = setup();
+
+    insertEvents(db, noopNotifier, [
+      {
+        threadId: thread.id,
+        sequence: 1,
+        type: "turn/input/accepted",
+        ...createTurnEventFields({ turnId: "turn-target" }),
+        data: JSON.stringify({ clientRequestId: "creq_23456789aa" }),
+      },
+      {
+        threadId: thread.id,
+        sequence: 2,
+        type: "turn/input/accepted",
+        ...createTurnEventFields({ turnId: "turn-other" }),
+        data: JSON.stringify({ clientRequestId: "creq_23456789ab" }),
+      },
+      {
+        threadId: thread.id,
+        sequence: 3,
+        type: "turn/input/accepted",
+        ...createTurnEventFields({ turnId: "turn-target" }),
+        data: JSON.stringify({ clientRequestId: "creq_23456789ac" }),
+      },
+    ]);
+
+    expect(
+      findFirstStoredTurnInputAcceptedRow(db, {
+        threadId: thread.id,
+        turnId: "turn-target",
+      })?.sequence,
+    ).toBe(1);
+    expect(
+      findFirstStoredTurnInputAcceptedRow(db, {
+        threadId: thread.id,
+        turnId: "turn-missing",
+      }),
+    ).toBeNull();
   });
 
   it("lists client turn request rows by thread/request keys", () => {

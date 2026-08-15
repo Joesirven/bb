@@ -888,6 +888,11 @@ export interface ListOpenTurnInputAcceptedRowsByThreadIdsArgs {
   threadIds: readonly string[];
 }
 
+export interface FindFirstStoredTurnInputAcceptedRowArgs {
+  threadId: string;
+  turnId: string;
+}
+
 export interface ThreadClientTurnRequestKey {
   requestId: ClientTurnRequestId;
   threadId: string;
@@ -1226,6 +1231,27 @@ export function listOpenTurnInputAcceptedRowsByThreadIds(
     (left, right) =>
       left.threadId.localeCompare(right.threadId) ||
       left.sequence - right.sequence,
+  );
+}
+
+export function findFirstStoredTurnInputAcceptedRow(
+  db: DbQueryConnection,
+  args: FindFirstStoredTurnInputAcceptedRowArgs,
+): StoredEventRow | null {
+  return (
+    db
+      .select(storedEventRowFields)
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, args.threadId),
+          eq(events.turnId, args.turnId),
+          eq(events.type, "turn/input/accepted"),
+        ),
+      )
+      .orderBy(events.sequence)
+      .limit(1)
+      .get() ?? null
   );
 }
 

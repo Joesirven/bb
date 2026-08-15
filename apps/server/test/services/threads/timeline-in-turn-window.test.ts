@@ -473,7 +473,7 @@ function walkAllPages(
   thread: Thread,
   eventBudget: number,
 ): WalkResult {
-  const rowsByPage: string[][] = [];
+  const rowsByPage: TimelineRow[][] = [];
   const seenCursors = new Set<string>();
   let cursor: TimelinePaginationCursor | null = null;
   let maxEventRowCount = 0;
@@ -483,7 +483,7 @@ function walkAllPages(
     const { profile, response } = buildPage(db, thread, eventBudget, cursor);
     pages += 1;
     maxEventRowCount = Math.max(maxEventRowCount, profile.eventRowCount);
-    rowsByPage.push(response.rows.map((row) => JSON.stringify(row)));
+    rowsByPage.push(response.rows);
     if (!response.timelinePage.hasOlderRows) {
       break;
     }
@@ -499,11 +499,25 @@ function walkAllPages(
     expect(pages).toBeLessThan(100);
   }
 
-  return { maxEventRowCount, pages, rows: rowsByPage.reverse().flat() };
+  const serializedRowsById = new Map<string, string>();
+  for (const row of rowsByPage.reverse().flat()) {
+    const serialized = JSON.stringify(row);
+    const existing = serializedRowsById.get(row.id);
+    if (existing !== undefined) {
+      expect(existing).toBe(serialized);
+      continue;
+    }
+    serializedRowsById.set(row.id, serialized);
+  }
+  return {
+    maxEventRowCount,
+    pages,
+    rows: [...serializedRowsById.values()],
+  };
 }
 
 describe("in-turn timeline windows", () => {
-  it("bounds a running turn that is larger than the whole budget", () => {
+  it("bounds a running turn while keeping its initiating user message", () => {
     const { db, thread } = setup();
     // One 300-item turn still running: no user message inside it to cut on.
     seedTurns(db, thread, { completeLastTurn: false, itemsPerTurn: [300] });
@@ -516,6 +530,14 @@ describe("in-turn timeline windows", () => {
 
     const budgeted = buildPage(db, thread, 100, null);
     expect(budgeted.profile.eventRowCount).toBeLessThanOrEqual(120);
+    expect(budgeted.response.rows).toContainEqual(
+      expect.objectContaining({
+        kind: "conversation",
+        role: "user",
+        text: "User message 1",
+        turnRequest: expect.objectContaining({ status: "accepted" }),
+      }),
+    );
     expect(budgeted.response.rows.length).toBeLessThan(
       unbudgeted.response.rows.length,
     );
@@ -664,12 +686,33 @@ describe("in-turn timeline windows", () => {
       itemStart: 75,
     });
     const second = buildPage(db, thread, LARGE_BUDGET, null).response;
+    const secondOlderCursor = second.timelinePage.olderCursor;
+    if (secondOlderCursor === null) {
+      throw new Error("expected the byte-budgeted turn to have an older page");
+    }
+    const secondOlder = buildPage(
+      db,
+      thread,
+      LARGE_BUDGET,
+      secondOlderCursor,
+    ).response;
     appendCommandItems(db, thread, {
       commandChars: 25_000,
       count: 10,
       itemStart: 95,
     });
     const third = buildPage(db, thread, LARGE_BUDGET, null).response;
+
+    for (const response of [first, second, secondOlder, third]) {
+      expect(response.rows).toContainEqual(
+        expect.objectContaining({
+          kind: "conversation",
+          role: "user",
+          text: "User message 1",
+          turnRequest: expect.objectContaining({ status: "accepted" }),
+        }),
+      );
+    }
 
     expect(first.timelinePage.olderCursor?.anchorSeq).not.toBe(
       second.timelinePage.olderCursor?.anchorSeq,

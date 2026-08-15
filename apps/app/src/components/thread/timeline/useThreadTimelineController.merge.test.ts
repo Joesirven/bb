@@ -167,6 +167,20 @@ describe("timeline page row merging", () => {
     ]);
   });
 
+  it("keeps a pinned active-turn prompt ahead of prepended in-turn work", () => {
+    const prompt = userRow({ id: "active-turn-prompt", sequence: 1 });
+    const rows = prependOlderTimelineRows({
+      olderRows: [prompt, commandRow({ id: "older-work", sequence: 10 })],
+      loadedRows: [prompt, commandRow({ id: "latest-work", sequence: 20 })],
+    });
+
+    expect(rows.map((row) => row.id)).toEqual([
+      "active-turn-prompt",
+      "older-work",
+      "latest-work",
+    ]);
+  });
+
   it("keeps distinct byte-budget slices of one finished turn", () => {
     const olderCommands = [
       commandRow({ id: "command-1", sequence: 10 }),

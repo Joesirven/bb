@@ -19,6 +19,7 @@ import type {
 } from "@bb/server-contract";
 import {
   findStoredTimelineWindowByteBudgetFloor,
+  findFirstStoredTurnInputAcceptedRow,
   findTimelineWindowBudgetFloorSequence,
   getStoredEventRowsByParentToolCallIdsDataBytes,
   getEnvironment,
@@ -37,6 +38,7 @@ import {
   listLatestBackgroundTaskStateRowsByItemIds,
   listLatestGoalEventRowsByThreadIds,
   listLatestOpenBackgroundTaskStateRowsForThread,
+  listStoredClientTurnRequestRowsByKeys,
   listStoredTimelineWindowEventRows,
   listTodoSnapshotEventRowsForThread,
   listStoredToolCallRowsByItemIds,
@@ -1021,6 +1023,8 @@ interface ResolveTimelineSegmentWindowArgs {
 }
 
 interface ResolvedTimelineSegmentWindow {
+  /** Unfinished turn whose work is cut by this sequence window. */
+  activeTurnId: string | null;
   beforeSequence: number | undefined;
   byteWindowSequenceStart: number | null;
   /**
@@ -1061,8 +1065,15 @@ function applyTimelineWindowByteBudget(
   if (floor.kind === "single-event-too-large") {
     const hasOlderRows =
       floor.hasOlderRows || args.window.knownHasOlderSegments === true;
+    const activeTurnId =
+      args.window.activeTurnId ??
+      findUnfinishedTurnCoveringSequence(db, {
+        sequence: floor.sequenceStart,
+        threadId: args.threadId,
+      });
     return {
       ...args.window,
+      activeTurnId,
       byteWindowSequenceStart: floor.sequenceStart,
       knownHasOlderSegments: hasOlderRows,
       oversizedEventPlaceholder: {
@@ -1093,8 +1104,16 @@ function applyTimelineWindowByteBudget(
     return args.window;
   }
 
+  const activeTurnId =
+    args.window.activeTurnId ??
+    findUnfinishedTurnCoveringSequence(db, {
+      sequence: floor.sequenceStart,
+      threadId: args.threadId,
+    });
+
   return {
     ...args.window,
+    activeTurnId,
     byteWindowSequenceStart: floor.sequenceStart,
     requiresWholeItemClosure: true,
     sequenceWindowStart: {
@@ -1169,7 +1188,10 @@ function resolveTimelineWindowBounds(
   args: ResolveTimelineWindowBoundsArgs,
 ): Pick<
   ResolvedTimelineSegmentWindow,
-  "effectiveSegmentLimit" | "sequenceStart" | "sequenceWindowStart"
+  | "activeTurnId"
+  | "effectiveSegmentLimit"
+  | "sequenceStart"
+  | "sequenceWindowStart"
 > & { affordableAnchorCount: number } {
   const { anchors, budgetFloorSequence, segmentLimit, threadId } = args;
   const affordable = countAffordableAnchors(
@@ -1194,6 +1216,7 @@ function resolveTimelineWindowBounds(
     })
   ) {
     return {
+      activeTurnId: unfinishedTurnId,
       affordableAnchorCount: 0,
       effectiveSegmentLimit: segmentLimit,
       sequenceWindowStart: {
@@ -1209,6 +1232,7 @@ function resolveTimelineWindowBounds(
   // empty thread rather than a slow one.
   const segmentCount = Math.max(1, affordable);
   return {
+    activeTurnId: null,
     affordableAnchorCount: segmentCount,
     effectiveSegmentLimit: segmentCount,
     sequenceWindowStart: null,
@@ -1235,6 +1259,7 @@ function resolveTimelineSegmentWindow(
 ): ResolvedTimelineSegmentWindow {
   const { eventBudget, page, threadId } = args;
   const noAnchors: ResolvedTimelineSegmentWindow = {
+    activeTurnId: null,
     beforeSequence: undefined,
     byteWindowSequenceStart: null,
     requiresWholeItemClosure: false,
@@ -1314,6 +1339,7 @@ function resolveTimelineSegmentWindow(
       threadId,
     });
     return {
+      activeTurnId: bounds.activeTurnId,
       // Every cursor names the first sequence the page that issued it covered,
       // so this page ends exactly there. Reading up to the *next anchor* past
       // the cursor instead — and trimming that segment off after projecting it
@@ -1353,6 +1379,7 @@ function resolveTimelineSegmentWindow(
     threadId,
   });
   return {
+    activeTurnId: bounds.activeTurnId,
     beforeSequence: undefined,
     byteWindowSequenceStart: null,
     requiresWholeItemClosure: bounds.sequenceWindowStart !== null,
@@ -1365,6 +1392,33 @@ function resolveTimelineSegmentWindow(
     oversizedEventPlaceholder: null,
     sequenceStart: bounds.sequenceStart,
   };
+}
+
+function ensureTimelineWindowActiveTurnInputRows(
+  db: DbConnection,
+  args: TimelineWindowRowsArgs & { activeTurnId: string | null },
+): StoredEventRow[] {
+  if (args.activeTurnId === null) {
+    return [...args.rows];
+  }
+
+  const acceptedInputRow = findFirstStoredTurnInputAcceptedRow(db, {
+    threadId: args.threadId,
+    turnId: args.activeTurnId,
+  });
+  if (!acceptedInputRow) {
+    return [...args.rows];
+  }
+
+  const clientRequestId = parseAcceptedInputClientRequestId(acceptedInputRow);
+  const requestRows = listStoredClientTurnRequestRowsByKeys(db, {
+    keys: [{ requestId: clientRequestId, threadId: args.threadId }],
+  });
+  return mergeStoredEventRowsById([
+    ...requestRows,
+    acceptedInputRow,
+    ...args.rows,
+  ]);
 }
 
 function selectStandardTimelineEventRows(
@@ -1402,15 +1456,23 @@ function selectStandardTimelineEventRows(
     threadId: thread.id,
   };
   const windowRows = listStoredTimelineWindowEventRows(db, windowArgs);
+  const windowRowsWithActiveTurnInput = ensureTimelineWindowActiveTurnInputRows(
+    db,
+    {
+      activeTurnId: window.activeTurnId,
+      rows: windowRows,
+      threadId: thread.id,
+    },
+  );
   const wholeItemWindowRows = window.requiresWholeItemClosure
     ? ensureSequenceWindowWholeItemRows(db, {
         beforeSequence,
         maxInlineOutputChars,
-        rows: windowRows,
+        rows: windowRowsWithActiveTurnInput,
         sequenceStart,
         threadId: thread.id,
       })
-    : windowRows;
+    : windowRowsWithActiveTurnInput;
   const selectedRowsWithTurnStarts = ensureTimelineWindowTurnStartedRows(db, {
     threadId: thread.id,
     rows: wholeItemWindowRows,
