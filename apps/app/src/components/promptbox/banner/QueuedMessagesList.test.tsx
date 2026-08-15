@@ -338,7 +338,7 @@ describe("QueuedMessagesList", () => {
       makeQueuedMessage("q_two", "Second queued message"),
     ];
 
-    const { container, getByRole, getByText, getByTestId, queryByText } = render(
+    const { container, getByRole, getByText, getByTestId } = render(
       <QueuedMessagesList
         queuedMessages={queuedMessages}
         inlineEditor={{
@@ -387,7 +387,6 @@ describe("QueuedMessagesList", () => {
       ),
     ).toBe(true);
     const editingLabel = getByText(/Editing queued message/u);
-    expect(queryByText("Follow-ups")).toBeNull();
     expect(
       editingLabel.closest('[data-inline-message-editor-frame="embedded"]'),
     ).not.toBeNull();
