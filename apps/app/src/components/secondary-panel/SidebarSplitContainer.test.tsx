@@ -11,7 +11,6 @@ import { TooltipProvider } from "@bb/shared-ui/tooltip";
 import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
-import { usePaneContext } from "@/views/thread-detail/PaneContext";
 import {
   SidebarSplitContainer,
   type SidebarSplitPaneRenderArgs,
@@ -26,14 +25,6 @@ import {
   type SidebarSplitState,
 } from "./sidebarSplitLayout";
 import { getFixedPanelTabsStateStorageKey } from "@/lib/fixed-panel-tabs-state";
-
-vi.mock("@/views/thread-detail/PaneMaximizeButton", () => ({
-  PaneMaximizeButton: () => null,
-}));
-
-vi.mock("@/views/thread-detail/SplitDimmingButton", () => ({
-  SplitDimmingButton: () => null,
-}));
 
 const TABS: readonly SidebarSplitTabDescriptor[] = [
   { id: "tab-a", label: "A", leadingVisual: null },
@@ -82,12 +73,6 @@ function renderContainer({
           onActivateTab={onActivateTab}
           onGlobalTabReorder={vi.fn()}
           panelStateId={PANEL_STATE_ID}
-          renderConversationControl={() => (
-            <button data-testid="conversation-control">Conversation</button>
-          )}
-          renderHideControl={() => (
-            <button data-testid="hide-control">Hide</button>
-          )}
           renderPane={renderPane}
           tabs={tabs}
         />
@@ -96,13 +81,20 @@ function renderContainer({
   );
 }
 
-function StatefulPane({ paneId }: { paneId: string }) {
-  const pane = usePaneContext();
+function StatefulPane({
+  onMoveActiveTabToSide,
+  paneId,
+}: {
+  onMoveActiveTabToSide: NonNullable<
+    SidebarSplitPaneRenderArgs["onMoveActiveTabToSide"]
+  >;
+  paneId: string;
+}) {
   const [instanceId] = useState(() => `${paneId}-${nextPaneInstance++}`);
   return (
     <div data-testid={`pane-content-${paneId}`}>
       <span data-testid={`pane-instance-${paneId}`}>{instanceId}</span>
-      <button type="button" onClick={() => pane.onMoveToSide?.("left")}>
+      <button type="button" onClick={() => onMoveActiveTabToSide("left")}>
         Move {paneId} left
       </button>
     </div>
@@ -156,8 +148,6 @@ describe("SidebarSplitContainer", () => {
           }}
           onGlobalTabReorder={vi.fn()}
           panelStateId={PANEL_STATE_ID}
-          renderConversationControl={() => null}
-          renderHideControl={() => null}
           renderPane={({ paneId }) => (
             <div data-testid={`pane-content-${paneId}`}>{paneId}</div>
           )}
@@ -188,40 +178,108 @@ describe("SidebarSplitContainer", () => {
     ).toBe(false);
   });
 
-  it("reports pane focus and visibility and reserves outer controls once", () => {
+  it("reports both panes as visible and assigns outer controls only once", () => {
     const split = createTwoPaneState();
-    const maximizedPaneId =
+    const focusedPaneId =
       split.layout.root.type === "split" &&
       split.layout.root.children[0]?.type === "pane"
         ? split.layout.root.children[0].paneId
         : split.layout.focusedPaneId;
-    persistState({
-      ...focusSidebarPane(split, maximizedPaneId),
-      maximizedPaneId,
-    });
+    persistState(focusSidebarPane(split, focusedPaneId));
 
     renderContainer({
-      renderPane: ({ isFocused, isVisible, paneId }) => (
+      renderPane: ({ isFocused, isVisible, paneId, showOuterControls }) => (
         <div data-testid={`pane-state-${paneId}`}>
-          {`${isFocused}:${isVisible}`}
+          {`${isFocused}:${isVisible}:${showOuterControls}`}
         </div>
       ),
     });
 
+    const paneStates = screen.getAllByTestId(/pane-state-/);
+    expect(paneStates.map((pane) => pane.textContent)).toContain(
+      "true:true:false",
+    );
+    expect(paneStates.map((pane) => pane.textContent)).toContain(
+      "false:true:true",
+    );
+  });
+
+  it.each([
+    ["left", "flex-row", "tab-a,tab-b"],
+    ["right", "flex-row", "tab-b,tab-a"],
+    ["top", "flex-col", "tab-a,tab-b"],
+    ["bottom", "flex-col", "tab-b,tab-a"],
+  ] as const)(
+    "moves the active tab to the supported %s position without dragging",
+    (side, directionClass, expectedOrder) => {
+      renderContainer({
+        renderPane: ({ group, onMoveActiveTabToSide }) => (
+          <button type="button" onClick={() => onMoveActiveTabToSide?.(side)}>
+            Move active {side}
+            <span data-testid="active-pane-tab">{group.activeTabId}</span>
+          </button>
+        ),
+      });
+
+      fireEvent.click(
+        screen.getByRole("button", { name: `Move active ${side}tab-a` }),
+      );
+
+      const panes = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-split-pane-id]"),
+      );
+      expect(panes).toHaveLength(2);
+      expect(panes[0]?.parentElement?.parentElement?.className).toContain(
+        directionClass,
+      );
+      expect(
+        panes
+          .map(
+            (pane) =>
+              pane.querySelector<HTMLElement>("[data-testid='active-pane-tab']")
+                ?.textContent,
+          )
+          .join(","),
+      ).toBe(expectedOrder);
+    },
+  );
+
+  it("positions the focused active tab even when the control is in the outer pane", () => {
+    const split = createTwoPaneState();
+    const firstPane =
+      split.layout.root.type === "split" &&
+      split.layout.root.children[0]?.type === "pane"
+        ? split.layout.root.children[0]
+        : null;
+    expect(firstPane).not.toBeNull();
+    if (firstPane === null) return;
+    persistState(focusSidebarPane(split, firstPane.paneId));
+
+    renderContainer({
+      renderPane: ({ group, onMoveActiveTabToSide, showOuterControls }) => (
+        <div>
+          <span data-testid="active-pane-tab">{group.activeTabId}</span>
+          {showOuterControls ? (
+            <button
+              type="button"
+              onClick={() => onMoveActiveTabToSide?.("bottom")}
+            >
+              Move focused bottom
+            </button>
+          ) : null}
+        </div>
+      ),
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Move focused bottom" }),
+    );
     expect(
-      screen.getByTestId(`pane-state-${maximizedPaneId}`).textContent,
-    ).toBe("true:true");
-    const hiddenPane = Array.from(
-      document.querySelectorAll<HTMLElement>("[data-split-pane-id]"),
-    ).find((pane) => pane.dataset.splitPaneId !== maximizedPaneId);
-    expect(hiddenPane).toBeDefined();
-    if (hiddenPane === undefined) return;
-    expect(
-      screen.getByTestId(`pane-state-${hiddenPane.dataset.splitPaneId}`)
-        .textContent,
-    ).toBe("false:false");
-    expect(screen.getAllByTestId("conversation-control")).toHaveLength(1);
-    expect(screen.getAllByTestId("hide-control")).toHaveLength(1);
+      screen
+        .getAllByTestId("active-pane-tab")
+        .map((tab) => tab.textContent)
+        .join(","),
+    ).toBe("tab-b,tab-a");
   });
 
   it("keeps stateful pane content attached to pane identity after a move", () => {
@@ -229,7 +287,13 @@ describe("SidebarSplitContainer", () => {
     persistState(split);
 
     renderContainer({
-      renderPane: ({ paneId }) => <StatefulPane paneId={paneId} />,
+      renderPane: ({ onMoveActiveTabToSide, paneId }) =>
+        onMoveActiveTabToSide ? (
+          <StatefulPane
+            onMoveActiveTabToSide={onMoveActiveTabToSide}
+            paneId={paneId}
+          />
+        ) : null,
     });
 
     const paneIds = Array.from(

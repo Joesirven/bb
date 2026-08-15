@@ -261,7 +261,86 @@ describe("ThreadSecondaryPanel full-screen control", () => {
     expect(onToggleConversationCollapse).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps one conversation restore control in the split outer header", () => {
+  it("offers every existing split position from the right-panel control and moves the active tab", () => {
+    const { wrapper: Wrapper } = createQueryClientTestHarness();
+    const fileTab = createWorkspaceFilePreviewFixedPanelTab({
+      environmentId: "env-test",
+      projectId: "project-test",
+      tab: {
+        lineRange: null,
+        path: "src/index.ts",
+        source: { kind: "working-tree" },
+        statusLabel: null,
+      },
+    });
+
+    render(
+      <Wrapper>
+        <SidebarProvider>
+          <TooltipProvider>
+            <PanelGroup direction="horizontal">
+              <ThreadSecondaryPanel
+                activeTab={fileTab}
+                canUseGitUi={false}
+                fileTabs={[
+                  {
+                    id: fileTab.id,
+                    filename: "index.ts",
+                    isActive: true,
+                    leadingVisual: null,
+                    statusLabel: null,
+                    onSelect: noop,
+                    onClose: noop,
+                  },
+                ]}
+                isConversationCollapsed={false}
+                isOpen
+                metadataContent={null}
+                onClose={noop}
+                onCollapse={noop}
+                onFileTabReorder={noop}
+                onOpenNewTab={noop}
+                onPanelChange={noop}
+                onPanelFocus={noop}
+                onToggleConversationCollapse={noop}
+                renderAsDrawer={false}
+                renderSplitTabContent={() => null}
+                splitPanelStateId="thread-position-menu"
+                splitTabModels={[fileTab]}
+              />
+            </PanelGroup>
+          </TooltipProvider>
+        </SidebarProvider>
+      </Wrapper>,
+    );
+
+    const control = screen.getByRole("button", { name: "Full Screen" });
+    fireEvent.focus(control);
+    expect(
+      screen.getByRole("menu", { name: "Pane arrangement" }),
+    ).not.toBeNull();
+    for (const side of ["left", "right", "top", "bottom"] as const) {
+      expect(
+        screen.getByRole("menuitem", { name: `Move ${side}` }),
+      ).not.toBeNull();
+    }
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move right" }));
+    const panes = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-split-pane-id]"),
+    );
+    expect(panes).toHaveLength(2);
+    expect(panes[0]?.textContent).toContain("Info");
+    expect(panes[1]?.textContent).toContain("index.ts");
+    expect(
+      document.querySelectorAll(
+        '[data-testid="thread-secondary-panel-top-chrome"]',
+      ),
+    ).toHaveLength(2);
+    expect(document.querySelectorAll("header")).toHaveLength(0);
+  });
+
+  it("keeps one conversation restore control across split tab rows", () => {
     const { wrapper: Wrapper } = createQueryClientTestHarness();
     const fileTab = createWorkspaceFilePreviewFixedPanelTab({
       environmentId: "env-test",

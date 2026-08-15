@@ -9,24 +9,8 @@ import {
   type ReactNode,
 } from "react";
 import { useAtomValue } from "jotai";
-import { Button } from "@bb/shared-ui/button";
-import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@bb/shared-ui/lib/utils";
-import {
-  AppPageHeader,
-  HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
-} from "@/components/layout/AppPageHeader";
-import { CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS } from "@/components/ui/chromeStyleTokens";
-import {
-  CONTEXT_INACTIVE_TEXT_CLASS,
-  CONTEXT_SELECTION_SURFACE_CLASS,
-} from "@/components/ui/context-selection";
-import {
-  beginSplitDrag,
-  decidePaneDrop,
-  SPLIT_PANE_DATA_ATTR,
-  type SplitDropTarget,
-} from "@/lib/split-drag";
+import { beginSplitDrag, type SplitDropTarget } from "@/lib/split-drag";
 import {
   clampSplitPairFraction,
   computePaneRects,
@@ -43,9 +27,7 @@ import {
   PaneContext,
   type PaneContextValue,
 } from "@/views/thread-detail/PaneContext";
-import { PaneMaximizeButton } from "@/views/thread-detail/PaneMaximizeButton";
 import {
-  closeSidebarPane,
   createSidebarSplitState,
   focusSidebarPane,
   getSidebarGroupForPane,
@@ -61,8 +43,6 @@ import {
   serializeSidebarSplitState,
   sidebarPaneGroupId,
   sidebarSplitStorageKey,
-  swapSidebarPanes,
-  toggleSidebarPaneMaximize,
   type SidebarSplitState,
   type SidebarTabGroup,
 } from "./sidebarSplitLayout";
@@ -87,8 +67,10 @@ export interface SidebarSplitPaneRenderArgs {
   ) => void;
   onReorderTab: (request: SecondaryPanelTabReorderRequest) => void;
   onFocusPane: () => void;
+  onMoveActiveTabToSide?: (side: SplitSide) => void;
   onSelectTab: (tabId: string) => void;
   paneId: string;
+  showOuterControls: boolean;
 }
 
 interface SidebarSplitContainerProps {
@@ -96,8 +78,6 @@ interface SidebarSplitContainerProps {
   onActivateTab: (tabId: string) => void;
   onGlobalTabReorder: (request: SecondaryPanelTabReorderRequest) => void;
   panelStateId: string;
-  renderConversationControl: () => ReactNode;
-  renderHideControl: () => ReactNode;
   renderPane: (args: SidebarSplitPaneRenderArgs) => ReactNode;
   tabs: readonly SidebarSplitTabDescriptor[];
 }
@@ -107,8 +87,6 @@ export function SidebarSplitContainer({
   onActivateTab,
   onGlobalTabReorder,
   panelStateId,
-  renderConversationControl,
-  renderHideControl,
   renderPane,
   tabs,
 }: SidebarSplitContainerProps) {
@@ -242,23 +220,22 @@ export function SidebarSplitContainer({
     [commitState],
   );
 
-  const closePane = useCallback(
-    (paneId: string) => {
-      commitState((current) => closeSidebarPane(current, paneId), true);
-    },
-    [commitState],
-  );
-
-  const toggleMaximize = useCallback(
-    (paneId: string) => {
-      commitState((current) => toggleSidebarPaneMaximize(current, paneId));
-    },
-    [commitState],
-  );
-
-  const movePaneToSide = useCallback(
-    (paneId: string, side: SplitSide) => {
+  const moveActiveTabToSide = useCallback(
+    (side: SplitSide) => {
       commitState((current) => {
+        const paneId = current.layout.focusedPaneId;
+        const sourceGroup = getSidebarGroupForPane(current, paneId);
+        if (sourceGroup === null) return current;
+        if (sourceGroup.tabIds.length > 1) {
+          if (countPanes(current.layout.root) >= MAX_PANES) return current;
+          return moveSidebarTab(
+            current,
+            paneId,
+            sourceGroup.activeTabId,
+            { paneId, zone: side },
+            { groupId: nextSidebarSplitGroupId(current) },
+          );
+        }
         const rects = computePaneRects(current.layout.root);
         const target = listPanes(current.layout.root)
           .filter((pane) => pane.paneId !== paneId)
@@ -363,62 +340,6 @@ export function SidebarSplitContainer({
     [moveTab, state, tabs],
   );
 
-  const beginPaneDrag = useCallback(
-    (paneId: string, event: ReactPointerEvent, label: string) => {
-      if (countPanes(state.layout.root) < 2 || event.button !== 0) return;
-      const startX = event.clientX;
-      const startY = event.clientY;
-      const restoreMaximize = state.maximizedPaneId === paneId;
-      beginSplitDrag(startX, startY, {
-        ghostLabel: label,
-        sourceEl:
-          event.currentTarget instanceof Element
-            ? event.currentTarget.closest<HTMLElement>(
-                `[${SPLIT_PANE_DATA_ATTR}]`,
-              )
-            : null,
-        shouldEngage: (x, y) =>
-          Math.hypot(x - startX, y - startY) > PANE_DRAG_ENGAGE_DISTANCE_PX,
-        onEngage: restoreMaximize
-          ? () =>
-              commitState((current) =>
-                current.maximizedPaneId === null
-                  ? current
-                  : { ...current, maximizedPaneId: null },
-              )
-          : undefined,
-        decide: (targetPaneId, zone) =>
-          decidePaneDrop({ zone, isSelf: targetPaneId === paneId }),
-        onDrop: (target) => {
-          commitState(
-            (current) =>
-              target.zone === "center"
-                ? swapSidebarPanes(current, paneId, target.paneId)
-                : moveSidebarPaneToSide(
-                    current,
-                    paneId,
-                    target.paneId,
-                    target.zone,
-                  ),
-            true,
-          );
-        },
-        onEnd: restoreMaximize
-          ? () =>
-              commitState((current) =>
-                current.maximizedPaneId === current.layout.focusedPaneId
-                  ? current
-                  : {
-                      ...current,
-                      maximizedPaneId: current.layout.focusedPaneId,
-                    },
-              )
-          : undefined,
-      });
-    },
-    [commitState, state.layout.root, state.maximizedPaneId],
-  );
-
   const reorderTab = useCallback(
     (paneId: string, request: SecondaryPanelTabReorderRequest) => {
       commitState((current) =>
@@ -444,6 +365,16 @@ export function SidebarSplitContainer({
   );
 
   const firstPane = listPanes(state.layout.root)[0];
+  const focusedGroup = getSidebarGroupForPane(
+    state,
+    state.layout.focusedPaneId,
+  );
+  const canMoveActiveTabToSide =
+    focusedGroup !== null &&
+    (focusedGroup.tabIds.length > 1 ? paneCount < MAX_PANES : paneCount > 1);
+  const activeTabPositionHandler = canMoveActiveTabToSide
+    ? moveActiveTabToSide
+    : undefined;
   if (!hasMultiplePanes && firstPane !== undefined) {
     const group = getSidebarGroupForPane(state, firstPane.paneId);
     if (group === null) return null;
@@ -458,8 +389,10 @@ export function SidebarSplitContainer({
         beginTabDrag(firstPane.paneId, tabId, event),
       onReorderTab: (request) => reorderTab(firstPane.paneId, request),
       onFocusPane: () => focusPane(firstPane.paneId),
+      onMoveActiveTabToSide: activeTabPositionHandler,
       onSelectTab: (tabId) => selectTab(firstPane.paneId, tabId),
       paneId: firstPane.paneId,
+      showOuterControls: true,
     });
   }
 
@@ -472,21 +405,14 @@ export function SidebarSplitContainer({
         isRightEdge
         dimsInactiveSplits={dimsInactiveSplits}
         focusedPaneId={state.layout.focusedPaneId}
-        maximizedPaneId={state.maximizedPaneId}
-        renderConversationControl={renderConversationControl}
-        renderHideControl={renderHideControl}
         renderPane={renderPane}
         state={state}
-        tabs={tabs}
-        onBeginPaneDrag={beginPaneDrag}
         onBeginTabDrag={beginTabDrag}
-        onClosePane={closePane}
         onFocusPane={focusPane}
-        onMovePaneToSide={movePaneToSide}
+        onMoveActiveTabToSide={activeTabPositionHandler}
         onReorderTab={reorderTab}
         onResize={resize}
         onSelectTab={selectTab}
-        onToggleMaximize={toggleMaximize}
       />
     </div>
   );
@@ -497,34 +423,23 @@ interface SidebarSplitTreeProps {
   focusedPaneId: string;
   isRightEdge: boolean;
   isTopRow: boolean;
-  maximizedPaneId: string | null;
   node: LayoutNode;
-  onBeginPaneDrag: (
-    paneId: string,
-    event: ReactPointerEvent,
-    label: string,
-  ) => void;
   onBeginTabDrag: (
     paneId: string,
     tabId: string,
     event: ReactPointerEvent<HTMLElement>,
   ) => void;
-  onClosePane: (paneId: string) => void;
   onFocusPane: (paneId: string) => void;
-  onMovePaneToSide: (paneId: string, side: SplitSide) => void;
+  onMoveActiveTabToSide?: (side: SplitSide) => void;
   onReorderTab: (
     paneId: string,
     request: SecondaryPanelTabReorderRequest,
   ) => void;
   onResize: (path: SplitPath, childIndex: number, fraction: number) => void;
   onSelectTab: (paneId: string, tabId: string) => void;
-  onToggleMaximize: (paneId: string) => void;
   path: number[];
-  renderConversationControl: () => ReactNode;
-  renderHideControl: () => ReactNode;
   renderPane: (args: SidebarSplitPaneRenderArgs) => ReactNode;
   state: SidebarSplitState;
-  tabs: readonly SidebarSplitTabDescriptor[];
 }
 
 function SidebarSplitTree(props: SidebarSplitTreeProps) {
@@ -544,7 +459,7 @@ function SidebarSplitTree(props: SidebarSplitTreeProps) {
           {index > 0 ? (
             <SidebarSplitDivider
               dir={node.dir}
-              hidden={props.maximizedPaneId !== null}
+              hidden={false}
               onResize={(fraction) =>
                 props.onResize(props.path, index - 1, fraction)
               }
@@ -581,124 +496,43 @@ function SidebarSplitLeaf(
   const group = groupId === null ? undefined : props.state.groups[groupId];
   if (group === undefined) return null;
   const isFocused = pane.paneId === props.focusedPaneId;
-  const isMaximized = pane.paneId === props.maximizedPaneId;
-  const hiddenByMaximize =
-    props.maximizedPaneId !== null && props.maximizedPaneId !== pane.paneId;
-  const activeDescriptor =
-    props.tabs.find((tab) => tab.id === group.activeTabId) ?? props.tabs[0];
-  if (activeDescriptor === undefined) return null;
-  const reserveOuterControl =
-    props.maximizedPaneId !== null
-      ? isMaximized
-      : props.isTopRow && props.isRightEdge;
+  const reserveOuterControl = props.isTopRow && props.isRightEdge;
   const context: PaneContextValue = {
     paneId: pane.paneId,
     isFocused,
     isSplitPane: true,
     secondaryPanelHost: null,
     reservesWindowPanelToggle: reserveOuterControl,
-    onRequestClose: () => props.onClosePane(pane.paneId),
-    isMaximized,
-    onToggleMaximize: () => props.onToggleMaximize(pane.paneId),
-    onMoveToSide: (side) => props.onMovePaneToSide(pane.paneId, side),
+    onRequestClose: null,
+    isMaximized: false,
+    onToggleMaximize: null,
     isBoundedPane: true,
-    isTopRow: isMaximized || props.isTopRow,
+    isTopRow: props.isTopRow,
     ownsWindowTopLeft: false,
     navigateInPane: () => {},
-    beginPaneDrag: (event, label) =>
-      props.onBeginPaneDrag(pane.paneId, event, label),
   };
   return (
     <PaneContext.Provider value={context}>
       <div
         onPointerDown={() => props.onFocusPane(pane.paneId)}
-        aria-hidden={hiddenByMaximize || undefined}
-        style={hiddenByMaximize ? { contentVisibility: "hidden" } : undefined}
-        className={cn(
-          "relative flex min-h-0 min-w-0 flex-1 overflow-hidden",
-          hiddenByMaximize && "invisible pointer-events-none",
-          isMaximized && "absolute inset-0 z-30",
-        )}
+        className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
         data-split-pane-id={pane.paneId}
         data-focused={isFocused ? "true" : "false"}
-        data-maximized={isMaximized ? "true" : undefined}
       >
         <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-sidebar">
-          <AppPageHeader
-            isWindowDragRegion={isMaximized || props.isTopRow}
-            ownsWindowTopLeft={false}
-            className="z-[21]"
-            center={
-              <div
-                data-pane-header-focus-tab={isFocused ? "" : undefined}
-                className={cn(
-                  "relative -mx-2 -my-1 flex min-w-0 cursor-grab touch-none select-none items-center gap-1.5 rounded-md px-2 py-1",
-                  isFocused && CONTEXT_SELECTION_SURFACE_CLASS,
-                )}
-                onPointerDown={(event) => {
-                  if (event.button === 0) {
-                    props.onBeginPaneDrag(
-                      pane.paneId,
-                      event,
-                      activeDescriptor.label,
-                    );
-                  }
-                }}
-              >
-                <span
-                  className={cn(
-                    "flex size-3.5 shrink-0 items-center justify-center transition-colors [&_svg]:size-3.5",
-                    !isFocused &&
-                      props.dimsInactiveSplits &&
-                      CONTEXT_INACTIVE_TEXT_CLASS,
-                  )}
-                >
-                  {activeDescriptor.leadingVisual}
-                </span>
-                <p
-                  className={cn(
-                    "truncate text-sm font-normal transition-colors",
-                    !isFocused &&
-                      props.dimsInactiveSplits &&
-                      CONTEXT_INACTIVE_TEXT_CLASS,
-                  )}
-                >
-                  {activeDescriptor.label}
-                </p>
-              </div>
-            }
-            actions={
-              <>
-                <PaneMaximizeButton />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className={cn(
-                    HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
-                    CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
-                  )}
-                  aria-label="Close pane"
-                  onClick={() => props.onClosePane(pane.paneId)}
-                >
-                  <Icon name="ClosePluginPane" />
-                </Button>
-                {reserveOuterControl ? props.renderConversationControl() : null}
-                {reserveOuterControl ? props.renderHideControl() : null}
-              </>
-            }
-          />
           {props.renderPane({
             group,
             isFocused,
             isSplitPane: true,
-            isVisible: !hiddenByMaximize,
+            isVisible: true,
             onBeginTabDrag: (tabId, event) =>
               props.onBeginTabDrag(pane.paneId, tabId, event),
             onReorderTab: (request) => props.onReorderTab(pane.paneId, request),
             onFocusPane: () => props.onFocusPane(pane.paneId),
+            onMoveActiveTabToSide: props.onMoveActiveTabToSide,
             onSelectTab: (tabId) => props.onSelectTab(pane.paneId, tabId),
             paneId: pane.paneId,
+            showOuterControls: reserveOuterControl,
           })}
         </section>
         <div

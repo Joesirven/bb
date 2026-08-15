@@ -16,7 +16,6 @@ import { Icon } from "@bb/shared-ui/icon";
 import { EmptyStatePanel } from "@bb/shared-ui/empty-state";
 import { Panel, PanelResizeHandle } from "react-resizable-panels";
 import { Button } from "@bb/shared-ui/button";
-import { HEADER_PANE_ACTION_ICON_BUTTON_CLASS } from "@/components/layout/AppPageHeader";
 import { CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS } from "@/components/ui/chromeStyleTokens";
 import {
   COARSE_POINTER_COMPACT_ICON_BUTTON_CLASS,
@@ -88,6 +87,8 @@ import type { AppShortcutPresentation } from "@/lib/app-keybindings";
 import { TabPill } from "@/components/ui/tab-pill";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@bb/shared-ui/tooltip";
 import { dispatchBrowserViewBoundsSync } from "@/lib/browser-view-bounds-sync";
+import type { SplitSide } from "@/lib/split-layout";
+import { PaneArrangementButton } from "@/views/thread-detail/PaneMaximizeButton";
 import {
   SidebarSplitContainer,
   type SidebarSplitPaneRenderArgs,
@@ -600,6 +601,7 @@ export function ThreadSecondaryPanel({
       event: ReactPointerEvent<HTMLElement>,
     ) => void;
     onSelectSurfaceTab?: (tabId: string) => void;
+    onMoveActiveTabToSide?: (side: SplitSide) => void;
     onSurfaceFileTabReorder: SecondaryPanelTabReorderHandler;
     showDiffSurfaceTab: boolean;
     showInfoSurfaceTab: boolean;
@@ -632,29 +634,19 @@ export function ThreadSecondaryPanel({
     </Button>
   );
 
-  const renderConversationCollapseButton = () =>
+  const renderConversationCollapseButton = (
+    onMoveActiveTabToSide?: (side: SplitSide) => void,
+  ) =>
     conversationCollapseControl ? (
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className={cn(
-              HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
-              CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
-              "shrink-0",
-              usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
-            )}
-            onClick={conversationCollapseControl.onClick}
-            aria-label={conversationCollapseControl.label}
-            aria-pressed={conversationCollapseControl.isFullScreen}
-          >
-            <Icon name={conversationCollapseControl.iconName} />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>{conversationCollapseControl.label}</TooltipContent>
-      </Tooltip>
+      <PaneArrangementButton
+        className={cn(
+          "shrink-0",
+          usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
+        )}
+        isFullScreen={conversationCollapseControl.isFullScreen}
+        onMoveToSide={onMoveActiveTabToSide}
+        onToggleFullScreen={conversationCollapseControl.onClick}
+      />
     ) : null;
 
   const renderPanelSurface = ({
@@ -665,6 +657,7 @@ export function ThreadSecondaryPanel({
     fileSurfaceTabs,
     isBrowserSurfaceActive,
     onBeginTabDrag,
+    onMoveActiveTabToSide,
     onSelectSurfaceTab,
     onSurfaceFileTabReorder,
     showDiffSurfaceTab,
@@ -784,8 +777,11 @@ export function ThreadSecondaryPanel({
               ) : null}
             </div>
             {showOuterControls ? (
-              <div className="flex min-w-0 shrink-0 items-center gap-1">
-                {renderConversationCollapseButton()}
+              <div
+                className="flex min-w-0 shrink-0 items-center gap-1"
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                {renderConversationCollapseButton(onMoveActiveTabToSide)}
                 {renderAsDrawer || inlinePanelToggle === "button" ? (
                   renderHidePanelButton()
                 ) : inlinePanelToggle === "reserved" ? (
@@ -910,8 +906,6 @@ export function ThreadSecondaryPanel({
       }}
       onGlobalTabReorder={onFileTabReorder}
       panelStateId={splitPanelStateId}
-      renderConversationControl={renderConversationCollapseButton}
-      renderHideControl={renderHidePanelButton}
       tabs={splitTabs}
       renderPane={(pane: SidebarSplitPaneRenderArgs) => {
         const activePaneTabId = pane.group.activeTabId;
@@ -959,6 +953,7 @@ export function ThreadSecondaryPanel({
           fileSurfaceTabs: paneFileTabs,
           isBrowserSurfaceActive: isPaneBrowserActive,
           onBeginTabDrag: pane.onBeginTabDrag,
+          onMoveActiveTabToSide: pane.onMoveActiveTabToSide,
           onSelectSurfaceTab: pane.onSelectTab,
           onSurfaceFileTabReorder: pane.onReorderTab,
           showDiffSurfaceTab: pane.group.tabIds.includes(
@@ -967,7 +962,7 @@ export function ThreadSecondaryPanel({
           showInfoSurfaceTab: pane.group.tabIds.includes(
             SIDEBAR_FIXED_INFO_TAB_ID,
           ),
-          showOuterControls: !pane.isSplitPane,
+          showOuterControls: pane.showOuterControls,
         });
       }}
     />
