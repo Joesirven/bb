@@ -16,7 +16,7 @@ import type {
   PluginUpdateCheckEntry as PluginUpdateResult,
 } from "@bb/server-contract";
 import { installedPluginSchema } from "@bb/server-contract";
-import { PLUGIN_SDK_VERSION, PLUGIN_SUBMISSION_FORM_URL } from "@bb/domain";
+import { PLUGIN_SDK_VERSION } from "@bb/domain";
 import { BbHttpError } from "@bb/sdk";
 import { parseDataDirEnvValue, resolveProdDataDir } from "@bb/config/runtime";
 import {
@@ -774,7 +774,7 @@ function installPlanSummary(plan: PluginCatalogInstallPlan): string {
     return `Installing ${plan.displayName}, bundled with BB (${plan.source})`;
   }
   if (plan.official) {
-    return `Installing ${plan.displayName} from the BB Official marketplace, reviewed by BB (${plan.source})`;
+    return `Installing ${plan.displayName} from the ${plan.marketplaceDisplayName} marketplace, reviewed by BB (${plan.source})`;
   }
   const author =
     plan.author.url === null
@@ -897,7 +897,7 @@ export function registerPluginCommands(
   plugin
     .command("search <query>")
     .description(
-      "Search every plugin the store lists: the plugins bundled with the app, the BB Official marketplace catalog BB reviews, and any third-party marketplace added on this host. The Marketplace column names the source; only bb-official is reviewed by BB",
+      "Search every plugin the store lists: the plugins bundled with the app, the reserved bb-community marketplace catalog BB reviews, and any third-party marketplace added on this host. The Marketplace column names the source; only bb-community is reviewed by BB",
     )
     .option("--json", "Output JSON")
     .action(
@@ -935,27 +935,6 @@ export function registerPluginCommands(
             rows,
           ),
         );
-      }),
-    );
-
-  plugin
-    .command("submit")
-    .description(
-      "Print the intake form link for submitting a plugin to BB's marketplace",
-    )
-    .option("--json", "Output JSON")
-    .action(
-      action(async (opts: JsonOutputOptions) => {
-        // The form is the entire submission UI for now — this links out
-        // rather than relaying, so submission itself happens in the browser.
-        if (opts.json) {
-          outputJson(opts, { url: PLUGIN_SUBMISSION_FORM_URL });
-          return;
-        }
-        console.log(
-          "Submit your plugin to BB's marketplace (public GitHub repo required):",
-        );
-        console.log(PLUGIN_SUBMISSION_FORM_URL);
       }),
     );
 

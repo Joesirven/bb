@@ -48,7 +48,6 @@ collection manifest by pinning a ref and pointing each entry at its subdir.
         "github": "get-bb",
         "url": "https://getbb.app"
       },
-      "engines": { "bb": ">=0.0.34", "bbPluginSdk": "^0.5.0" },
       "source": {
         "git": {
           "url": "https://github.com/brsbl/bb-plugins.git",
@@ -88,8 +87,12 @@ Rules:
   the Browse tab derives its groupings from tags. The official marketplace
   keeps a curated tag vocabulary (the current `PLUGIN_CATALOG_CATEGORIES`
   set, lowercased) so its sections stay stable.
-- `engines` may narrow the package manifest's ranges. It may never widen them.
-  Restore the `marketplacePolicyWideningProblem` check from PR #636.
+- A listing declares no compatibility. There is no `engines` field, and the
+  strict schema rejects one. A listing's copy of a range is a second source of
+  truth that goes stale as soon as the plugin publishes a new version, and it
+  hid compatible plugins behind an out-of-date manifest. bb reads `engines.bb`
+  and `engines.bbPluginSdk` from the fetched plugin's own `package.json` and
+  refuses the install there instead.
 - Sources are objects, not strings. Strings stay in the CLI; the manifest is a
   machine contract with per-field validation and no parser to reimplement.
 - Display fields exist so the store renders without a clone or an npm fetch.
@@ -257,34 +260,27 @@ their authors' repos or npm packages. The registry never hosts plugin code.
 
 ### Submission flow
 
-Submission is an in-app form, not an external page. The plugin detail page's
-"Submit to marketplace" action opens a dialog instead of linking out, and
-`bb plugin submit` runs the same flow from the terminal.
+Submission uses the built-in `submit-a-plugin` skill. The skill completes the
+release and marketplace pull request without a product-specific form.
 
-1. **Prefill from what BB already knows.** For a locally developed plugin,
-   the app reads the package manifest and git remote: plugin id, display
+1. **Read what BB already knows.** For a locally developed plugin, the agent
+   reads the package manifest and Git remote: plugin id, display
    name, description, icon, repository URL, subdir from the collection
    manifest, and current version tags. The author reviews and completes the
    entry — tags, `url`, the range — rather than typing it from scratch.
-2. **Create the PR as the author.** BB composes `entries/<id>.json` and uses
+2. **Create the PR as the author.** The agent composes `entries/<id>.json` and uses
    the author's own GitHub credentials — `gh` auth on the host, which BB's
    audience overwhelmingly has — to fork the registry repo, push a branch,
    and open the PR from their account. This makes `author.github`
    self-verifying: the listing's owner is the account that opened the PR.
-3. **Fallback without `gh`.** BB writes the composed `entries/<id>.json` to
-   disk and shows the manual steps: fork the registry repo, add the file,
-   open the PR. No hosted form exists — the in-app flow replaces the Google
-   Form behind `PLUGIN_SUBMISSION_FORM_URL`, and that constant and its
-   detail-page link retire in the same change.
+3. **Fallback without `gh`.** The agent writes the composed entry to disk.
+   It then gives the manual fork and pull request steps.
 4. Registry CI validates the entry. A maintainer reviews the plugin itself —
    source, behavior, requested engine ranges — and merges to approve.
 5. Merge publishes the updated catalog; the app picks it up on its next
    conditional refresh.
 
-The in-app path is ordinary feature work: a dialog, manifest prefill, and
-`gh repo fork` / `gh pr create` orchestration on the host. The hosted
-fallback is the larger lift (worker API, bot account, abuse protection) and
-can ship after the `gh` path.
+The skill uses `gh repo fork` and `gh pr create` on the host when available.
 
 ### Author identity and ownership
 
@@ -298,8 +294,7 @@ requires `author.github` and treats it as the listing's ownership record:
   listings accept any public member of the org.
 - Ownership transfer is an entry PR that changes `author`, approved by a
   maintainer, ideally with an approving review from the departing owner.
-- Contact email stays in the private intake submission, never in the
-  published manifest.
+- The listing workflow does not collect contact email.
 - CI warns (does not fail) when the entry author disagrees with the
   `author` field of the plugin's own package manifest at the pinned or
   resolved source, so drift is visible in review.
@@ -363,8 +358,8 @@ files, the compose-and-validate build, and publishing to
 entries. The app bundles a seed snapshot as offline fallback. Restore the
 refresh loop. Replace `GIT_OFFICIAL_PLUGINS` with catalog rows; the Browse tab
 reads the catalog. Generalize provenance. Server-side icon fetch and
-validation. The in-app submission dialog and `bb plugin submit` upgrade can
-land late in this phase; until then, maintainers write entry files by hand.
+validation. Add the built-in submission skill after the registry contract
+stabilizes.
 
 **Phase 2 — semver from git tags.**
 Add the tags candidate path to the update resolver, `tagPrefix`, moved-tag
@@ -415,7 +410,7 @@ payload changes.
 - Published schemas use `https://getbb.app/schemas/` URLs.
 - This stack adds the R2 reader and its binding. The registry repository,
   publication credentials, and publication workflow remain future work.
-- The existing intake-form link remains. This stack adds no hosted submission
-  service or in-app submission dialog.
+- The submission skill creates registry pull requests. No hosted submission
+  service or in-app submission dialog exists.
 
 > AGENT GENERATED: by Claude Fable 5

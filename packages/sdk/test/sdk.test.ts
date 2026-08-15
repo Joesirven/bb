@@ -1298,6 +1298,7 @@ describe("@bb/sdk", () => {
       provenance: "catalog" as const,
       isOrphanedBuiltin: false,
       catalogEntryId: "notes",
+      publisherLabel: "BB Community",
       sourceDisplay: "npm · @bb/notes · tracks compatible",
       updateState: {},
       enabled: true,
@@ -1367,6 +1368,8 @@ describe("@bb/sdk", () => {
               source: "npm:@bb/notes@^1",
               marketplace: "acme-plugins",
               marketplaceDisplayName: "Acme Plugins",
+              publisherKey: "acme-plugins",
+              publisherLabel: "Acme Plugins",
               official: false,
               author: { name: "Acme", url: null },
               installed: true,
@@ -1410,10 +1413,6 @@ describe("@bb/sdk", () => {
     ).resolves.toMatchObject([
       { entryId: "notes", pluginId: "notes", compatible: true },
     ]);
-    expect(sdk.plugins.catalog.submission()).toEqual({
-      url: "https://docs.google.com/forms/d/e/1FAIpQLScRTABhHwCjuZWYn0lJJd0aZT2cYvGk2KaZ2GF-1GsXoLMLSQ/viewform",
-    });
-
     expect(queue.requests).toEqual([
       {
         bodyText: undefined,
