@@ -136,7 +136,7 @@ describe("ThreadSecondaryPanel compact file content", () => {
     expect(screen.getByLabelText("Retained file content")).toBe(fileContent);
   });
 
-  it("renders one active body without changing the saved wide split", () => {
+  it("renders one active compact body and restores the saved wide split", () => {
     const { wrapper: Wrapper } = createQueryClientTestHarness();
     const activeTab = createWorkspaceFilePreviewFixedPanelTab({
       environmentId: "env-test",
@@ -167,46 +167,58 @@ describe("ThreadSecondaryPanel compact file content", () => {
       <input aria-label="Unexpected split body" />
     ));
 
-    render(
+    const renderPanel = (renderAsDrawer: boolean) => (
       <Wrapper>
         <TooltipProvider>
-          <ThreadSecondaryPanel
-            activeTab={activeTab}
-            canUseGitUi={false}
-            fileTabs={[
-              {
-                id: activeTab.id,
-                filename: "index.ts",
-                isActive: true,
-                leadingVisual: null,
-                statusLabel: null,
-                onSelect: noop,
-                onClose: noop,
-              },
-            ]}
-            fileTabContent={<input aria-label="Compact active body" />}
-            isConversationCollapsed={false}
-            isOpen
-            metadataContent={null}
-            onClose={noop}
-            onCollapse={noop}
-            onFileTabReorder={noop}
-            onOpenNewTab={noop}
-            onPanelChange={noop}
-            onPanelFocus={noop}
-            onToggleConversationCollapse={noop}
-            renderAsDrawer
-            renderSplitTabContent={renderSplitTabContent}
-            splitPanelStateId={panelStateId}
-            splitTabModels={[activeTab]}
-          />
+          <PanelGroup direction="horizontal">
+            <ThreadSecondaryPanel
+              activeTab={activeTab}
+              canUseGitUi={false}
+              fileTabs={[
+                {
+                  id: activeTab.id,
+                  filename: "index.ts",
+                  isActive: true,
+                  leadingVisual: null,
+                  statusLabel: null,
+                  onSelect: noop,
+                  onClose: noop,
+                },
+              ]}
+              fileTabContent={<input aria-label="Compact active body" />}
+              isConversationCollapsed={false}
+              isOpen
+              metadataContent={null}
+              onClose={noop}
+              onCollapse={noop}
+              onFileTabReorder={noop}
+              onOpenNewTab={noop}
+              onPanelChange={noop}
+              onPanelFocus={noop}
+              onToggleConversationCollapse={noop}
+              renderAsDrawer={renderAsDrawer}
+              renderSplitTabContent={renderSplitTabContent}
+              splitPanelStateId={panelStateId}
+              splitTabModels={[activeTab]}
+            />
+          </PanelGroup>
         </TooltipProvider>
-      </Wrapper>,
+      </Wrapper>
     );
+    const view = render(renderPanel(true));
 
     expect(screen.getAllByLabelText("Compact active body")).toHaveLength(1);
     expect(screen.queryByLabelText("Unexpected split body")).toBeNull();
     expect(renderSplitTabContent).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(storageKey)).toBe(storedSplit);
+
+    view.rerender(renderPanel(false));
+
+    const restoredPanes = document.querySelectorAll("[data-split-pane-id]");
+    expect(restoredPanes).toHaveLength(2);
+    expect(restoredPanes[0]?.textContent).toContain("Info");
+    expect(restoredPanes[1]?.textContent).toContain("index.ts");
+    expect(renderSplitTabContent).toHaveBeenCalledWith(activeTab);
     expect(window.localStorage.getItem(storageKey)).toBe(storedSplit);
   });
 });
