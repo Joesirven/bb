@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import {
   SidebarSplitContainer,
+  type SidebarSplitHeaderRenderArgs,
   type SidebarSplitPaneRenderArgs,
   type SidebarSplitTabDescriptor,
 } from "./SidebarSplitContainer";
@@ -47,6 +48,20 @@ function createTwoPaneState(): SidebarSplitState {
   );
 }
 
+function createStackedPaneState(): SidebarSplitState {
+  const initial = createSidebarSplitState(
+    TABS.map((tab) => tab.id),
+    "tab-a",
+  );
+  return moveSidebarTab(
+    initial,
+    initial.layout.focusedPaneId,
+    "tab-b",
+    { paneId: initial.layout.focusedPaneId, zone: "bottom" },
+    { groupId: "group-b" },
+  );
+}
+
 function persistState(state: SidebarSplitState): void {
   window.localStorage.setItem(
     sidebarSplitStorageKey(PANEL_STATE_ID),
@@ -58,11 +73,13 @@ function renderContainer({
   activeTabId = "tab-a",
   onActivateTab = vi.fn(),
   renderPane,
+  renderSplitHeader,
   tabs = TABS,
 }: {
   activeTabId?: string;
   onActivateTab?: (tabId: string) => void;
   renderPane: (args: SidebarSplitPaneRenderArgs) => ReactNode;
+  renderSplitHeader?: (args: SidebarSplitHeaderRenderArgs) => ReactNode;
   tabs?: readonly SidebarSplitTabDescriptor[];
 }) {
   return render(
@@ -74,6 +91,7 @@ function renderContainer({
           onGlobalTabReorder={vi.fn()}
           panelStateId={PANEL_STATE_ID}
           renderPane={renderPane}
+          renderSplitHeader={renderSplitHeader}
           tabs={tabs}
         />
       </TooltipProvider>
@@ -320,6 +338,263 @@ describe("SidebarSplitContainer", () => {
         before.get(paneId) ?? "missing-instance",
       );
     }
+  });
+
+  it("keeps header slots synchronized with adjacent panes throughout resizing", () => {
+    persistState(createTwoPaneState());
+    renderContainer({
+      renderPane: ({ group, paneId }) => (
+        <div data-testid={`body-label-${paneId}`}>{group.activeTabId}</div>
+      ),
+      renderSplitHeader: ({ renderTabGroups }) => (
+        <div data-testid="shared-split-header">
+          {renderTabGroups(({ group, paneId }) => (
+            <div
+              className="min-w-0 overflow-hidden"
+              data-testid={`header-label-${paneId}`}
+            >
+              {group.activeTabId}
+            </div>
+          ))}
+        </div>
+      ),
+    });
+
+    const separators = screen.getAllByRole("separator");
+    const headerSeparator = separators.find(
+      (separator) =>
+        separator.parentElement?.dataset.sidebarSplitSurface === "header",
+    );
+    const bodySeparator = separators.find(
+      (separator) =>
+        separator.parentElement?.dataset.sidebarSplitSurface === "body",
+    );
+    expect(headerSeparator).toBeInstanceOf(HTMLElement);
+    expect(bodySeparator).toBeInstanceOf(HTMLElement);
+    if (
+      !(headerSeparator instanceof HTMLElement) ||
+      !(bodySeparator instanceof HTMLElement)
+    ) {
+      return;
+    }
+    expect(headerSeparator.className).toContain("bg-border-seam-vertical/60");
+    expect(bodySeparator.className).toContain("bg-transparent");
+
+    const headerPrevious = headerSeparator.previousElementSibling;
+    const headerNext = headerSeparator.nextElementSibling;
+    const bodyPrevious = bodySeparator.previousElementSibling;
+    const bodyNext = bodySeparator.nextElementSibling;
+    const bodyHitTarget = bodySeparator.firstElementChild;
+    if (
+      !(headerPrevious instanceof HTMLElement) ||
+      !(headerNext instanceof HTMLElement) ||
+      !(bodyPrevious instanceof HTMLElement) ||
+      !(bodyNext instanceof HTMLElement) ||
+      !(bodyHitTarget instanceof HTMLElement)
+    ) {
+      throw new Error("Expected synchronized header and body resize pairs");
+    }
+    Object.defineProperty(bodyHitTarget, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    vi.spyOn(bodyPrevious, "getBoundingClientRect").mockReturnValue({
+      bottom: 600,
+      height: 600,
+      left: 0,
+      right: 400,
+      top: 0,
+      width: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(bodyNext, "getBoundingClientRect").mockReturnValue({
+      bottom: 600,
+      height: 600,
+      left: 401,
+      right: 801,
+      top: 0,
+      width: 400,
+      x: 401,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.pointerDown(bodyHitTarget, { clientX: 400, pointerId: 1 });
+    fireEvent.pointerMove(bodyHitTarget, { clientX: 600, pointerId: 1 });
+
+    expect(headerPrevious.style.flex).toBe(bodyPrevious.style.flex);
+    expect(headerNext.style.flex).toBe(bodyNext.style.flex);
+    expect(Number.parseFloat(headerPrevious.style.flex)).toBeCloseTo(0.749, 3);
+    expect(Number.parseFloat(headerNext.style.flex)).toBeCloseTo(0.251, 3);
+    for (const pane of document.querySelectorAll<HTMLElement>(
+      "[data-sidebar-split-tab-slot]",
+    )) {
+      const paneId = pane.dataset.sidebarSplitTabSlot;
+      expect(pane.className).toContain("overflow-hidden");
+      expect(
+        pane.querySelector(`[data-testid='header-label-${paneId}']`)
+          ?.textContent,
+      ).toBe(
+        document.querySelector(`[data-testid='body-label-${paneId}']`)
+          ?.textContent,
+      );
+    }
+
+    fireEvent.pointerUp(bodyHitTarget, { clientX: 600, pointerId: 1 });
+    expect(headerPrevious.style.flex).toBe(bodyPrevious.style.flex);
+    expect(headerNext.style.flex).toBe(bodyNext.style.flex);
+  });
+
+  it("resizes the adjacent panes from the shared-header separator", () => {
+    persistState(createTwoPaneState());
+    renderContainer({
+      renderPane: ({ paneId }) => <div>{paneId}</div>,
+      renderSplitHeader: ({ renderTabGroups }) => (
+        <div>
+          {renderTabGroups(({ paneId }) => (
+            <div>{paneId}</div>
+          ))}
+        </div>
+      ),
+    });
+
+    const headerSeparator = screen
+      .getAllByRole("separator")
+      .find(
+        (separator) =>
+          separator.parentElement?.dataset.sidebarSplitSurface === "header",
+      );
+    if (!(headerSeparator instanceof HTMLElement)) {
+      throw new Error("Expected shared-header resize separator");
+    }
+    const hitTarget = headerSeparator.firstElementChild;
+    const headerPrevious = headerSeparator.previousElementSibling;
+    const headerNext = headerSeparator.nextElementSibling;
+    const bodyTrack = document.querySelector<HTMLElement>(
+      '[data-sidebar-split-surface="body"][data-sidebar-split-track="root"]',
+    );
+    const bodyChildren = Array.from(bodyTrack?.children ?? []).filter(
+      (child): child is HTMLElement =>
+        child instanceof HTMLElement &&
+        child.dataset.sidebarSplitChildIndex !== undefined,
+    );
+    if (
+      !(hitTarget instanceof HTMLElement) ||
+      !(headerPrevious instanceof HTMLElement) ||
+      !(headerNext instanceof HTMLElement) ||
+      bodyChildren.length !== 2
+    ) {
+      throw new Error("Expected header and body resize elements");
+    }
+    Object.defineProperty(hitTarget, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    vi.spyOn(headerPrevious, "getBoundingClientRect").mockReturnValue({
+      bottom: 48,
+      height: 48,
+      left: 0,
+      right: 400,
+      top: 0,
+      width: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(headerNext, "getBoundingClientRect").mockReturnValue({
+      bottom: 48,
+      height: 48,
+      left: 401,
+      right: 801,
+      top: 0,
+      width: 400,
+      x: 401,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.pointerDown(hitTarget, { clientX: 400, pointerId: 2 });
+    fireEvent.pointerMove(hitTarget, { clientX: 250, pointerId: 2 });
+    expect(bodyChildren[0]?.style.flex).toBe(headerPrevious.style.flex);
+    expect(bodyChildren[1]?.style.flex).toBe(headerNext.style.flex);
+    fireEvent.pointerUp(hitTarget, { clientX: 250, pointerId: 2 });
+    expect(bodyChildren[0]?.style.flex).toBe(headerPrevious.style.flex);
+    expect(bodyChildren[1]?.style.flex).toBe(headerNext.style.flex);
+  });
+
+  it("keeps stacked pane proportions attached to their adjacent header slots", () => {
+    persistState(createStackedPaneState());
+    renderContainer({
+      renderPane: ({ paneId }) => <div>{paneId}</div>,
+      renderSplitHeader: ({ renderTabGroups }) => (
+        <div>{renderTabGroups(({ paneId }) => <div>{paneId}</div>)}</div>
+      ),
+    });
+
+    const headerSeparator = document.querySelector<HTMLElement>(
+      "[data-sidebar-split-tab-separator]",
+    );
+    expect(headerSeparator?.className).toContain(
+      "bg-border-seam-vertical/60",
+    );
+    const bodySeparator = screen.getByRole("separator", {
+      name: "Resize stacked right panel panes",
+    });
+    const hitTarget = bodySeparator.firstElementChild;
+    const bodyPrevious = bodySeparator.previousElementSibling;
+    const bodyNext = bodySeparator.nextElementSibling;
+    const headerTrack = document.querySelector<HTMLElement>(
+      '[data-sidebar-split-surface="header"][data-sidebar-split-track="root"]',
+    );
+    const headerChildren = Array.from(headerTrack?.children ?? []).filter(
+      (child): child is HTMLElement =>
+        child instanceof HTMLElement &&
+        child.dataset.sidebarSplitChildIndex !== undefined,
+    );
+    if (
+      !(hitTarget instanceof HTMLElement) ||
+      !(bodyPrevious instanceof HTMLElement) ||
+      !(bodyNext instanceof HTMLElement) ||
+      headerChildren.length !== 2
+    ) {
+      throw new Error("Expected stacked header and body resize elements");
+    }
+    Object.defineProperty(hitTarget, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    vi.spyOn(bodyPrevious, "getBoundingClientRect").mockReturnValue({
+      bottom: 300,
+      height: 300,
+      left: 0,
+      right: 800,
+      top: 0,
+      width: 800,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(bodyNext, "getBoundingClientRect").mockReturnValue({
+      bottom: 601,
+      height: 300,
+      left: 0,
+      right: 800,
+      top: 301,
+      width: 800,
+      x: 0,
+      y: 301,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.pointerDown(hitTarget, { clientY: 300, pointerId: 3 });
+    fireEvent.pointerMove(hitTarget, { clientY: 420, pointerId: 3 });
+    expect(headerChildren[0]?.style.flex).toBe(bodyPrevious.style.flex);
+    expect(headerChildren[1]?.style.flex).toBe(bodyNext.style.flex);
+    fireEvent.pointerUp(hitTarget, { clientY: 420, pointerId: 3 });
+    expect(headerChildren[0]?.style.flex).toBe(bodyPrevious.style.flex);
+    expect(headerChildren[1]?.style.flex).toBe(bodyNext.style.flex);
   });
 
   it("restores both adjacent flex values after pointer cancellation", () => {

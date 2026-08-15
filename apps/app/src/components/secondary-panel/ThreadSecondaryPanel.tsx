@@ -975,7 +975,10 @@ export function ThreadSecondaryPanel({
       onGlobalTabReorder={onFileTabReorder}
       panelStateId={splitPanelStateId}
       tabs={splitTabs}
-      renderSplitHeader={({ panes }: SidebarSplitHeaderRenderArgs) => {
+      renderSplitHeader={({
+        panes,
+        renderTabGroups,
+      }: SidebarSplitHeaderRenderArgs) => {
         const focusedPane = panes.find((pane) => pane.isFocused) ?? panes[0];
         return (
           <div className={getSecondaryPanelChromeStackClassName(false)}>
@@ -983,26 +986,33 @@ export function ThreadSecondaryPanel({
               data-testid="thread-secondary-panel-top-chrome"
               className={cn(
                 CHROME_ROW_CLASS,
-                "min-w-0 justify-between gap-2 px-4",
+                "relative min-w-0",
                 usesDesktopChrome && MACOS_WINDOW_DRAG_CLASS,
                 usesDesktopChrome && MACOS_CHROME_CONTROL_AXIS_CLASS,
               )}
             >
               <div
-                className={cn(
-                  "flex min-w-0 flex-1 items-center gap-2",
-                  `transition-[padding] ${PANEL_COLLAPSE_TRANSITION_CLASS}`,
-                  collapsedPanelTrafficLightReserveClassName,
-                )}
+                className="absolute inset-0 flex min-w-0 overflow-hidden"
                 role="toolbar"
                 aria-label="Right panel views"
               >
-                {panes.map((pane, index) => {
+                {renderTabGroups((pane) => {
+                  const index = panes.findIndex(
+                    (candidate) => candidate.paneId === pane.paneId,
+                  );
                   const paneModel = resolveSplitPaneModel(pane);
                   return (
                     <div
                       key={pane.paneId}
-                      className="flex min-w-7 items-center gap-1 overflow-hidden"
+                      className={cn(
+                        "flex h-full min-w-0 flex-1 items-center gap-1 overflow-hidden px-2",
+                        `transition-[padding] ${PANEL_COLLAPSE_TRANSITION_CLASS}`,
+                        index === 0 && [
+                          "pl-4",
+                          collapsedPanelTrafficLightReserveClassName,
+                        ],
+                        index === panes.length - 1 && "pr-20",
+                      )}
                       data-sidebar-split-tab-group={pane.paneId}
                       role="group"
                       aria-label={`Pane ${index + 1} tabs`}
@@ -1026,7 +1036,7 @@ export function ThreadSecondaryPanel({
                 })}
               </div>
               <div
-                className="flex min-w-0 shrink-0 items-center gap-1"
+                className="absolute right-4 z-30 flex min-w-0 shrink-0 items-center gap-1 bg-sidebar pl-1"
                 onPointerDown={(event) => event.stopPropagation()}
               >
                 {renderConversationCollapseButton(
