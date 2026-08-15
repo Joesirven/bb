@@ -2940,8 +2940,8 @@ declare const environmentDiffFileResponseSchema: z$1.ZodObject<{
     path: z$1.ZodString;
     content: z$1.ZodString;
     contentEncoding: z$1.ZodEnum<{
-        base64: "base64";
         utf8: "utf8";
+        base64: "base64";
     }>;
     mimeType: z$1.ZodOptional<z$1.ZodString>;
     sizeBytes: z$1.ZodNumber;
@@ -2954,8 +2954,8 @@ declare const environmentArchiveThreadsResponseSchema: z$1.ZodObject<{
 type EnvironmentArchiveThreadsResponse = z$1.infer<typeof environmentArchiveThreadsResponseSchema>;
 declare const pullRequestMergeMethodSchema: z$1.ZodEnum<{
     merge: "merge";
-    squash: "squash";
     rebase: "rebase";
+    squash: "squash";
 }>;
 type PullRequestMergeMethod = z$1.infer<typeof pullRequestMergeMethodSchema>;
 declare const commitActionResponseSchema: z$1.ZodObject<{
@@ -2986,8 +2986,8 @@ declare const pullRequestMergeActionResponseSchema: z$1.ZodObject<{
     action: z$1.ZodLiteral<"pull_request_merge">;
     method: z$1.ZodEnum<{
         merge: "merge";
-        squash: "squash";
         rebase: "rebase";
+        squash: "squash";
     }>;
     message: z$1.ZodString;
 }, z$1.core.$strip>;
@@ -10972,10 +10972,11 @@ interface PluginNavPanelRightPanelViewProps {
     /** The current nav-panel route remainder, matching `PluginNavPanelProps`. */
     subPath: string;
     /**
-     * Whether this view is the currently visible right-panel tab. BB retains
-     * hidden custom views so plugins can preserve local UI state; pause costly
-     * queries and subscriptions while false. Optional for compatibility with
-     * older test hosts, which should be treated as visible.
+     * Whether this view is visible. BB keeps the active custom view mounted when
+     * its panel is hidden, so plugins can preserve that view's local UI state;
+     * pause costly queries and subscriptions while false. Switching to another
+     * tab may still unmount it. Optional for compatibility with older test hosts,
+     * which should be treated as visible.
      */
     isVisible?: boolean;
     /**
