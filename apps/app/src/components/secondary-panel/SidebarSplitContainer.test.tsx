@@ -329,6 +329,8 @@ describe("SidebarSplitContainer", () => {
     });
 
     const separator = screen.getByRole("separator");
+    expect(separator.className).toContain("bg-transparent");
+    expect(separator.className).not.toContain("bg-border-seam");
     const hitTarget = separator.firstElementChild;
     const previous = separator.previousElementSibling;
     const next = separator.nextElementSibling;

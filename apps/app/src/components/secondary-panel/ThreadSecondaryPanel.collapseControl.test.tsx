@@ -216,8 +216,12 @@ describe("ThreadSecondaryPanel compact file content", () => {
 
     const restoredPanes = document.querySelectorAll("[data-split-pane-id]");
     expect(restoredPanes).toHaveLength(2);
-    expect(restoredPanes[0]?.textContent).toContain("Info");
-    expect(restoredPanes[1]?.textContent).toContain("index.ts");
+    const restoredTabGroups = document.querySelectorAll(
+      "[data-sidebar-split-tab-group]",
+    );
+    expect(restoredTabGroups).toHaveLength(2);
+    expect(restoredTabGroups[0]?.textContent).toContain("Info");
+    expect(restoredTabGroups[1]?.textContent).toContain("index.ts");
     expect(renderSplitTabContent).toHaveBeenCalledWith(activeTab);
     expect(window.localStorage.getItem(storageKey)).toBe(storedSplit);
   });
@@ -342,13 +346,22 @@ describe("ThreadSecondaryPanel full-screen control", () => {
       document.querySelectorAll<HTMLElement>("[data-split-pane-id]"),
     );
     expect(panes).toHaveLength(2);
-    expect(panes[0]?.textContent).toContain("Info");
-    expect(panes[1]?.textContent).toContain("index.ts");
+    const tabGroups = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-sidebar-split-tab-group]"),
+    );
+    expect(tabGroups).toHaveLength(2);
+    expect(tabGroups[0]?.textContent).toContain("Info");
+    expect(tabGroups[1]?.textContent).toContain("index.ts");
     expect(
       document.querySelectorAll(
         '[data-testid="thread-secondary-panel-top-chrome"]',
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(
+      panes.some((pane) =>
+        pane.querySelector('[data-testid="thread-secondary-panel-top-chrome"]'),
+      ),
+    ).toBe(false);
     expect(document.querySelectorAll("header")).toHaveLength(0);
   });
 

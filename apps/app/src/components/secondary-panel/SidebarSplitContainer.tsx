@@ -73,12 +73,17 @@ export interface SidebarSplitPaneRenderArgs {
   showOuterControls: boolean;
 }
 
+export interface SidebarSplitHeaderRenderArgs {
+  panes: readonly SidebarSplitPaneRenderArgs[];
+}
+
 interface SidebarSplitContainerProps {
   activeTabId: string;
   onActivateTab: (tabId: string) => void;
   onGlobalTabReorder: (request: SecondaryPanelTabReorderRequest) => void;
   panelStateId: string;
   renderPane: (args: SidebarSplitPaneRenderArgs) => ReactNode;
+  renderSplitHeader?: (args: SidebarSplitHeaderRenderArgs) => ReactNode;
   tabs: readonly SidebarSplitTabDescriptor[];
 }
 
@@ -88,6 +93,7 @@ export function SidebarSplitContainer({
   onGlobalTabReorder,
   panelStateId,
   renderPane,
+  renderSplitHeader,
   tabs,
 }: SidebarSplitContainerProps) {
   const availableTabIds = useMemo(() => tabs.map((tab) => tab.id), [tabs]);
@@ -396,24 +402,55 @@ export function SidebarSplitContainer({
     });
   }
 
+  const splitPanes = listPanes(state.layout.root);
+  const splitHeader = renderSplitHeader?.({
+    panes: splitPanes.flatMap((pane, index) => {
+      const group = getSidebarGroupForPane(state, pane.paneId);
+      if (group === null) return [];
+      return [
+        {
+          group,
+          isFocused: pane.paneId === state.layout.focusedPaneId,
+          isSplitPane: true,
+          isVisible: true,
+          onBeginTabDrag: (
+            tabId: string,
+            event: ReactPointerEvent<HTMLElement>,
+          ) => beginTabDrag(pane.paneId, tabId, event),
+          onReorderTab: (request: SecondaryPanelTabReorderRequest) =>
+            reorderTab(pane.paneId, request),
+          onFocusPane: () => focusPane(pane.paneId),
+          onMoveActiveTabToSide: activeTabPositionHandler,
+          onSelectTab: (tabId: string) => selectTab(pane.paneId, tabId),
+          paneId: pane.paneId,
+          showOuterControls: index === splitPanes.length - 1,
+        },
+      ];
+    }),
+  });
+
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-      <SidebarSplitTree
-        node={state.layout.root}
-        path={[]}
-        isTopRow
-        isRightEdge
-        dimsInactiveSplits={dimsInactiveSplits}
-        focusedPaneId={state.layout.focusedPaneId}
-        renderPane={renderPane}
-        state={state}
-        onBeginTabDrag={beginTabDrag}
-        onFocusPane={focusPane}
-        onMoveActiveTabToSide={activeTabPositionHandler}
-        onReorderTab={reorderTab}
-        onResize={resize}
-        onSelectTab={selectTab}
-      />
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      {splitHeader}
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <SidebarSplitTree
+          node={state.layout.root}
+          path={[]}
+          isTopRow
+          isRightEdge
+          dimsInactiveSplits={dimsInactiveSplits}
+          focusedPaneId={state.layout.focusedPaneId}
+          hasSharedHeader={splitHeader !== undefined}
+          renderPane={renderPane}
+          state={state}
+          onBeginTabDrag={beginTabDrag}
+          onFocusPane={focusPane}
+          onMoveActiveTabToSide={activeTabPositionHandler}
+          onReorderTab={reorderTab}
+          onResize={resize}
+          onSelectTab={selectTab}
+        />
+      </div>
     </div>
   );
 }
@@ -421,6 +458,7 @@ export function SidebarSplitContainer({
 interface SidebarSplitTreeProps {
   dimsInactiveSplits: boolean;
   focusedPaneId: string;
+  hasSharedHeader: boolean;
   isRightEdge: boolean;
   isTopRow: boolean;
   node: LayoutNode;
@@ -496,7 +534,8 @@ function SidebarSplitLeaf(
   const group = groupId === null ? undefined : props.state.groups[groupId];
   if (group === undefined) return null;
   const isFocused = pane.paneId === props.focusedPaneId;
-  const reserveOuterControl = props.isTopRow && props.isRightEdge;
+  const reserveOuterControl =
+    !props.hasSharedHeader && props.isTopRow && props.isRightEdge;
   const context: PaneContextValue = {
     paneId: pane.paneId,
     isFocused,
@@ -641,7 +680,7 @@ function SidebarSplitDivider({
       }
       aria-orientation={horizontal ? "vertical" : "horizontal"}
       className={cn(
-        "group relative z-[25] shrink-0 bg-border-seam transition-colors hover:bg-ring/40 data-[dragging]:bg-ring/40",
+        "group relative z-[25] shrink-0 bg-transparent transition-colors hover:bg-ring/40 data-[dragging]:bg-ring/40",
         hidden && "invisible pointer-events-none",
         horizontal ? "w-px cursor-col-resize" : "h-px cursor-row-resize",
       )}
