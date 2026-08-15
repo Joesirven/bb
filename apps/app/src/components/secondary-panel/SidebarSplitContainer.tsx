@@ -531,21 +531,17 @@ function SidebarSplitHeaderTree(props: SidebarSplitHeaderTreeProps) {
       {node.children.map((child, index) => (
         <Fragment key={sidebarSplitSubtreeKey(child)}>
           {index > 0 ? (
-            node.dir === "row" ? (
-              <SidebarSplitDivider
-                appearance="tab"
-                childIndex={index - 1}
-                dir={node.dir}
-                hidden={false}
-                path={props.path}
-                surface="header"
-                onResize={(fraction) =>
-                  props.onResize(props.path, index - 1, fraction)
-                }
-              />
-            ) : (
-              <SidebarSplitTabSeparator />
-            )
+            <SidebarSplitDivider
+              appearance="tab"
+              childIndex={index - 1}
+              dir="row"
+              hidden={false}
+              path={props.path}
+              surface="header"
+              onResize={(fraction) =>
+                props.onResize(props.path, index - 1, fraction)
+              }
+            />
           ) : null}
           <div
             className="flex h-full min-w-0"
@@ -714,8 +710,10 @@ function SidebarSplitDivider({
       }
       const previousRect = previous.getBoundingClientRect();
       const nextRect = next.getBoundingClientRect();
+      const pointerId = event.pointerId;
       const start = horizontal ? previousRect.left : previousRect.top;
       const end = horizontal ? nextRect.right : nextRect.bottom;
+      const pointerDownPosition = horizontal ? event.clientX : event.clientY;
       const span = end - start;
       if (span <= 0) return;
       const pairs = [
@@ -727,20 +725,26 @@ function SidebarSplitDivider({
           surface,
         }),
       ].filter((pair): pair is SidebarSplitResizePair => pair !== null);
-      hitTarget.setPointerCapture(event.pointerId);
+      hitTarget.setPointerCapture(pointerId);
       divider.dataset.dragging = "true";
       applyResizeCursor(horizontal ? "horizontal" : "vertical");
       document.body.style.userSelect = "none";
       let pendingFraction: number | null = null;
+      let receivedPointerMove = false;
       let finished = false;
-      const move = (moveEvent: PointerEvent) => {
-        const pointer = horizontal ? moveEvent.clientX : moveEvent.clientY;
+      const applyPointerPosition = (pointerEvent: PointerEvent) => {
+        const pointer = horizontal ? pointerEvent.clientX : pointerEvent.clientY;
         const fraction = clampSplitPairFraction((pointer - start) / span);
         pendingFraction = fraction;
         for (const pair of pairs) {
           pair.previous.style.flex = `${pair.total * fraction} 1 0px`;
           pair.next.style.flex = `${pair.total * (1 - fraction)} 1 0px`;
         }
+      };
+      const move = (moveEvent: PointerEvent) => {
+        if (moveEvent.pointerId !== pointerId) return;
+        receivedPointerMove = true;
+        applyPointerPosition(moveEvent);
       };
       const finish = (commit: boolean) => {
         if (finished) return;
@@ -760,8 +764,22 @@ function SidebarSplitDivider({
           pair.next.style.flex = pair.nextFlex;
         }
       };
-      const onUp = () => finish(true);
-      const cancel = () => finish(false);
+      const onUp = (upEvent: PointerEvent) => {
+        if (upEvent.pointerId !== pointerId) return;
+        const pointerUpPosition = horizontal
+          ? upEvent.clientX
+          : upEvent.clientY;
+        if (!receivedPointerMove && pointerUpPosition === pointerDownPosition) {
+          finish(false);
+          return;
+        }
+        applyPointerPosition(upEvent);
+        finish(true);
+      };
+      const cancel = (cancelEvent: PointerEvent) => {
+        if (cancelEvent.pointerId !== pointerId) return;
+        finish(false);
+      };
       hitTarget.addEventListener("pointermove", move);
       hitTarget.addEventListener("pointerup", onUp);
       hitTarget.addEventListener("pointercancel", cancel);
@@ -797,16 +815,6 @@ function SidebarSplitDivider({
         )}
       />
     </div>
-  );
-}
-
-function SidebarSplitTabSeparator() {
-  return (
-    <div
-      aria-hidden
-      className="h-full w-px shrink-0 bg-border-seam-vertical/60"
-      data-sidebar-split-tab-separator=""
-    />
   );
 }
 
