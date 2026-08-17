@@ -696,6 +696,59 @@ describe("background task timeline projection", () => {
     ]);
   });
 
+  it("projects the spawning delegation model onto an active background agent", () => {
+    const timeline = buildTimeline(
+      [
+        turnStarted("turn-1", 1),
+        withMeta(
+          {
+            type: "item/started",
+            threadId: "thread-1",
+            providerThreadId: "provider-1",
+            scope: turnScope("turn-1"),
+            item: {
+              type: "toolCall",
+              id: "toolu-root-agent",
+              tool: "Agent",
+              arguments: {
+                description: "Inspect the mobile banner",
+                model: "haiku",
+                prompt: "Inspect the mobile banner",
+                subagent_type: "general-purpose",
+              },
+              status: "pending",
+            },
+          },
+          2,
+        ),
+        withMeta(
+          {
+            type: "item/started",
+            threadId: "thread-1",
+            providerThreadId: "provider-1",
+            scope: turnScope("turn-1"),
+            item: agentTaskItem({
+              status: "pending",
+              taskStatus: "running",
+              description: "Inspect the mobile banner",
+              parentToolCallId: "toolu-root-agent",
+            }),
+          },
+          3,
+        ),
+      ],
+      { includeNestedRows: false, turnMessageDetail: "summary" },
+    );
+
+    expect(timeline.activeBackgroundCommands).toMatchObject([
+      {
+        description: "Inspect the mobile banner",
+        model: "haiku",
+        taskType: "local_agent",
+      },
+    ]);
+  });
+
   it("excludes background tasks spawned inside a background agent from the parent active list", () => {
     const timeline = buildTimeline(
       [

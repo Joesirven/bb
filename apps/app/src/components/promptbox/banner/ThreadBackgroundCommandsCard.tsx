@@ -52,6 +52,20 @@ function backgroundActivityGroupLabel(
   return hasAgent ? "Background agents" : "Background commands";
 }
 
+function backgroundActivityModel(row: TimelineWorkflowWorkRow): string | null {
+  return isBackgroundAgentTaskType(row.taskType) ? row.model : null;
+}
+
+function backgroundActivityAriaLabel(
+  row: TimelineWorkflowWorkRow,
+  label = backgroundActivityDisplay(row).label,
+): string {
+  const model = backgroundActivityModel(row);
+  return model
+    ? `${label}: ${row.description} · Model ${model}`
+    : `${label}: ${row.description}`;
+}
+
 /**
  * Live elapsed time since the background task started, ticking every second.
  * Blank for the first second to avoid sub-second flicker on entry. Mirrors the
@@ -84,33 +98,56 @@ function BackgroundActivitySummary({
   active?: boolean;
 }) {
   const display = backgroundActivityDisplay(row);
+  const isAgent = isBackgroundAgentTaskType(row.taskType);
+  const model = backgroundActivityModel(row);
   return (
-    <span className="flex min-w-0 flex-1 items-center gap-1 text-left">
-      {/* Verb + description truncate as one unit so the trailing controls
-          ("+N more", chevron, duration) never get pushed off a narrow banner. */}
-      <span className="min-w-0 truncate" title={row.description}>
-        <span
-          className={
-            active ? activityMetaClass("active") : "text-muted-foreground"
-          }
-        >
-          {display.runningPrefix}{" "}
-        </span>
-        <span
-          className={
-            active
-              ? activityTextClass("active")
-              : "font-medium text-foreground opacity-70"
-          }
-        >
-          {row.description}
-        </span>
+    <span
+      className={cn(
+        "flex min-w-0 flex-1 items-center gap-1 text-left",
+        isAgent &&
+          "max-sm:grid max-sm:grid-cols-[minmax(0,1fr)_auto] max-sm:items-baseline max-sm:gap-x-2 max-sm:gap-y-0.5",
+      )}
+    >
+      <span
+        className={cn(
+          "shrink-0 whitespace-nowrap",
+          active ? activityMetaClass("active") : "text-muted-foreground",
+          isAgent && "max-sm:col-start-1 max-sm:row-start-1",
+        )}
+      >
+        {display.runningPrefix}
       </span>
+      <span
+        className={cn(
+          "min-w-0 truncate",
+          active
+            ? activityTextClass("active")
+            : "font-medium text-foreground opacity-70",
+          isAgent &&
+            "max-sm:col-start-1 max-sm:row-start-2 max-sm:overflow-visible max-sm:whitespace-normal max-sm:[overflow-wrap:anywhere]",
+        )}
+        title={row.description}
+      >
+        {row.description}
+      </span>
+      {model ? (
+        <span
+          className={cn(
+            "shrink-0 whitespace-nowrap font-mono text-2xs",
+            active ? activityMetaClass("active") : "text-subtle-foreground",
+            isAgent && "max-sm:col-start-2 max-sm:row-start-2",
+          )}
+          title={`Model: ${model}`}
+        >
+          {model}
+        </span>
+      ) : null}
       {showDuration ? (
         <span
           className={cn(
             "shrink-0",
             active ? activityMetaClass("active") : "text-muted-foreground",
+            isAgent && "max-sm:col-start-2 max-sm:row-start-1",
           )}
         >
           <BackgroundActivityDuration startedAt={row.startedAt} />
@@ -160,7 +197,7 @@ export function ThreadBackgroundCommandsCard({
             id={TOGGLE_ID}
             aria-expanded={isExpanded}
             aria-controls={BODY_ID}
-            aria-label={`${groupLabel}: ${primary.description}`}
+            aria-label={backgroundActivityAriaLabel(primary, groupLabel)}
             onClick={onToggle}
             className={activityRowClass(
               "active",
@@ -196,7 +233,7 @@ export function ThreadBackgroundCommandsCard({
               "active",
               "flex min-h-8 w-full min-w-0 cursor-default items-center gap-1.5 rounded-none px-3 py-1.5 text-xs text-foreground",
             )}
-            aria-label={`${primaryDisplay.label}: ${primary.description}`}
+            aria-label={backgroundActivityAriaLabel(primary)}
           >
             <Icon
               name={primaryDisplay.icon}
@@ -224,6 +261,7 @@ export function ThreadBackgroundCommandsCard({
             <div className="flex flex-col gap-0.5 py-1">
               {others.map((row) => {
                 const display = backgroundActivityDisplay(row);
+                const model = backgroundActivityModel(row);
                 return (
                   <div
                     key={row.id}
@@ -242,6 +280,14 @@ export function ThreadBackgroundCommandsCard({
                     >
                       {row.description}
                     </span>
+                    {model ? (
+                      <span
+                        className="shrink-0 whitespace-nowrap font-mono text-2xs text-subtle-foreground"
+                        title={`Model: ${model}`}
+                      >
+                        {model}
+                      </span>
+                    ) : null}
                     <span className="shrink-0 whitespace-nowrap text-subtle-foreground">
                       <BackgroundActivityDuration startedAt={row.startedAt} />
                     </span>

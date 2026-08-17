@@ -1,5 +1,6 @@
 import type { ThreadEvent } from "@bb/domain";
 import {
+  isBackgroundAgentTaskType,
   isBackgroundCommandTaskType,
   LOCAL_WORKFLOW_TASK_TYPE,
   requireThreadEventScopeTurnId,
@@ -223,6 +224,22 @@ function isDirectBackgroundTaskForCurrentAgent(
   return spawningCall ? spawningCall.parentToolCallId === undefined : true;
 }
 
+function getBackgroundAgentModel(
+  message: EventProjectionWorkflowMessage,
+  callMessageById: ReadonlyMap<string, EventProjectionCallMessage>,
+): string | null {
+  if (
+    !isBackgroundAgentTaskType(message.taskType) ||
+    !message.parentToolCallId
+  ) {
+    return null;
+  }
+  const spawningCall = callMessageById.get(message.parentToolCallId);
+  return spawningCall?.kind === "delegation"
+    ? (spawningCall.model ?? null)
+    : null;
+}
+
 function getRootSpawningCallId(
   message: EventProjectionWorkflowMessage,
   callMessageById: ReadonlyMap<string, EventProjectionCallMessage>,
@@ -282,6 +299,7 @@ function selectActiveBackgroundCommandMessages(
     ) {
       continue;
     }
+    message.model = getBackgroundAgentModel(message, callMessageById);
     running.push(message);
   }
   return running.sort(
