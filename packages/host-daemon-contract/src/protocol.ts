@@ -22,7 +22,7 @@
 //
 // The version mismatch is what triggers the enrolled daemon's automatic update
 // instead of an `invalid-message` reconnect loop.
-export const HOST_DAEMON_PROTOCOL_VERSION = 130 as const;
+export const HOST_DAEMON_PROTOCOL_VERSION = 131 as const;
 
 /**
  * Absolute ceiling for any executable artifact delivered to a host daemon —
