@@ -72,9 +72,12 @@ message agents, or inspect projects, providers, and environments.
   change, run `bb-app stop && bb-app start` or restart the desktop app. Until
   then, a server previously bound to `0.0.0.0` remains exposed even if
   `BB_SERVER_BIND_HOST` was changed or unset.
-- Settings → General holds server-backed app-wide preferences, such as the
-  macOS-only "Caffeinate" toggle. For details, read
+- Settings → General holds server-backed app-wide preferences. For details, read
   `references/app-settings.md` (in this skill's directory).
+- Keep Awake is a standalone builtin plugin. Use `bb keep-awake enable` and
+  `bb keep-awake disable` to configure its macOS idle-sleep assertion. Inspect
+  it with `bb keep-awake status [--json]`. Target hosts with
+  `bb keep-awake hosts all` or `bb keep-awake hosts <host-id>...`.
 - The `showUnhandledProviderEvents` General preference defaults to false and
   exposes raw provider events that bb does not yet understand in packaged
   builds. Development builds always show those diagnostic rows. Update it with
@@ -194,6 +197,9 @@ isolated|reuse`, or anchor with `--source-seq-end`. Permission mode inherits
   inherited value. A hidden child still reports its turns and blockers to its
   parent thread; only forks and side chats stay silent. Promote or hide an
   existing thread with `bb thread update <id> --visibility visible|hidden`.
+- Stop a finished hidden worker with `bb thread stop <id>` to release its agent
+  runtime promptly. Archive it first when it no longer belongs in active thread
+  lists. Stop preserves the thread and supports a later resume.
 - `bb connect --code <code> --server https://<handle>.getbb.app` pairs this bb
   server for browser access at `<handle>.getbb.app` (get the code from
   https://getbb.app). Pairing returns immediately — the
@@ -289,16 +295,16 @@ environment pull-request show <id>`. Diff commands require an explicit target
 - `bb environment pull-request ready|draft|merge` manages pull-request state;
   `bb environment archive-threads` bulk-archives an environment's threads.
 - Spawned child threads inherit permission from explicit flags, then the
-  parent thread's last execution, then project defaults.
+  parent thread's last execution, then project defaults. The parent's mode is
+  a hard ceiling: an explicit flag can lower it but never exceed it.
 - Public permission modes are `accept-edits`, `auto`, and `full`.
   `accept-edits` keeps workspace sandboxing and asks the user to review
   escalations. `auto` keeps the same workspace sandbox while using the
   provider's automatic reviewer. `full` explicitly bypasses sandbox and
   approval protections. Plan mode remains separate. The product default is
   `auto` when no inherited or project default applies.
-- Subagents inherit the parent's permission mode by default; pass
-  `--permission-mode full` only when the user or task needs unsandboxed
-  execution.
+- Subagents inherit the parent's permission mode by default;
+  `--permission-mode full` only takes effect when the parent itself runs full.
 - Use `--parent-self` inside a thread to parent the new thread to the current
   thread.
 - Use `--parent-thread <thread-id>` to choose another specific parent.
@@ -469,6 +475,8 @@ For review or fix pipelines, get the environment ID from
 - For interrupted or stopped threads, inspect first. If the user stopped the
   thread, treat that as intentional unless they ask you to continue.
 - Use `bb thread stop <id>` when a thread is stuck or no longer needed.
+- `bb thread stop <id>` also releases an idle or stuck agent runtime. The
+  command is idempotent and preserves thread history.
 - Use `bb thread compact <id>` to send the built-in `/compact` command to an idle or errored thread. Completion or failure appears in the timeline. Codex, Claude Code, Pi, and OpenCode ACP support it; Cursor ACP does not expose compatible compaction through ACP.
 - Use `bb thread cancel-plan <id>` to exit an active Plan turn without
   optimistically clearing its banner. Use `bb thread clear-goal <id>` to clear
@@ -721,24 +729,66 @@ them by mixing ink into canvas), the `--primary` accent, the secondary text tier
   - BB's official plugins (GitHub, Docs, Memory, and Tasks) ship
     bundled inside the app and install from the local copy — no network. Installed official
     plugins are pinned to the bundled copy and update with BB app releases.
+  - The store also lists the **BB Community marketplace** catalog: a manifest
+    the server re-reads at startup and every six hours from
+    `https://getbb.app/marketplace/v1/marketplace.json`
+    (override with `BB_MARKETPLACE_URL`, which the server reads only at
+    startup). Its entries install from their listed
+    git or npm source through the normal install pipeline. A refresh only
+    updates discovery metadata and icons; it never installs, updates, or runs
+    plugin code, and a failed refresh keeps the last catalog bb validated.
   - `bb plugin search <query> [--json]` — search the official plugins by id,
-    name, description, or category; status shows installed / compatible /
+    name, description, category, or tag; status shows installed / compatible /
     requires newer bb.
-  - `bb plugin submit [--json]` — print the link to BB's plugin marketplace intake
-    form (a public GitHub repo is required; submission happens in the browser,
-    and there is no status to poll afterwards). Give the link to the user —
-    the form asks for details only its author knows, including their email.
+- **Third-party marketplaces** (routes under `/api/v1/marketplaces`):
+  - `bb marketplace add <source>` — add a marketplace from an https manifest
+    URL, `git:<url>[@<ref>]` (bb reads `marketplace.json` from the checkout),
+    or `path:<directory>` on the bb server's machine. bb validates the
+    manifest, caches the catalog, and fetches its icons. **Adding a
+    marketplace installs nothing.** The manifest's own `name` is the
+    marketplace's identity, so a name collision is refused; `bb-community` is
+    reserved and can be neither added nor removed.
+  - `bb marketplace list [--json]` — name, source, entry count, last refresh.
+  - `bb marketplace refresh [name] [--json]` — re-read one catalog or every
+    one of them. Discovery metadata and icons only. A failed refresh keeps the
+    last catalog bb validated and exits non-zero.
+  - `bb marketplace remove <name> [--json]` — forget a marketplace. Its
+    catalog rows and cached icons are deleted; every plugin it listed keeps
+    running as a direct install with its full source intent and exact
+    resolution, so `bb plugin outdated`/`update` keep working from the
+    recorded source.
+  - Install a specific marketplace's entry with
+    `bb plugin install <entry-id>@<marketplace>`. A bare entry id resolves
+    across every marketplace: exactly one match installs, no match falls back
+    to the bundled official plugin of that name, and several matches fail and
+    list the `id@marketplace` choices.
+  - Installing from a marketplace other than `bb-community` first resolves and
+    prints the true source — npm package with its range or dist-tag, or git
+    URL with its ref or semver range, subdirectory, and the exact release tag
+    and commit that range currently lands on — plus the marketplace and the
+    entry's author. `--yes` skips the prompt, not the resolution. The install
+    fails if the listing or its resolved git commit changes after confirmation.
 - Commands:
   - `bb plugin install <src>` — official plugin name (github, docs, memory,
-    tasks), HTTP(S) Git repository URL, local path, `builtin:<name>`,
-    `git:<url>[@<ref>]`, or `npm:<package>[@<version|tag|range>]` (npm on PATH
-    required for `npm:`). Repository URLs and prefixes `path:` / `npm:` /
-    `git:` / `builtin:` skip official-plugin resolution. To pin or range an
-    npm package, install with `npm:<package>@…`.
+    tasks), `<entry-id>@<marketplace>`, HTTP(S) Git repository URL, local
+    path, `builtin:<name>`,
+    `git:<url>[@<ref|semver-range>]`, or `npm:<package>[@<version|tag|range>]`
+    (npm on PATH required for `npm:`). Repository URLs and prefixes `path:` /
+    `npm:` / `git:` / `builtin:` skip official-plugin resolution. To pin or
+    range an npm package, install with `npm:<package>@…`.
     Omit the npm spec to track compatible stable releases; ranges and dist-tags
     track, while exact versions are pinned. Omit the Git ref to track the
     repository's default branch; explicit branches track, while tags and
-    commits are pinned. Installs prompt for confirmation (plugins are full-trust code);
+    commits are pinned. A Git semver range
+    (`git:github.com/acme/repo@^1.2.0`) tracks the repository's `vX.Y.Z` tags,
+    picking the highest release the range allows and excluding prereleases
+    unless the range names one. `--tag-prefix <prefix>` ranges over
+    `<prefix>vX.Y.Z` tags instead, for a repository that versions each plugin
+    on its own. bb records the selected tag and its commit and refuses to
+    resolve that tag again if it moved. A bare spec that reads as a range
+    resolves over tags only when no branch or tag has that literal name; when
+    both exist the install fails — write `@semver:<range>` or `@ref:<name>`.
+    Installs prompt for confirmation (plugins are full-trust code);
     pass `--yes` to skip. Reinstalling an already-installed managed plugin is
     refused — use `bb plugin update`. Plugins that declare a frontend (`bb.app`)
     are built at install time for path sources and git sources without a
@@ -747,20 +797,28 @@ them by mixing ink into canvas), the `--primary` accent, the secondary text tier
     npm packages must. Managed git/npm installs refuse `engines.bb` /
     `engines.bbPluginSdk` mismatches, manifest vs. artifact identity mismatches,
     and ids reserved by bundled plugins.
+    A `git:`/`path:` repository can hold several plugins. Install one with
+    `--subdirectory <relative-path>`, or with `--plugin <name>` to resolve an
+    entry of the repository's `.bb/plugins.json` collection manifest (the two
+    flags are mutually exclusive, and neither applies to `npm:`/`builtin:`
+    sources). Installs from one repository and commit share a single checkout.
+    A repository that has a collection manifest and is not a plugin itself
+    refuses an unselected install and lists its entry names.
   - `bb plugin outdated` — check installed plugins for compatible updates
     (table; `--json` for raw results). Shows latest compatible candidate and
     any blocked incompatible newer release. Dev builds (bb `0.0.0`) annotate
     that `engines.bb` is not enforced.
   - `bb plugin update <id>` / `bb plugin update --all` — apply compatible
-    updates for tracking sources. Same full-trust confirmation as install
-    (`--yes` skips; non-TTY refuses without it). Use `bb plugin outdated` to
-    preview available updates; changing a pinned source requires reinstalling
-    it after removal.
+    updates for tracking sources, including newer tags that satisfy a Git
+    semver range. Same full-trust confirmation as install (`--yes` skips;
+    non-TTY refuses without it). Use `bb plugin outdated` to preview available
+    updates; changing a pinned source requires reinstalling it after removal.
   - `bb plugin list` — status, background services, schedules, handler timings,
     and each plugin's contributed `bb` command.
-  - `bb plugin source <id> [--json]` — requested and resolved source, engine
-    ranges, install time, integrity/registry details, and recent activation
-    history.
+  - `bb plugin source <id> [--json]` — requested and resolved source, the
+    repository subdirectory for a nested plugin, the semver range with its tag
+    prefix and resolved tag for a Git range install, engine ranges, install
+    time, integrity/registry details, and recent activation history.
   - `bb plugin enable|disable <id>`, `bb plugin reload [id]`,
     `bb plugin remove <id>` (builtin removals are remembered).
   - `bb plugin config <id> [set <key> <value> | unset <key>]` — declared
@@ -780,8 +838,12 @@ them by mixing ink into canvas), the `--primary` accent, the secondary text tier
     rather than reporting success; `bb plugin build [path]` —
     compile the plugin into `dist/`: the backend bundle (`server.js` +
     `server.meta.json` stamped with SDK/identity metadata; preferred by
-    git/npm installs over source) and, when `bb.app` is declared, `app.js` +
-    `app.css` + `app.meta.json`. Neither needs the server.
+    git/npm installs over source), when `bb.app` is declared, `app.js` +
+    `app.css` + `app.meta.json`, and, when `bb.host` is declared, the
+    self-contained host artifact `host.js` + `host.js.map` +
+    `host.meta.json` (its digest; host daemons download and verify the bundle
+    by that digest, and run it as a host RPC worker, a provider bridge, or
+    both). None of it needs the server.
   - `bb plugin types [path]` — sync the plugin's `@get-bb/plugin-sdk` surface
     to the running bb (default: cwd). For a plugin that depends on the npm
     package it rewrites the exact `devDependencies` pin to this bb's SDK

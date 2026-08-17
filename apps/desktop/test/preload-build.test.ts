@@ -130,13 +130,12 @@ async function startDesktopSmokeServer(
             claudeCodeMockCliTraffic: false,
             editMessages: false,
             newOnboarding: false,
+            providerSessionReaping: false,
           },
           featureFlags: {
             placeholder: false,
           },
-          generalSettings: {
-            caffeinate: false,
-          },
+          generalSettings: {},
           hostDaemonPort: 38887,
           primaryHostPlatform: null,
           voiceTranscriptionEnabled: false,

@@ -26,13 +26,26 @@ import {
   PLUGIN_AGENT_SELECTION_MAX_IDS,
   PLUGIN_AGENT_TOOL_PARAMETERS_MAX_BYTES,
   RESERVED_AGENT_TOOL_NAMES,
+  adoptHttpRouteResponse,
 } from "@get-bb/plugin-sdk/internal/host-policy";
 // The build engine's natives (esbuild, Tailwind oxide) are dynamically
 // imported inside buildPluginApp — importing this loads nothing heavy.
-import { buildPluginApp, createPluginDevLoop } from "@bb/plugin-build";
+import {
+  buildPluginApp,
+  buildPluginHost,
+  createPluginDevLoop,
+} from "@bb/plugin-build";
 import { getPluginBuildToolchain } from "./build-toolchain.js";
+import {
+  marketplacePublisherLabels,
+  pluginPublisherLabel,
+} from "../plugin-catalog/marketplace-publishers.js";
 import { deleteSecretFile, readOrCreateSecretFile } from "@bb/secret-storage";
-import type { PluginCapabilitySummary } from "@bb/server-contract";
+import {
+  ROOT_PLUGIN_SOURCE_SELECTION,
+  type PluginCapabilitySummary,
+  type PluginSourceSelection,
+} from "@bb/server-contract";
 import {
   claimPluginScheduledRun,
   deleteAllPluginSettings,
@@ -41,6 +54,7 @@ import {
   getInstalledPlugin,
   listDuePluginSchedules,
   listInstalledPlugins,
+  listPendingGitPluginArtifacts,
   listPluginSchedules,
   markInstalledPluginRemoved,
   recordPluginScheduleResult,
@@ -53,7 +67,11 @@ import {
 } from "../threads/thread-data.js";
 import type { PluginBrandingAssetVariant } from "./app-bundle.js";
 import { readPluginThemeCodeTheme } from "../system/code-themes.js";
-import { npmInstallPrefix, parsePluginSource } from "./install-sources.js";
+import {
+  npmInstallPrefix,
+  parsePluginSource,
+  recoverInterruptedGitPluginPromotion,
+} from "./install-sources.js";
 import {
   derivePluginId,
   readPluginManifest,
@@ -87,6 +105,7 @@ import {
 import { createPluginActivation } from "./plugin-activation.js";
 import {
   createManagedPluginArtifacts,
+  type InstallContext,
   type RegisterInstalledArgs,
 } from "./managed-plugin-artifacts.js";
 import { createPluginRegistration } from "./plugin-registration.js";
@@ -167,24 +186,56 @@ export interface PluginService {
    * with npm --ignore-scripts under <dataDir>/plugins/npm). git/npm installs
    * hard-fail on an engines.bb mismatch and refuse already-registered ids;
    * use update for an existing managed plugin.
+   *
+   * `selection` picks one plugin out of a multi-plugin `git:`/`path:`
+   * repository, either by directory or by `.bb/plugins.json` entry name.
    */
-  install(source: string): Promise<PluginListEntry>;
+  install(
+    source: string,
+    selection: PluginSourceSelection,
+  ): Promise<PluginListEntry>;
   /**
    * Install a bundled official plugin by its registry name (store install).
    * Registers with catalog provenance so the opt-in survives reconciliation.
    */
   installOfficialPlugin(name: string): Promise<PluginListEntry>;
   /**
-   * Install a git-sourced official catalog entry (store install). Installs
-   * from the entry's `git:` source and stamps catalog provenance so the
-   * plugin lists as official and traces back to its catalog entry.
+   * Install a marketplace catalog entry (store install). Installs from the
+   * entry's listed source through the normal pipeline and stamps catalog
+   * provenance, so the plugin traces back to the marketplace that listed it.
    */
-  installGitCatalogPlugin(args: {
+  installCatalogPlugin(args: {
+    /** Marketplace that listed the entry, e.g. `bb-community`. */
+    marketplace: string;
     entryId: string;
     /** Manifest id the catalog entry promises; the install aborts on mismatch. */
     pluginId: string;
     source: string;
+    /** Which plugin of a multi-plugin repository the entry lists. */
+    selection: PluginSourceSelection;
+    /** npm registry the listing pins. */
+    npmRegistry?: string;
+    /** Git commit the user confirmed before a third-party install. */
+    expectedGitCommit?: string;
+    /** npm version the user confirmed before a third-party install. */
+    expectedNpmVersion?: string;
+    /** Integrity confirmed with that version, when the registry published one. */
+    expectedNpmIntegrity?: string;
   }): Promise<PluginListEntry>;
+  /**
+   * The exact npm version and integrity a listing's spec resolves to now.
+   * The catalog shows this in the install confirmation, and the install then
+   * refuses anything else.
+   */
+  resolveCatalogNpmSource(args: {
+    packageName: string;
+    registry?: string;
+    requestedSpec: string;
+    specKind: "default" | "exact" | "tag" | "range";
+  }): Promise<
+    | { outcome: "resolved"; version: string; integrity: string }
+    | { outcome: "unavailable"; detail: string }
+  >;
   installPath(path: string): Promise<PluginListEntry>;
   checkForUpdates(id?: string): Promise<PluginUpdateCheckEntry[]>;
   listUpdateResults(): PluginUpdateCheckEntry[];
@@ -213,6 +264,25 @@ export interface PluginService {
     id: string,
     variant: PluginBrandingAssetVariant,
   ): { bytes: Uint8Array; contentType: string; hash: string } | undefined;
+  /** Active generations a reconnecting daemon uses to retire stale workers. */
+  listHostArtifactGenerations(): Array<{
+    pluginId: string;
+    generation: string;
+  }>;
+  /** Dispatch an unexpected worker exit from an active host generation. */
+  handleHostWorkerExit(args: {
+    authenticatedHostId: string;
+    pluginId: string;
+    generation: string;
+  }): void;
+  /** Dispatch one validated ephemeral signal from an active host generation. */
+  handleHostSignal(args: {
+    authenticatedHostId: string;
+    pluginId: string;
+    generation: string;
+    signal: string;
+    payload: JsonValue;
+  }): void;
   /**
    * Declared settings schema + current values for a loaded plugin
    * (secrets render as `{ set: boolean }`). Undefined when the plugin is not
@@ -911,6 +981,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     emitThreadEvent,
     handlerStats,
     hungServices,
+    hostArtifacts,
     identities,
     invokeWrapped,
     isBuiltinPluginId,
@@ -956,6 +1027,8 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     disposeOne,
     loadOne,
     validateInstallDir: (args) => managedValidateInstallDir(args),
+    checkEngineRange,
+    checkPluginSdkRange,
     syncCliSkill,
     notifyPluginsChanged,
     list,
@@ -1088,7 +1161,8 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
 
   function updateTrackingForRow(row: InstalledPluginRow): string {
     return (row.sourceKind === "npm" && row.sourceNpmSpecKind !== "exact") ||
-      (row.sourceKind === "git" && row.sourceGitRefKind === "branch")
+      (row.sourceKind === "git" &&
+        (row.sourceGitRefKind === "branch" || row.sourceGitRange !== null))
       ? "tracks compatible"
       : "pinned";
   }
@@ -1101,7 +1175,8 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     if (row.sourceKind === "npm") {
       return `npm · ${row.sourceNpmPackage ?? row.id} · ${updateTrackingForRow(row)}`;
     }
-    return `git · ${row.sourceGitUrl ?? row.source} · ${updateTrackingForRow(row)}`;
+    const range = row.sourceGitRange === null ? "" : ` · ${row.sourceGitRange}`;
+    return `git · ${row.sourceGitUrl ?? row.source}${range} · ${updateTrackingForRow(row)}`;
   }
 
   function updateStateForRow(
@@ -1132,6 +1207,9 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         : undefined;
     return {
       ...(persisted === undefined ? {} : { outcome: persisted.outcome }),
+      ...(persisted?.outcome === "unavailable"
+        ? { detail: persisted.detail }
+        : {}),
       ...(row.availableCompatibleVersion === null
         ? {}
         : { availableVersion: row.availableCompatibleVersion }),
@@ -1199,7 +1277,14 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
 
   function list(): PluginListEntry[] {
     const scheduleRows = listPluginSchedules(deps.db);
-    return listInstalledPlugins(deps.db)
+    const rows = listInstalledPlugins(deps.db);
+    // Resolving labels parses every marketplace's stored manifest, so it only
+    // runs when a plugin actually traces back to one. The common case — every
+    // plugin bundled or added from a source — reads no manifest at all.
+    const publisherLabels = rows.some((row) => row.provenance === "catalog")
+      ? marketplacePublisherLabels(deps.db)
+      : new Map<string, string>();
+    return rows
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((row) => {
         const runtime = statuses.get(row.id);
@@ -1220,6 +1305,15 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
           ...(row.catalogEntryId === null
             ? {}
             : { catalogEntryId: row.catalogEntryId }),
+          ...(row.catalogMarketplaceName === null
+            ? {}
+            : { catalogMarketplaceName: row.catalogMarketplaceName }),
+          publisherLabel: pluginPublisherLabel({
+            sourceKind: row.sourceKind,
+            provenance: row.provenance,
+            catalogMarketplaceName: row.catalogMarketplaceName,
+            labels: publisherLabels,
+          }),
           isOrphanedBuiltin:
             row.sourceKind === "builtin" &&
             !bundledPlugins.some(
@@ -1378,10 +1472,14 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
 
     async start() {
       await backfillNormalizedPluginRegistrations();
-      await withPluginOperationLock(
-        REGISTRATION_MUTATION_KEY,
-        recoverIncompletePluginRollbacks,
-      );
+      await withPluginOperationLock(REGISTRATION_MUTATION_KEY, async () => {
+        for (const artifact of listPendingGitPluginArtifacts(deps.db)) {
+          await withArtifactLock(artifact.path, () =>
+            recoverInterruptedGitPluginPromotion(artifact.path),
+          );
+        }
+        await recoverIncompletePluginRollbacks();
+      });
       await reconcileBundled();
       await loadAll();
       await withPluginOperationLock(REGISTRATION_MUTATION_KEY, runArtifactGc);
@@ -1397,9 +1495,28 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
           const loop = createPluginDevLoop({
             pluginId: row.id,
             hasApp: manifest.appEntry !== undefined,
+            hasHost: manifest.hostEntry !== undefined,
             buildApp: async () => {
               try {
                 await buildPluginApp(
+                  bundled.rootDir,
+                  deps.appVersion,
+                  await getPluginBuildToolchain(deps),
+                );
+                setDevBuildProblem(row.id, null);
+                notifyPluginsChanged();
+              } catch (error) {
+                setDevBuildProblem(
+                  row.id,
+                  error instanceof Error ? error.message : String(error),
+                );
+                notifyPluginsChanged();
+                throw error;
+              }
+            },
+            buildHost: async () => {
+              try {
+                await buildPluginHost(
                   bundled.rootDir,
                   deps.appVersion,
                   await getPluginBuildToolchain(deps),
@@ -1453,16 +1570,25 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
 
     list,
 
-    async install(source) {
+    async install(source, selection) {
       return withPluginOperationLock(REGISTRATION_MUTATION_KEY, async () => {
         const parsed = parsePluginSource(source);
-        if (parsed.kind === "builtin") return installBuiltinSource(parsed);
-        if (parsed.kind === "git") return installGitSource(parsed, source);
-        if (parsed.kind === "npm") {
-          refuseBuiltinShadow(derivePluginId(parsed.name));
-          return installNpmSource(parsed, source);
+        if (parsed.kind === "git") {
+          return installGitSource(parsed, source, selection);
         }
-        return installPathSource(parsed.path);
+        if (parsed.kind === "path") {
+          return installPathSource(parsed.path, selection);
+        }
+        // Only a repository holds several plugins; npm and builtin sources
+        // are one package each.
+        if (selection.kind !== "root") {
+          throw new Error(
+            `install refused: ${selection.kind === "entry" ? "--plugin" : "--subdirectory"} applies to git: and path: sources only`,
+          );
+        }
+        if (parsed.kind === "builtin") return installBuiltinSource(parsed);
+        refuseBuiltinShadow(derivePluginId(parsed.name));
+        return installNpmSource(parsed, source);
       });
     },
 
@@ -1478,24 +1604,59 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       });
     },
 
-    async installGitCatalogPlugin({ entryId, pluginId, source }) {
+    async installCatalogPlugin(entry) {
       return withPluginOperationLock(REGISTRATION_MUTATION_KEY, async () => {
-        const parsed = parsePluginSource(source);
-        if (parsed.kind !== "git") {
-          throw new Error(
-            `catalog entry "${entryId}" has a non-git source "${source}"`,
+        const parsed = parsePluginSource(entry.source);
+        const context: InstallContext = {
+          provenance: {
+            kind: "catalog",
+            marketplace: entry.marketplace,
+            entryId: entry.entryId,
+          },
+          expectedPluginId: entry.pluginId,
+          ...(entry.npmRegistry === undefined
+            ? {}
+            : { npmRegistry: entry.npmRegistry }),
+          ...(entry.expectedGitCommit === undefined
+            ? {}
+            : { expectedGitCommit: entry.expectedGitCommit }),
+          ...(entry.expectedNpmVersion === undefined
+            ? {}
+            : { expectedNpmVersion: entry.expectedNpmVersion }),
+          ...(entry.expectedNpmIntegrity === undefined
+            ? {}
+            : { expectedNpmIntegrity: entry.expectedNpmIntegrity }),
+        };
+        if (parsed.kind === "git") {
+          return installGitSource(
+            parsed,
+            entry.source,
+            entry.selection,
+            context,
           );
         }
-        return installGitSource(parsed, source, {
-          provenance: { kind: "catalog", entryId },
-          expectedPluginId: pluginId,
-        });
+        if (parsed.kind === "npm") {
+          // Only a repository holds several plugins.
+          if (entry.selection.kind !== "root") {
+            throw new Error(
+              `catalog entry "${entry.entryId}" selects a subdirectory of an npm package`,
+            );
+          }
+          refuseBuiltinShadow(derivePluginId(parsed.name));
+          return installNpmSource(parsed, entry.source, context);
+        }
+        throw new Error(
+          `catalog entry "${entry.entryId}" has an unsupported source "${entry.source}"`,
+        );
       });
     },
 
+    resolveCatalogNpmSource: (args) =>
+      managedPluginArtifacts.resolveNpmCandidateForPlan(args),
+
     installPath: (path) =>
       withPluginOperationLock(REGISTRATION_MUTATION_KEY, () =>
-        installPathSource(path),
+        installPathSource(path, ROOT_PLUGIN_SOURCE_SELECTION),
       ),
 
     ...pluginUpdates,
@@ -1626,6 +1787,70 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       };
     },
 
+    listHostArtifactGenerations() {
+      return [...hostArtifacts.entries()]
+        .filter(([id]) => loaded.has(id))
+        .map(([pluginId, artifact]) => ({
+          pluginId,
+          generation: artifact.generation,
+        }))
+        .sort((a, b) => a.pluginId.localeCompare(b.pluginId));
+    },
+
+    handleHostWorkerExit(args) {
+      const plugin = loaded.get(args.pluginId);
+      const artifact = hostArtifacts.get(args.pluginId);
+      if (
+        plugin === undefined ||
+        artifact === undefined ||
+        artifact.generation !== args.generation
+      ) {
+        return;
+      }
+      for (const handler of [...plugin.handle.hostWorkerExitHandlers]) {
+        void invokeWrapped(args.pluginId, "host worker exit", async () =>
+          handler({ hostId: args.authenticatedHostId }),
+        );
+      }
+    },
+
+    handleHostSignal(args) {
+      const plugin = loaded.get(args.pluginId);
+      const artifact = hostArtifacts.get(args.pluginId);
+      if (
+        plugin === undefined ||
+        artifact === undefined ||
+        artifact.generation !== args.generation
+      ) {
+        return;
+      }
+      const subscriptions = plugin.handle.hostSignalHandlers.filter(
+        (subscription) => subscription.signal === args.signal,
+      );
+      for (const subscription of subscriptions) {
+        void invokeWrapped(
+          args.pluginId,
+          `host signal ${args.signal}`,
+          async () => {
+            const result = await subscription.payloadSchema[
+              "~standard"
+            ].validate(args.payload);
+            if (result.issues !== undefined) {
+              throw new Error(
+                `host signal payload validation failed: ${result.issues
+                  .map((issue) => issue.message)
+                  .join("; ")}`,
+              );
+            }
+            await subscription.handler({
+              hostId: args.authenticatedHostId,
+              payload: result.value,
+            });
+          },
+        );
+      }
+    },
+
     async getSettings(id) {
       const plugin = loaded.get(id);
       if (!plugin) return undefined;
@@ -1709,10 +1934,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         `http ${route.method} ${route.path}`,
         async () => {
           const response = await route.handler(context);
-          if (!(response instanceof Response)) {
-            throw new Error("http route handler must return a Response");
-          }
-          return response;
+          return adoptHttpRouteResponse(response);
         },
       );
       if (outcome.ok) return outcome.value;

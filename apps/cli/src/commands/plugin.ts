@@ -10,11 +10,13 @@ import { derivePluginId } from "@bb/domain";
 import type {
   InstalledPlugin as PluginEntry,
   PluginApplyUpdateResult,
+  PluginCatalogInstallPlan,
+  PluginCatalogResolvedSource,
   PluginCatalogSearchResult,
   PluginUpdateCheckEntry as PluginUpdateResult,
 } from "@bb/server-contract";
 import { installedPluginSchema } from "@bb/server-contract";
-import { PLUGIN_SDK_VERSION, PLUGIN_SUBMISSION_FORM_URL } from "@bb/domain";
+import { PLUGIN_SDK_VERSION } from "@bb/domain";
 import { BbHttpError } from "@bb/sdk";
 import { parseDataDirEnvValue, resolveProdDataDir } from "@bb/config/runtime";
 import {
@@ -29,6 +31,7 @@ import { action } from "../action.js";
 import { cliFetch, createCliBbSdk } from "../client.js";
 import {
   buildPluginApp,
+  buildPluginHost,
   buildPluginServer,
   createPluginDevLoop,
   PLUGIN_TOOLCHAIN_PINS,
@@ -144,6 +147,7 @@ const pluginManifestSchema = z.object({
     .object({
       server: z.unknown().optional(),
       app: z.unknown().optional(),
+      host: z.unknown().optional(),
     })
     .optional(),
 });
@@ -598,8 +602,34 @@ function formatAbsoluteDate(value: string | number | undefined): string {
 function dualInterpretationError(source: string): string {
   return (
     `Could not resolve "${source}" as either a catalog plugin or a path on disk. ` +
-    "Use a Git repository URL, path:<path>, npm:<package>, or git:<url>[@<ref>] to choose an interpretation explicitly."
+    "Use a Git repository URL, path:<path>, npm:<package>, git:<url>[@<ref>], or " +
+    "git:<url>@<semver-range> to choose an interpretation explicitly."
   );
+}
+
+/**
+ * Rewrite a `git:<url>@<range>` spec into the explicit `semver:` form that
+ * carries a tag prefix. The prefix only means something for a range, so a spec
+ * that is already explicit — or that names a ref — is refused rather than
+ * silently reinterpreted.
+ */
+function withGitTagPrefix(source: string, tagPrefix: string): string {
+  const at = source.lastIndexOf("@");
+  const spec = at <= 0 ? "" : source.slice(at + 1);
+  if (
+    (!source.startsWith("git:") && !/^https?:\/\//iu.test(source)) ||
+    spec.length === 0
+  ) {
+    throw new Error(
+      "--tag-prefix applies to a git: source with a semver range, such as git:github.com/acme/repo@^1.2.0.",
+    );
+  }
+  if (spec.startsWith("semver:") || spec.startsWith("ref:")) {
+    throw new Error(
+      `Use --tag-prefix or an explicit "${spec.split(":")[0] ?? ""}:" spec, not both.`,
+    );
+  }
+  return `${source.slice(0, at)}@semver:${tagPrefix}:${spec}`;
 }
 
 function hasPathSyntax(source: string): boolean {
@@ -622,7 +652,17 @@ async function existsOnDisk(source: string): Promise<boolean> {
 
 type InstallIntent =
   | { kind: "source"; source: string; summary: string }
-  | { kind: "catalog"; entry: PluginCatalogSearchResult };
+  | { kind: "catalog"; plan: PluginCatalogInstallPlan };
+
+/** `<entry-id>@<marketplace>`, both lowercase kebab-case. */
+const QUALIFIED_ENTRY_PATTERN = /^([a-z0-9][a-z0-9-]*)@([a-z0-9][a-z0-9-]*)$/u;
+
+function installPlan(
+  baseUrl: string,
+  args: { entryId: string; marketplace?: string },
+): Promise<PluginCatalogInstallPlan> {
+  return createCliBbSdk(baseUrl).plugins.catalog.installPlan(args);
+}
 
 async function resolveInstallIntent(
   baseUrl: string,
@@ -655,11 +695,32 @@ async function resolveInstallIntent(
     };
   }
 
+  // `<id>@<marketplace>` names one marketplace's entry. Every other source
+  // form is already handled above, so this shape cannot be anything else.
+  const qualified = QUALIFIED_ENTRY_PATTERN.exec(input);
+  if (qualified !== null) {
+    const [, entryId, marketplace] = qualified;
+    return {
+      kind: "catalog",
+      plan: await installPlan(baseUrl, {
+        entryId: entryId ?? "",
+        marketplace: marketplace ?? "",
+      }),
+    };
+  }
   if (!input.includes("@")) {
-    const entry = (await searchCatalog(baseUrl, input)).find(
+    const listed = (await searchCatalog(baseUrl, input)).some(
       (candidate) => candidate.entryId === input,
     );
-    if (entry !== undefined) return { kind: "catalog", entry };
+    // The server owns the routing: it installs the single match, falls back to
+    // the bundled plugin of that name, or refuses an id several marketplaces
+    // list. Asking it here is what makes the confirmation show the real plan.
+    if (listed) {
+      return {
+        kind: "catalog",
+        plan: await installPlan(baseUrl, { entryId: input }),
+      };
+    }
   }
   if (!(await existsOnDisk(input)))
     throw new Error(dualInterpretationError(input));
@@ -670,6 +731,63 @@ async function resolveInstallIntent(
     source: `path:${path}`,
     summary: `Installing ${path}`,
   };
+}
+
+/** The npm or git source line of an install confirmation. */
+function resolvedSourceLines(source: PluginCatalogResolvedSource): string[] {
+  if (source.kind === "npm") {
+    const spec = source.range ?? source.tag ?? "latest";
+    return [
+      `  npm package: ${source.package}@${spec}`,
+      ...(source.registry === undefined
+        ? []
+        : [`  registry: ${source.registry}`]),
+    ];
+  }
+  const lines = [`  git repository: ${source.url}`];
+  if (source.subdir !== undefined) {
+    lines.push(`  subdirectory: ${source.subdir}`);
+  }
+  if (source.ref !== undefined) lines.push(`  ref: ${source.ref}`);
+  if (source.range !== undefined) {
+    const prefix =
+      source.tagPrefix === undefined ? "" : ` (tags ${source.tagPrefix}vX.Y.Z)`;
+    lines.push(`  semver range: ${source.range}${prefix}`);
+  }
+  if (source.resolvedTag !== undefined) {
+    lines.push(`  resolves to tag: ${source.resolvedTag}`);
+  }
+  if (source.resolvedCommit !== undefined) {
+    lines.push(`  resolves to commit: ${source.resolvedCommit}`);
+  }
+  if (source.unresolvedReason !== undefined) {
+    lines.push(`  not resolved right now: ${source.unresolvedReason}`);
+  }
+  return lines;
+}
+
+/**
+ * What the install will actually do. A third-party listing shows its
+ * marketplace, its author, and the true resolved source — the listing's own
+ * description is not evidence of what the install fetches.
+ */
+function installPlanSummary(plan: PluginCatalogInstallPlan): string {
+  if (plan.kind === "bundled") {
+    return `Installing ${plan.displayName}, bundled with BB (${plan.source})`;
+  }
+  if (plan.official) {
+    return `Installing ${plan.displayName} from the ${plan.marketplaceDisplayName} marketplace, reviewed by BB (${plan.source})`;
+  }
+  const author =
+    plan.author.url === null
+      ? plan.author.name
+      : `${plan.author.name} (${plan.author.url})`;
+  return [
+    `Installing ${plan.displayName} (${plan.entryId}@${plan.marketplace})`,
+    `  marketplace: ${plan.marketplaceDisplayName} — a third-party marketplace, not reviewed by BB`,
+    `  author: ${author}`,
+    ...resolvedSourceLines(plan.resolvedSource),
+  ].join("\n");
 }
 
 function printPlugin(plugin: PluginEntry): void {
@@ -780,7 +898,9 @@ export function registerPluginCommands(
 
   plugin
     .command("search <query>")
-    .description("Search BB's official plugins (bundled with the app)")
+    .description(
+      "Search every plugin the store lists: the plugins bundled with the app, the reserved bb-community marketplace catalog BB reviews, and any third-party marketplace added on this host. The Marketplace column names the source; only bb-community is reviewed by BB",
+    )
     .option("--json", "Output JSON")
     .action(
       action(async (query: string, opts: JsonOutputOptions) => {
@@ -789,9 +909,13 @@ export function registerPluginCommands(
           outputJson(opts, results);
           return;
         }
+        // Where a listing came from only matters once something other than
+        // BB's own catalog is registered; until then the column is noise.
+        const showMarketplace = results.some((result) => !result.official);
         const rows = results.map((result) => [
           result.displayName,
           result.description,
+          ...(showMarketplace ? [result.marketplaceDisplayName] : []),
           result.installed
             ? "✓ installed"
             : result.compatible
@@ -801,34 +925,18 @@ export function registerPluginCommands(
         console.log(
           renderBorderlessTable(
             {
-              head: ["Name", "Description", "Status"],
-              colWidths: [28, 54, 48],
+              head: [
+                "Name",
+                "Description",
+                ...(showMarketplace ? ["Marketplace"] : []),
+                "Status",
+              ],
+              colWidths: showMarketplace ? [26, 42, 22, 40] : [28, 54, 48],
               trimTrailingWhitespace: true,
             },
             rows,
           ),
         );
-      }),
-    );
-
-  plugin
-    .command("submit")
-    .description(
-      "Print the intake form link for submitting a plugin to BB's marketplace",
-    )
-    .option("--json", "Output JSON")
-    .action(
-      action(async (opts: JsonOutputOptions) => {
-        // The form is the entire submission UI for now — this links out
-        // rather than relaying, so submission itself happens in the browser.
-        if (opts.json) {
-          outputJson(opts, { url: PLUGIN_SUBMISSION_FORM_URL });
-          return;
-        }
-        console.log(
-          "Submit your plugin to BB's marketplace (public GitHub repo required):",
-        );
-        console.log(PLUGIN_SUBMISSION_FORM_URL);
       }),
     );
 
@@ -869,6 +977,16 @@ export function registerPluginCommands(
         console.log(`${id}`);
         console.log(`  requested: ${source.requested}`);
         console.log(`  resolved: ${source.resolved}`);
+        if (source.subdirectory !== undefined) {
+          console.log(`  subdirectory: ${source.subdirectory}`);
+        }
+        if (source.range !== undefined) console.log(`  range: ${source.range}`);
+        if (source.tagPrefix !== undefined) {
+          console.log(`  tag prefix: ${source.tagPrefix}`);
+        }
+        if (source.resolvedTag !== undefined) {
+          console.log(`  tag: ${source.resolvedTag}`);
+        }
         if (source.registry) console.log(`  registry: ${source.registry}`);
         if (source.integrity) console.log(`  integrity: ${source.integrity}`);
         if (source.engines.bb) {
@@ -896,23 +1014,63 @@ export function registerPluginCommands(
   plugin
     .command("install <source>")
     .description(
-      "Install a bundled official plugin by name, Git repository URL, local path, builtin:<name>, git:<url>[@<ref>], or npm:<name>@<version> (managed sources validate engines ranges and build artifacts; bundled plugin ids are reserved)",
+      "Install a catalog entry by name or <entry>@<marketplace>, a Git repository URL, a local path, builtin:<name>, git:<url>[@<ref|semver-range>], or npm:<name>@<version>. A catalog entry from a third-party marketplace is not reviewed by BB, so its confirmation names the marketplace, the author, and the exact resolved source (managed sources validate engines ranges and build artifacts; bundled plugin ids are reserved)",
+    )
+    .option(
+      "--subdirectory <path>",
+      "Install one plugin directory of a multi-plugin git:/path: repository",
+    )
+    .option(
+      "--plugin <name>",
+      "Install the .bb/plugins.json entry with this name (git:/path: repositories)",
+    )
+    .option(
+      "--tag-prefix <prefix>",
+      "Resolve a git: semver range over <prefix>vX.Y.Z tags (monorepo tagging)",
     )
     .option("--yes", "Skip the confirmation prompt")
     .option("--json", "Output JSON")
     .action(
       action(
-        async (source: string, opts: JsonOutputOptions & { yes?: boolean }) => {
-          const intent = await resolveInstallIntent(getUrl(), source);
+        async (
+          source: string,
+          opts: JsonOutputOptions & {
+            yes?: boolean;
+            subdirectory?: string;
+            plugin?: string;
+            tagPrefix?: string;
+          },
+        ) => {
+          if (opts.subdirectory !== undefined && opts.plugin !== undefined) {
+            throw new Error(
+              "Use --subdirectory or --plugin, not both: --plugin resolves a name from .bb/plugins.json to a subdirectory.",
+            );
+          }
+          const requested =
+            opts.tagPrefix === undefined
+              ? source
+              : withGitTagPrefix(source, opts.tagPrefix);
+          const intent = await resolveInstallIntent(getUrl(), requested);
+          if (intent.kind === "catalog" && opts.tagPrefix !== undefined) {
+            throw new Error(
+              `"${source}" is a catalog entry; --tag-prefix applies to git: sources only.`,
+            );
+          }
+          if (
+            intent.kind === "catalog" &&
+            (opts.subdirectory !== undefined || opts.plugin !== undefined)
+          ) {
+            throw new Error(
+              `"${source}" is a catalog entry; --subdirectory and --plugin apply to git: and path: repositories only.`,
+            );
+          }
           // Catalog entries split by source kind: `builtin:` plugins ship
-          // inside the app, git-catalog entries install from their pinned,
-          // reviewed commit — the preamble must not claim one is the other.
+          // inside the app, marketplace entries install from their listed
+          // source — the preamble must not claim one is the other.
           let summary =
             intent.kind === "source"
               ? intent.summary
-              : intent.entry.source.startsWith("builtin:")
-                ? `Installing ${intent.entry.displayName}, bundled with BB (${intent.entry.source})`
-                : `Installing ${intent.entry.displayName} from its pinned source (${intent.entry.source})`;
+              : installPlanSummary(intent.plan);
           if (intent.kind === "source" && intent.source.startsWith("path:")) {
             const path = intent.source.slice(5);
             // Best effort — a missing/invalid manifest is the server's
@@ -928,6 +1086,12 @@ export function registerPluginCommands(
             } catch {
               // fall through to the bare path summary
             }
+          }
+          if (opts.subdirectory !== undefined) {
+            summary = `${summary} (subdirectory ${opts.subdirectory})`;
+          }
+          if (opts.plugin !== undefined) {
+            summary = `${summary} (collection plugin ${opts.plugin})`;
           }
           if (!opts.json) {
             console.log(summary);
@@ -960,10 +1124,22 @@ export function registerPluginCommands(
             intent.kind === "source"
               ? await createCliBbSdk(getUrl()).plugins.install({
                   source: intent.source,
+                  ...(opts.subdirectory === undefined
+                    ? {}
+                    : { subdirectory: opts.subdirectory }),
+                  ...(opts.plugin === undefined ? {} : { plugin: opts.plugin }),
                 })
-              : await createCliBbSdk(getUrl()).plugins.catalog.install({
-                  entryId: intent.entry.entryId,
-                });
+              : await createCliBbSdk(getUrl()).plugins.catalog.install(
+                  intent.plan.kind === "marketplace"
+                    ? {
+                        entryId: intent.plan.entryId,
+                        marketplace: intent.plan.marketplace,
+                        ...(intent.plan.official
+                          ? {}
+                          : { confirmedSource: intent.plan.resolvedSource }),
+                      }
+                    : { entryId: intent.plan.entryId },
+                );
           const result = { ok: true as const, plugin };
           if (opts.json) {
             outputJson(opts, result);
@@ -1049,7 +1225,7 @@ export function registerPluginCommands(
             if (!shouldAttempt) {
               if (result.outcome === "pinned") {
                 console.log(
-                  `${result.id}: skipped — pinned${detail ? ` (${detail})` : ""}; remove and reinstall with a tracking npm range or git branch to receive updates.`,
+                  `${result.id}: skipped — pinned${detail ? ` (${detail})` : ""}; remove and reinstall with a tracking npm range, git branch, or git semver range to receive updates.`,
                 );
               } else if (result.outcome === "incompatible") {
                 console.log(
@@ -1316,7 +1492,7 @@ export function registerPluginCommands(
   plugin
     .command("build [path]")
     .description(
-      "Compile the plugin into dist/: the bb.server backend bundle (server.js, server.meta.json) and, when bb.app is declared, the frontend bundle (app.js, app.css, app.meta.json); each *.meta.json stamps SDK/identity metadata; no server required",
+      "Compile the plugin into dist/: the bb.server backend bundle (server.js, server.meta.json), plus, when declared, the bb.app frontend bundle (app.js, app.css, app.meta.json) and the self-contained bb.host daemon bundle (host.js, host.js.map, host.meta.json) — which carries the plugin's host RPC entry, its provider bridge, or both; each *.meta.json stamps SDK/identity metadata; no server required",
     )
     .action(
       action(async (path: string | undefined) => {
@@ -1327,6 +1503,7 @@ export function registerPluginCommands(
         // unreachable case where that read also fails.
         const manifest = await readPluginManifest(rootDir);
         const hasApp = typeof manifest?.bb?.app === "string";
+        const hasHost = typeof manifest?.bb?.host === "string";
         // Keep the local declarations tracking the bb doing the build, so a
         // plugin scaffolded against an older SDK never typechecks green
         // against an API this bb no longer has. Gate on bb.server so a
@@ -1341,6 +1518,10 @@ export function registerPluginCommands(
           const app = await buildPluginApp(rootDir, bbVersion, toolchain);
           files.push(app.jsPath, app.cssPath, app.metaPath);
         }
+        if (hasHost) {
+          const host = await buildPluginHost(rootDir, bbVersion, toolchain);
+          files.push(host.jsPath, host.mapPath, host.metaPath);
+        }
         for (const file of files) {
           console.log(relative(process.cwd(), file));
         }
@@ -1350,13 +1531,14 @@ export function registerPluginCommands(
   plugin
     .command("dev [path]")
     .description(
-      "Watch a plugin's sources: rebuild its frontend bundle (if it has one) and reload it on every change (Ctrl+C to stop)",
+      "Watch a plugin's sources: rebuild its frontend, host, and provider-bridge bundles when declared, then reload it on every change (Ctrl+C to stop)",
     )
     .action(
       action(async (path: string | undefined) => {
         const rootDir = resolve(process.cwd(), path ?? ".");
         const manifest = await requirePluginManifest(rootDir);
         const hasApp = typeof manifest.bb?.app === "string";
+        const hasHost = typeof manifest.bb?.host === "string";
         // Refresh before the watcher starts, so writing types/ cannot feed
         // the loop its own change event.
         await refreshPluginTypes(rootDir, hasApp);
@@ -1378,8 +1560,16 @@ export function registerPluginCommands(
         const loop = createPluginDevLoop({
           pluginId: entry.id,
           hasApp,
+          hasHost,
           buildApp: async () => {
             await buildPluginApp(
+              rootDir,
+              resolveBbCliVersion(),
+              await cliBuildToolchain(),
+            );
+          },
+          buildHost: async () => {
+            await buildPluginHost(
               rootDir,
               resolveBbCliVersion(),
               await cliBuildToolchain(),
@@ -1409,7 +1599,7 @@ export function registerPluginCommands(
           },
         );
         console.log(
-          `Watching ${rootDir} for plugin "${entry.id}"${hasApp ? " (frontend rebuild + reload on change)" : " (reload on change)"} — Ctrl+C to stop.`,
+          `Watching ${rootDir} for plugin "${entry.id}"${hasApp || hasHost ? ` (${[hasApp ? "frontend" : null, hasHost ? "host" : null].filter(Boolean).join(" + ")} rebuild + reload on change)` : " (reload on change)"} — Ctrl+C to stop.`,
         );
         await new Promise<void>((resolveDone) => {
           const stop = (): void => {
