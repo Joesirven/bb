@@ -59,7 +59,7 @@ describe("QA runbook contracts", () => {
       'bb thread wait "$SMOKE_THREAD_ID" --status idle --timeout 180 || true',
     );
     expect(runbook).toContain(
-      'if [ "$THREAD_STATE" != "idle" ]; then\n  bb thread tell "$SMOKE_THREAD_ID" "Say exactly: recovery ok"',
+      'if [ "$THREAD_STATE" != "idle" ]; then\n  bb thread tell "$SMOKE_THREAD_ID" "Say exactly: recovery ok" --mode auto',
     );
   });
 });

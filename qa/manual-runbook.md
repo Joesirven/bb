@@ -709,7 +709,7 @@ fi
 
 THREAD_STATE=$(curl -fsS "$BB_SERVER_URL/api/v1/threads/$SMOKE_THREAD_ID" | jq -r '.status')
 if [ "$THREAD_STATE" != "idle" ]; then
-  bb thread tell "$SMOKE_THREAD_ID" "Say exactly: recovery ok"
+  bb thread tell "$SMOKE_THREAD_ID" "Say exactly: recovery ok" --mode auto
   bb thread wait "$SMOKE_THREAD_ID" --status idle --timeout 120
 fi
 
