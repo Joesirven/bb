@@ -16,6 +16,7 @@ import {
 } from "@bb/domain";
 import type {
   BbPluginApi,
+  ExperimentalFailedTurnContinuation,
   PluginAgentConfiguration,
   PluginAgentConfigurationContext,
   PluginAgentToolContext,
@@ -407,6 +408,12 @@ export function createPluginApi(options: {
       ports: readonly number[];
     }[],
   ) => void;
+  inspectFailedTurn: ExperimentalFailedTurnContinuation["inspect"];
+  continueFailedTurn: (
+    args: Parameters<ExperimentalFailedTurnContinuation["continue"]>[0] & {
+      pluginId: string;
+    },
+  ) => ReturnType<ExperimentalFailedTurnContinuation["continue"]>;
   callPluginHost?: (args: {
     contract: PluginRpcContract;
     method: string;
@@ -447,6 +454,8 @@ export function createPluginApi(options: {
     validateSharedPortDeclaration,
     declareSharedPorts,
     replaceDeclaredSharedPorts,
+    inspectFailedTurn,
+    continueFailedTurn,
     callPluginHost,
     registerProvider,
     isProviderIdTaken,
@@ -1301,6 +1310,17 @@ export function createPluginApi(options: {
       handlers.push(handler);
     },
   };
+  const experimentalFailedTurnContinuation: ExperimentalFailedTurnContinuation =
+    {
+      inspect(args) {
+        assertLive();
+        return inspectFailedTurn(args);
+      },
+      continue(args) {
+        assertLive();
+        return continueFailedTurn({ ...args, pluginId });
+      },
+    };
 
   const api: BbPluginApi = {
     pluginId,
@@ -1315,6 +1335,7 @@ export function createPluginApi(options: {
     agents,
     ui,
     events,
+    experimental_failedTurnContinuation: experimentalFailedTurnContinuation,
     status,
     server,
     hosts,
