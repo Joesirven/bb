@@ -9,6 +9,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { MAX_SERVERS_PER_ACCOUNT } from "@bb/connect-db";
 import type { HandleValidationError, LabelAvailability } from "@bb/connect-db";
+import { copyToClipboard } from "@bb/shared-ui/lib/clipboard";
 import appCss from "../styles.css?url";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -169,19 +170,18 @@ function CopyButton({
       size="sm"
       disabled={disabled}
       onClick={() => {
-        // Copy has a failure path: locked-down / insecure contexts reject the
-        // write, so fall back to asking the user to press ⌘C instead of
-        // silently doing nothing.
-        navigator.clipboard.writeText(text).then(
-          () => {
+        // Copy still has a failure path: locked-down contexts can refuse both
+        // the Clipboard API and the textarea fallback, so ask the user to press
+        // ⌘C instead of silently doing nothing.
+        void copyToClipboard(text).then((copied) => {
+          if (copied) {
             setState("copied");
             setTimeout(() => setState("idle"), 1400);
-          },
-          () => {
-            setState("manual");
-            setTimeout(() => setState("idle"), 2500);
-          },
-        );
+            return;
+          }
+          setState("manual");
+          setTimeout(() => setState("idle"), 2500);
+        });
       }}
     >
       {state === "copied" ? "Copied" : state === "manual" ? "Press ⌘C" : label}
@@ -742,7 +742,7 @@ function ServerRow({
   const [confirm, setConfirm] = useState<"disconnect" | "remove" | null>(null);
 
   const url = server.serverUrl;
-  const copyUrl = () => void navigator.clipboard.writeText(url).catch(() => {});
+  const copyUrl = () => void copyToClipboard(url);
 
   const dot = server.online ? "online" : server.connected ? "offline" : "new";
   const menuItems = server.connected

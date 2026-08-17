@@ -1,4 +1,7 @@
+import { copyToClipboard } from "@bb/shared-ui/lib/clipboard";
 import { appToast } from "@/components/ui/app-toast";
+
+export { copyToClipboard };
 
 interface CopyToClipboardOptions {
   /** Toast message shown on success (set to `null` to suppress). */
@@ -18,16 +21,11 @@ export async function copyToClipboardWithToast(
     errorMessage = "Failed to copy",
   }: CopyToClipboardOptions = {},
 ): Promise<boolean> {
-  if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
-    if (errorMessage) appToast.error(errorMessage);
-    return false;
-  }
-  try {
-    await navigator.clipboard.writeText(text);
+  const copied = await copyToClipboard(text);
+  if (copied) {
     if (successMessage) appToast.success(successMessage);
-    return true;
-  } catch {
-    if (errorMessage) appToast.error(errorMessage);
-    return false;
+  } else if (errorMessage) {
+    appToast.error(errorMessage);
   }
+  return copied;
 }

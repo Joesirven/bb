@@ -37,6 +37,7 @@ import {
   DropdownMenuTrigger,
 } from "@bb/shared-ui/dropdown-menu";
 import { Input } from "@bb/shared-ui/input";
+import { copyToClipboard } from "@bb/shared-ui/lib/clipboard";
 import {
   Select,
   SelectContent,
@@ -894,10 +895,10 @@ function RowMenu({ item }: { item: Item }) {
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => {
-            navigator.clipboard.writeText(item.url).then(
-              () => toast.success("Link copied"),
-              () => toast.error("Could not copy the link"),
-            );
+            void copyToClipboard(item.url).then((copied) => {
+              if (copied) toast.success("Link copied");
+              else toast.error("Could not copy the link");
+            });
           }}
         >
           Copy link

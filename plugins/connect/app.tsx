@@ -30,6 +30,7 @@ import {
 } from "@bb/shared-ui/dialog";
 import { Icon } from "@bb/shared-ui/icon";
 import { Input } from "@bb/shared-ui/input";
+import { copyToClipboard } from "@bb/shared-ui/lib/clipboard";
 import { cn } from "@bb/shared-ui/lib/utils";
 import {
   CONNECT_REALTIME_CHANNEL,
@@ -312,18 +313,17 @@ function UrlHero({ url, showOpen }: { url: string; showOpen: boolean }) {
   }, []);
 
   const copy = useCallback(() => {
-    navigator.clipboard.writeText(url).then(
-      () => {
+    void copyToClipboard(url).then((copied) => {
+      if (copied) {
         setCopyState("copied");
         if (timerRef.current !== null) clearTimeout(timerRef.current);
         timerRef.current = setTimeout(() => setCopyState("idle"), 1500);
-      },
-      () => {
-        // Locked-down / insecure contexts reject: keep the user unblocked.
-        selectUrl();
-        setCopyState("manual");
-      },
-    );
+        return;
+      }
+      // Locked-down contexts can refuse both paths: keep the user unblocked.
+      selectUrl();
+      setCopyState("manual");
+    });
   }, [url, selectUrl]);
 
   return (
@@ -372,16 +372,13 @@ function QuietCopyButton({ url, label }: { url: string; label: string }) {
     [],
   );
   const copy = useCallback(() => {
-    navigator.clipboard.writeText(url).then(
-      () => {
-        setCopied(true);
-        if (timerRef.current !== null) clearTimeout(timerRef.current);
-        timerRef.current = setTimeout(() => setCopied(false), 1500);
-      },
-      () => {
-        // Quiet copy has no inline hint; leave the label unchanged.
-      },
-    );
+    void copyToClipboard(url).then((copied) => {
+      // Quiet copy has no inline hint; on failure leave the label unchanged.
+      if (!copied) return;
+      setCopied(true);
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopied(false), 1500);
+    });
   }, [url]);
   return (
     <Button

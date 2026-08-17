@@ -42,7 +42,7 @@ import {
 } from "@/components/tools/plugin-detail-table";
 import { PluginBannerBar } from "@/components/tools/plugin-detail-banner";
 import { ProvenancePill } from "@/components/tools/ProvenancePill";
-import { appToast } from "@/components/ui/app-toast";
+import { copyToClipboardWithToast } from "@/lib/clipboard";
 import {
   usePluginSource,
   type PluginCatalogSearchEntry,
@@ -78,13 +78,13 @@ function PluginPath({ path }: { path: string }) {
   const [copied, setCopied] = useState(false);
 
   async function copyPath() {
-    try {
-      await navigator.clipboard.writeText(path);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      appToast.error("Failed to copy path.");
-    }
+    const success = await copyToClipboardWithToast(path, {
+      successMessage: null,
+      errorMessage: "Failed to copy path.",
+    });
+    if (!success) return;
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
   }
 
   return (

@@ -26,6 +26,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import { createFileRoute } from "@tanstack/react-router";
+import { copyToClipboard } from "@bb/shared-ui/lib/clipboard";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
@@ -133,7 +134,7 @@ function RunCommandButton({ placement }: { placement: CtaPlacement }) {
     });
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
-    navigator.clipboard.writeText(CLI_COMMAND).catch(() => {});
+    void copyToClipboard(CLI_COMMAND);
   };
   return (
     <button

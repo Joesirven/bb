@@ -18,7 +18,7 @@ import {
   TooltipTrigger,
 } from "@bb/shared-ui/tooltip";
 import { FilePreview } from "@/components/secondary-panel/FilePreview.js";
-import { appToast } from "@/components/ui/app-toast";
+import { copyToClipboardWithToast } from "@/lib/clipboard";
 import { ProvenancePill } from "@/components/tools/ProvenancePill";
 
 export type SkillDetailTitleBadge = {
@@ -73,13 +73,13 @@ function SkillPath({ path, href }: { path: string; href?: string }) {
   const displayPath = formatHomePathForDisplay(path);
 
   async function copyPath() {
-    try {
-      await navigator.clipboard.writeText(path);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      appToast.error("Failed to copy path.");
-    }
+    const success = await copyToClipboardWithToast(path, {
+      successMessage: null,
+      errorMessage: "Failed to copy path.",
+    });
+    if (!success) return;
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
   }
 
   return (
