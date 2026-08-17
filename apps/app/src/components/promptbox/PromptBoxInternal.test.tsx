@@ -3521,7 +3521,7 @@ describe("PromptBoxInternal command typeahead navigation", () => {
         ],
       });
       const editor = getPromptEditorElement();
-      editor.focus();
+      act(() => editor.focus());
       await screen.findByRole("button", { name: "review" });
       expect(onSubmit).not.toHaveBeenCalled();
 
