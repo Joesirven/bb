@@ -623,6 +623,7 @@ export function ThreadSecondaryPanel({
     onSurfaceFileTabReorder: SecondaryPanelTabReorderHandler;
     showDiffSurfaceTab: boolean;
     showInfoSurfaceTab: boolean;
+    showNewTabButton: boolean;
   }
 
   const renderHidePanelButton = () => (
@@ -674,6 +675,7 @@ export function ThreadSecondaryPanel({
     onSurfaceFileTabReorder,
     showDiffSurfaceTab,
     showInfoSurfaceTab,
+    showNewTabButton: showGroupNewTabButton,
   }: PanelTabGroupArgs) => {
     const activeSurfaceFileTab = fileSurfaceTabs?.find((tab) => tab.isActive);
     const visibleSurfaceFileTabs = fileSurfaceTabs?.filter(
@@ -750,7 +752,7 @@ export function ThreadSecondaryPanel({
             activeTreatment="fill"
           />
         ) : null}
-        {showNewTabButton ? (
+        {showGroupNewTabButton ? (
           <NewTabButton
             onOpenNewTab={onOpenNewTab}
             shortcut={newTabShortcut}
@@ -823,6 +825,7 @@ export function ThreadSecondaryPanel({
                   onSurfaceFileTabReorder,
                   showDiffSurfaceTab,
                   showInfoSurfaceTab,
+                  showNewTabButton,
                 })}
               </div>
               {showOuterControls ? (
@@ -1011,7 +1014,8 @@ export function ThreadSecondaryPanel({
                           "pl-4",
                           collapsedPanelTrafficLightReserveClassName,
                         ],
-                        index === panes.length - 1 && "pr-20",
+                        index === panes.length - 1 &&
+                          (showNewTabButton ? "pr-28" : "pr-20"),
                       )}
                       data-sidebar-split-tab-group={pane.paneId}
                       role="group"
@@ -1030,6 +1034,7 @@ export function ThreadSecondaryPanel({
                         showInfoSurfaceTab: pane.group.tabIds.includes(
                           SIDEBAR_FIXED_INFO_TAB_ID,
                         ),
+                        showNewTabButton: false,
                       })}
                     </div>
                   );
@@ -1039,6 +1044,13 @@ export function ThreadSecondaryPanel({
                 className="absolute right-4 z-30 flex min-w-0 shrink-0 items-center gap-1 bg-sidebar pl-1"
                 onPointerDown={(event) => event.stopPropagation()}
               >
+                {showNewTabButton ? (
+                  <NewTabButton
+                    onOpenNewTab={onOpenNewTab}
+                    shortcut={newTabShortcut}
+                    usesDesktopChrome={usesDesktopChrome}
+                  />
+                ) : null}
                 {renderConversationCollapseButton(
                   focusedPane?.onMoveActiveTabToSide,
                 )}

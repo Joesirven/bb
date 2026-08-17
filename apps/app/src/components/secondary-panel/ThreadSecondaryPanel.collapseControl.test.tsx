@@ -279,6 +279,7 @@ describe("ThreadSecondaryPanel full-screen control", () => {
 
   it("offers every existing split position from the right-panel control and moves the active tab", () => {
     const { wrapper: Wrapper } = createQueryClientTestHarness();
+    const onOpenNewTab = vi.fn();
     const fileTab = createWorkspaceFilePreviewFixedPanelTab({
       environmentId: "env-test",
       projectId: "project-test",
@@ -315,7 +316,7 @@ describe("ThreadSecondaryPanel full-screen control", () => {
                 onClose={noop}
                 onCollapse={noop}
                 onFileTabReorder={noop}
-                onOpenNewTab={noop}
+                onOpenNewTab={onOpenNewTab}
                 onPanelChange={noop}
                 onPanelFocus={noop}
                 onToggleConversationCollapse={noop}
@@ -363,6 +364,12 @@ describe("ThreadSecondaryPanel full-screen control", () => {
       ),
     ).toBe(false);
     expect(document.querySelectorAll("header")).toHaveLength(0);
+    const newTabControls = screen.getAllByRole("button", {
+      name: "Open new tab",
+    });
+    expect(newTabControls).toHaveLength(1);
+    fireEvent.click(newTabControls[0] as HTMLElement);
+    expect(onOpenNewTab).toHaveBeenCalledTimes(1);
   });
 
   it("keeps one conversation restore control across split tab rows", () => {
