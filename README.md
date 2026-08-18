@@ -62,6 +62,25 @@ npx bb-app@nightly
 
 bb uses the provider CLI you already have authenticated.
 
+### Long-running installs: use `npm install`, not `npx`
+
+`npx bb-app@latest` is fine for trying bb out, but it cannot update itself. npm
+records the first resolved version as a caret range in its cache entry, so a
+cache created while `latest` was `0.35.1` pins to `^0.35.1` and will never
+resolve `0.36.0` or newer. The in-app update affordance then appears to do
+nothing, with no error.
+
+For a server or any install you intend to keep, install into a fixed prefix
+instead:
+
+```bash
+npm install --prefix ~/.bb/runtime-install bb-app@latest
+~/.bb/runtime-install/node_modules/.bin/bb-app
+```
+
+`npm install` re-resolves `latest` every time it runs, so restarting is a real
+update.
+
 For install requirements, provider setup, configuration, and package-focused
 docs, start with
 [`packages/bb-app`](./packages/bb-app/README.md).
