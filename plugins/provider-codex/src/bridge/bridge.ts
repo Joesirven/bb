@@ -347,6 +347,12 @@ interface CodexBridgeSession {
   constructionSignature: string;
   /** Codex-id space; feeds delta-first item/started synthesis. */
   openedItemIds: Set<string>;
+  /**
+   * Exact normalized terminal events already emitted for this session. Codex
+   * can repeat a terminal notification after resolving an approval; preserve
+   * later corrected completions while suppressing byte-equivalent retries.
+   */
+  completedItemFingerprints: Set<string>;
   /** Codex-id space; open turns settle as failed if the child dies. */
   openCodexTurnIds: Set<string>;
   identityAnnounced: boolean;
@@ -622,6 +628,18 @@ function toCanonicalEvents(
   event: ThreadEvent,
 ): ThreadEvent[] {
   const out: ThreadEvent[] = [];
+
+  if (event.type === "item/completed") {
+    const fingerprint = JSON.stringify({
+      item: event.item,
+      providerThreadId: event.providerThreadId,
+      scope: event.scope,
+    });
+    if (session.completedItemFingerprints.has(fingerprint)) {
+      return out;
+    }
+    session.completedItemFingerprints.add(fingerprint);
+  }
 
   if (event.type === "turn/started" && event.scope.kind === "turn") {
     session.openCodexTurnIds.add(event.scope.turnId);
@@ -1065,6 +1083,7 @@ async function constructThreadSession(
       decoded.sessionOptions,
     ),
     openedItemIds: new Set(),
+    completedItemFingerprints: new Set(),
     openCodexTurnIds: new Set(),
     identityAnnounced: false,
     pendingPreIdentityEvents: [],

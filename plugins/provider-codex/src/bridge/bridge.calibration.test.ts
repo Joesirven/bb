@@ -196,6 +196,27 @@ const SCRIPT: (ScriptedNotification | ScriptedRequest)[][] = [
         durationMs: 12,
       },
     }),
+    // Real Codex denial flows can repeat the exact terminal notification for
+    // one item after the approval response. Provider retries must not create a
+    // second canonical completion for the same lifecycle edge.
+    codexNotification("item/completed", {
+      threadId: SCRIPT_THREAD_ID,
+      turnId: FIRST_TURN_ID,
+      completedAtMs: 0,
+      item: {
+        type: "commandExecution",
+        id: COMMAND_ITEM_ID,
+        command: "git status --short",
+        cwd: "/tmp/project",
+        processId: null,
+        source: "agent",
+        status: "completed",
+        commandActions: [],
+        aggregatedOutput: " M src/app.ts\n",
+        exitCode: 0,
+        durationMs: 12,
+      },
+    }),
     codexNotification("item/completed", {
       threadId: SCRIPT_THREAD_ID,
       turnId: FIRST_TURN_ID,
