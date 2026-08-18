@@ -637,7 +637,13 @@ is synchronous, so it blocked the server's event loop — which also delayed
 dynamic tool call and before registering every interactive request. One slow
 thread therefore slowed agent work on _every_ thread on the host.
 
-A window is capped at `BB_FF_TIMELINE_WINDOW_EVENT_BUDGET` events (default 1500) and returns however many whole turns fit. Older turns load automatically
+A window is capped at `BB_FF_TIMELINE_WINDOW_EVENT_BUDGET` events (default 1500) and returns however many whole turns fit. The default assumes roughly
+0.06ms per event; that cost varies widely with hardware, and on a small VPS it
+can be closer to 0.5ms, making a full window ~720ms of blocked event loop
+instead of ~100ms. If `Thread timeline build blocked the event loop` appears
+often, divide a logged build's `totalDurationMs` by its `eventRowCount` to get
+your real per-event cost and lower this budget until a full window fits your
+latency target. Older turns load automatically
 as you scroll toward the top of the loaded window; a manual "Load older
 messages" button remains on surfaces that render no scroll body, and after a
 failed page so a broken fetch is retried on request rather than in a loop.

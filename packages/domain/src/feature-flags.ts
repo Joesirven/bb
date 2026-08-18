@@ -33,6 +33,13 @@ export const defaultFeatureFlags: FeatureFlags = {
    * Measured on real threads a build costs ~0.06ms/event across the SQLite
    * read, JSON decode, and projection. 1500 keeps a cold build near 100ms; the
    * 10k-event thread that motivated the bound was ~670ms unbounded.
+   *
+   * That per-event cost is hardware dependent and the spread is wide: on a
+   * 4-core / 4.9 GiB VPS it measures 0.479ms/event at p50 (p90 0.964,
+   * max 5.55) across 541 samples, roughly 8x the figure above, which puts a
+   * full 1500-event build near 720ms of blocked event loop rather than 100ms.
+   * Operators on modest hardware should lower this via
+   * BB_FF_TIMELINE_WINDOW_EVENT_BUDGET; see docs/configuration.md.
    */
   timelineWindowEventBudget: 1_500,
 };
