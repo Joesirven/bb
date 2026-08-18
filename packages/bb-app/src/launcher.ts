@@ -609,6 +609,8 @@ interface ResolveHostDaemonCommandResult {
   kind: "join" | "start";
 }
 
+const SERVER_MAX_OLD_SPACE_ENV_NAME = "BB_SERVER_MAX_OLD_SPACE_MB";
+
 function color(code: number, value: string): string {
   return `\x1b[${code}m${value}\x1b[0m`;
 }
@@ -2668,14 +2670,18 @@ Usage:
   }
   assertBbAppArtifacts(runtime.context);
 
-  const childProcess = spawn(process.execPath, [runtime.context.serverEntry], {
-    cwd: process.cwd(),
-    env: createServerEnv({
-      context: runtime.context,
-      env: runtime.serverEnv,
-    }),
-    stdio: "inherit",
-  });
+  const childProcess = spawn(
+    process.execPath,
+    [...resolveServerNodeFlags(process.env), runtime.context.serverEntry],
+    {
+      cwd: process.cwd(),
+      env: createServerEnv({
+        context: runtime.context,
+        env: runtime.serverEnv,
+      }),
+      stdio: "inherit",
+    },
+  );
   process.exitCode = toExitCode(await waitForProcessExit(childProcess));
 }
 
@@ -2895,11 +2901,39 @@ function logManagedProcessStartupFailureContext(
   log(" ", dim(`logs: ${args.context.logDir}/`));
 }
 
+/**
+ * Node sizes the V8 old-space heap from total system memory and ignores any
+ * cgroup memory limit the process runs under. A server in a memory-capped unit
+ * is therefore allowed a heap far larger than the unit can tolerate, and fills
+ * much of it with garbage it has no incentive to collect before that ceiling.
+ *
+ * NODE_OPTIONS is not a usable workaround: sanitizeInheritedChildProcessEnv
+ * strips only NODE_ENV and BB_*, so a NODE_OPTIONS set for the server is also
+ * inherited by every spawned provider process and would cap those too. The
+ * limit has to be applied here, to the server process alone.
+ */
+function resolveServerNodeFlags(env: NodeJS.ProcessEnv): string[] {
+  const raw = env[SERVER_MAX_OLD_SPACE_ENV_NAME];
+  if (raw === undefined || raw.trim() === "") {
+    return [];
+  }
+  const megabytes = Number.parseInt(raw.trim(), 10);
+  if (!Number.isInteger(megabytes) || megabytes <= 0) {
+    throw new Error(
+      `${SERVER_MAX_OLD_SPACE_ENV_NAME} must be a positive integer number of megabytes; received "${raw}".`,
+    );
+  }
+  return [`--max-old-space-size=${megabytes}`];
+}
+
 async function startFullStackServerProcess(
   args: StartFullStackServerProcessArgs,
 ): Promise<ManagedProcessRun> {
   const serverRun = spawnNamedManagedProcess({
-    args: [args.context.serverEntry],
+    args: [
+      ...resolveServerNodeFlags(process.env),
+      args.context.serverEntry,
+    ],
     command: process.execPath,
     env: args.env,
     outputBuffer: args.outputBuffer,
