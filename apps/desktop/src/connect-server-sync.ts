@@ -140,7 +140,19 @@ export interface CreateConnectServerSyncArgs {
   clearIntervalFn?: (handle: unknown) => void;
 }
 
+/**
+ * Why the last sync produced no server list. `null` once a sync has succeeded.
+ * Surfaced in the Server menu so an empty list is distinguishable from an
+ * account that genuinely has no servers.
+ */
+export type ConnectServerSyncSkipReason =
+  | "no-credential"
+  | "unauthorized"
+  | "unavailable";
+
 export interface ConnectServerSync {
+  /** Why the last sync yielded no servers, or null after a successful sync. */
+  getSkipReason(): ConnectServerSyncSkipReason | null;
   /** Start the 10-minute background timer (unref'd so it does not keep the app alive). */
   start(): void;
   stop(): void;
@@ -180,6 +192,7 @@ export function createConnectServerSync(
   let lastSyncAttemptAt = 0;
   let inFlight: Promise<void> | null = null;
   let loggedFailure = false;
+  let skipReason: ConnectServerSyncSkipReason | null = null;
 
   /**
    * Prefer the local server: it holds the pairing secret and always reflects
@@ -189,6 +202,7 @@ export function createConnectServerSync(
   async function fetchServers(): Promise<ConnectListAccountServersResult | null> {
     const serverUrl = args.getLocalServerUrl();
     if (serverUrl !== null) {
+      skipReason = "unavailable";
       return fetchConnectAccountServers({
         serverUrl,
         fetchImpl: args.fetchImpl,
@@ -196,12 +210,15 @@ export function createConnectServerSync(
     }
     const credential = args.getCredential();
     if (credential === null) {
+      skipReason = "no-credential";
       return null;
     }
     try {
+      skipReason = "unavailable";
       return await listAccountServers(credential, args.gateFetchImpl);
     } catch (error) {
       if (error instanceof ConnectListError && error.code === "unauthorized") {
+        skipReason = "unauthorized";
         args.onUnauthorized();
       }
       return null;
@@ -222,6 +239,7 @@ export function createConnectServerSync(
     }
 
     loggedFailure = false;
+    skipReason = null;
     args.onServers(selectTargetableConnectServers(result));
   }
 
@@ -274,6 +292,7 @@ export function createConnectServerSync(
   }
 
   return {
+    getSkipReason: () => skipReason,
     start,
     stop,
     onRuntimeReady,

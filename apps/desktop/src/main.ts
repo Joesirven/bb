@@ -671,8 +671,30 @@ function buildMenuServerItems(): Array<{
   return items;
 }
 
+/**
+ * The Server menu lists Connect servers only after a successful sync. When the
+ * sync could not run, an empty list otherwise looks identical to an account
+ * with no servers, so name the reason instead.
+ */
+function buildMenuServersNote(): string | null {
+  if (listMenuConnectServers().length > 0) {
+    return null;
+  }
+  switch (connectServerSync?.getSkipReason() ?? null) {
+    case "no-credential":
+      return "No Connect servers — sign in to bb Connect";
+    case "unauthorized":
+      return "No Connect servers — bb Connect sign-in expired";
+    case "unavailable":
+      return "No Connect servers — could not reach bb Connect";
+    default:
+      return null;
+  }
+}
+
 function installCurrentApplicationMenu(): void {
   installApplicationMenu({
+    serversNote: buildMenuServersNote(),
     accelerators: currentApplicationMenuAccelerators,
     isMac: process.platform === "darwin",
     createNewWindow() {

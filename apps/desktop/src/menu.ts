@@ -45,6 +45,12 @@ export interface InstallApplicationMenuArgs {
   onServerMenuWillShow?: () => void;
   serverDaemonLogsMenuEnabled: boolean;
   servers: ApplicationMenuServerItem[];
+  /**
+   * Why no Connect servers are listed, when that is because the sync could not
+   * run rather than because the account has none. Rendered as a disabled item
+   * so the two cases are distinguishable.
+   */
+  serversNote?: string | null;
 }
 
 function createServerDaemonLogsMenuItems(
@@ -75,8 +81,13 @@ function createServerMenuItems(
       type: "radio" as const,
     }),
   );
+  const note: MenuItemConstructorOptions[] =
+    args.serversNote === undefined || args.serversNote === null
+      ? []
+      : [{ enabled: false, label: args.serversNote }];
   return [
     ...serverItems,
+    ...note,
     { type: "separator" },
     {
       label: SET_SERVER_URL_MENU_LABEL,
