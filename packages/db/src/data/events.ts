@@ -578,6 +578,7 @@ export function appendDaemonEventsInTransaction(
   const acceptedEvents: AcceptedDaemonEvent[] = [];
   const insertedInputIndexes: number[] = [];
   const skippedTurnUnstartedInputIndexes: number[] = [];
+  const settledItemKeys = new Set<string>();
 
   const startedTurnKeys = listStoredTurnStartedKeySet(
     db,
@@ -591,6 +592,35 @@ export function appendDaemonEventsInTransaction(
     ) {
       skippedTurnUnstartedInputIndexes.push(index);
       continue;
+    }
+
+    if (
+      (input.type === "item/completed" ||
+        input.type === "item/backgroundTask/completed") &&
+      input.itemId !== null
+    ) {
+      const settledItemKey = `${input.threadId}\0${input.itemId}`;
+      const alreadySettled =
+        settledItemKeys.has(settledItemKey) ||
+        db
+          .select({ id: events.id })
+          .from(events)
+          .where(
+            and(
+              eq(events.threadId, input.threadId),
+              eq(events.itemId, input.itemId),
+              inArray(events.type, [
+                "item/completed",
+                "item/backgroundTask/completed",
+              ]),
+            ),
+          )
+          .limit(1)
+          .get() !== undefined;
+      if (alreadySettled) {
+        continue;
+      }
+      settledItemKeys.add(settledItemKey);
     }
 
     const sequence = nextSequencesByThreadId.get(input.threadId);

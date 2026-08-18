@@ -28,7 +28,6 @@ import {
   getAgentText,
   getStreamedText,
   getThreadText,
-  hasDeniedCommandExecution,
   newThreadId,
   resolveRuntimeOptions,
   waitForInteractiveRequestBeforeTurnCompletion,
@@ -740,7 +739,15 @@ describe("interactive request scenarios", () => {
             hasApprovalSubjectKind(request, "command"),
           ),
         ).toBe(true);
-        expect(hasDeniedCommandExecution(ctx.events)).toBe(true);
+        expect(
+          ctx.events.filter(
+            (event) =>
+              event.threadId === threadId &&
+              event.type === "item/completed" &&
+              event.item.type === "commandExecution" &&
+              event.item.approvalStatus === "denied",
+          ),
+        ).toHaveLength(1);
         expect(existsSync(filePath)).toBe(false);
       } finally {
         await ctx.runtime.shutdown();

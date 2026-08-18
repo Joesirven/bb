@@ -371,6 +371,91 @@ describe("events", () => {
     ]);
   });
 
+  it("skips a daemon item settlement after the server already settled that item", () => {
+    const { db, thread } = setup();
+    const turnId = "turn-denied-approval";
+    const itemId = "command-denied-approval";
+
+    insertEvents(db, noopNotifier, [
+      {
+        threadId: thread.id,
+        sequence: 1,
+        type: "turn/started",
+        scope: turnScope(turnId),
+        itemId: null,
+        itemKind: null,
+        providerThreadId: "provider-thread-denied-approval",
+        data: JSON.stringify({
+          providerThreadId: "provider-thread-denied-approval",
+        }),
+      },
+      {
+        threadId: thread.id,
+        sequence: 2,
+        type: "item/completed",
+        scope: turnScope(turnId),
+        itemId,
+        itemKind: "commandExecution",
+        providerThreadId: "provider-thread-denied-approval",
+        data: JSON.stringify({
+          providerThreadId: "provider-thread-denied-approval",
+          item: {
+            type: "commandExecution",
+            id: itemId,
+            command: "false",
+            cwd: "/tmp/project",
+            status: "interrupted",
+            approvalStatus: "denied",
+          },
+        }),
+      },
+    ]);
+
+    const result = db.transaction(
+      (tx) =>
+        appendDaemonEventsInTransaction(tx, [
+          {
+            threadId: thread.id,
+            environmentId: null,
+            type: "item/completed",
+            scope: turnScope(turnId),
+            itemId,
+            itemKind: "commandExecution",
+            providerThreadId: "provider-thread-denied-approval",
+            data: JSON.stringify({
+              providerThreadId: "provider-thread-denied-approval",
+              item: {
+                type: "commandExecution",
+                id: itemId,
+                command: "false",
+                cwd: "/tmp/project",
+                status: "interrupted",
+                approvalStatus: "denied",
+              },
+            }),
+          },
+          {
+            threadId: thread.id,
+            type: "system/error",
+            ...daemonThreadEventFields,
+            data: JSON.stringify({ message: "neighbor persisted" }),
+          },
+        ]),
+      { behavior: "immediate" },
+    );
+
+    expect(result).toEqual({
+      acceptedEvents: [{ threadId: thread.id, sequence: 3 }],
+      insertedInputIndexes: [1],
+      skippedTurnUnstartedInputIndexes: [],
+    });
+    expect(listEvents(db, { threadId: thread.id })).toMatchObject([
+      { sequence: 1, type: "turn/started" },
+      { sequence: 2, type: "item/completed", itemId },
+      { sequence: 3, type: "system/error" },
+    ]);
+  });
+
   it("rejects daemon turn-scoped events before turn/started is stored", () => {
     const { db, thread } = setup();
 
