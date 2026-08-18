@@ -371,7 +371,7 @@ describe("events", () => {
     ]);
   });
 
-  it("skips a daemon item settlement after the server already settled that item", () => {
+  it("deduplicates a settled item until the provider restarts that turn", () => {
     const { db, thread } = setup();
     const turnId = "turn-denied-approval";
     const itemId = "command-denied-approval";
@@ -436,6 +436,37 @@ describe("events", () => {
           },
           {
             threadId: thread.id,
+            type: "turn/started",
+            ...createTurnEventFields({ turnId }),
+            environmentId: null,
+            providerThreadId: "provider-thread-after-restart",
+            data: JSON.stringify({
+              providerThreadId: "provider-thread-after-restart",
+              turnId,
+            }),
+          },
+          {
+            threadId: thread.id,
+            environmentId: null,
+            type: "item/completed",
+            scope: turnScope(turnId),
+            itemId,
+            itemKind: "commandExecution",
+            providerThreadId: "provider-thread-after-restart",
+            data: JSON.stringify({
+              providerThreadId: "provider-thread-after-restart",
+              item: {
+                type: "commandExecution",
+                id: itemId,
+                command: "false",
+                cwd: "/tmp/project",
+                status: "interrupted",
+                approvalStatus: "denied",
+              },
+            }),
+          },
+          {
+            threadId: thread.id,
             type: "system/error",
             ...daemonThreadEventFields,
             data: JSON.stringify({ message: "neighbor persisted" }),
@@ -445,14 +476,25 @@ describe("events", () => {
     );
 
     expect(result).toEqual({
-      acceptedEvents: [{ threadId: thread.id, sequence: 3 }],
-      insertedInputIndexes: [1],
+      acceptedEvents: [
+        { threadId: thread.id, sequence: 3 },
+        { threadId: thread.id, sequence: 4 },
+        { threadId: thread.id, sequence: 5 },
+      ],
+      insertedInputIndexes: [1, 2, 3],
       skippedTurnUnstartedInputIndexes: [],
     });
     expect(listEvents(db, { threadId: thread.id })).toMatchObject([
       { sequence: 1, type: "turn/started" },
       { sequence: 2, type: "item/completed", itemId },
-      { sequence: 3, type: "system/error" },
+      { sequence: 3, type: "turn/started", turnId },
+      {
+        sequence: 4,
+        type: "item/completed",
+        itemId,
+        turnId,
+      },
+      { sequence: 5, type: "system/error" },
     ]);
   });
 

@@ -578,7 +578,6 @@ export function appendDaemonEventsInTransaction(
   const acceptedEvents: AcceptedDaemonEvent[] = [];
   const insertedInputIndexes: number[] = [];
   const skippedTurnUnstartedInputIndexes: number[] = [];
-  const settledItemKeys = new Set<string>();
 
   const startedTurnKeys = listStoredTurnStartedKeySet(
     db,
@@ -594,25 +593,46 @@ export function appendDaemonEventsInTransaction(
       continue;
     }
 
+    const turnId = getThreadEventScopeTurnId(input.scope) ?? null;
     if (
       (input.type === "item/completed" ||
         input.type === "item/backgroundTask/completed") &&
       input.itemId !== null
     ) {
-      const settledItemKey = `${input.threadId}\0${input.itemId}`;
+      const latestTurnStartedSequence =
+        turnId === null
+          ? undefined
+          : db
+              .select({ sequence: events.sequence })
+              .from(events)
+              .where(
+                and(
+                  eq(events.threadId, input.threadId),
+                  eq(events.turnId, turnId),
+                  eq(events.type, "turn/started"),
+                ),
+              )
+              .orderBy(desc(events.sequence))
+              .limit(1)
+              .get()?.sequence;
       const alreadySettled =
-        settledItemKeys.has(settledItemKey) ||
         db
           .select({ id: events.id })
           .from(events)
           .where(
             and(
               eq(events.threadId, input.threadId),
+              turnId === null
+                ? isNull(events.turnId)
+                : eq(events.turnId, turnId),
               eq(events.itemId, input.itemId),
               inArray(events.type, [
                 "item/completed",
                 "item/backgroundTask/completed",
               ]),
+              latestTurnStartedSequence === undefined
+                ? undefined
+                : gt(events.sequence, latestTurnStartedSequence),
             ),
           )
           .limit(1)
@@ -620,14 +640,12 @@ export function appendDaemonEventsInTransaction(
       if (alreadySettled) {
         continue;
       }
-      settledItemKeys.add(settledItemKey);
     }
 
     const sequence = nextSequencesByThreadId.get(input.threadId);
     if (sequence === undefined) {
       throw new Error(`Missing event sequence for thread: ${input.threadId}`);
     }
-    const turnId = getThreadEventScopeTurnId(input.scope) ?? null;
     db.run(
       sql`INSERT INTO events
         (id, thread_id, environment_id, scope_kind, turn_id, provider_thread_id, sequence, type, item_id, item_kind, data, created_at)
