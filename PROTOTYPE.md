@@ -10,6 +10,30 @@ every service call is mocked and nothing here is wired into the real app. The
 diff is additive; no existing file changes except one added script in
 `package.json`.
 
+## See it without cloning
+
+[`docs/onboarding-proto-demo.html`](docs/onboarding-proto-demo.html) is a full
+scripted run rendered as a self-contained page: terminal styling, the real ANSI
+colors converted to markup, `[REAL]` / `[MOCK]` labels intact. No external
+assets, so it works offline from a local copy.
+
+GitHub serves raw HTML as plain text rather than rendering it, so open it one
+of these ways:
+
+- download the raw file and open it in a browser, or
+- `git clone`, then open `docs/onboarding-proto-demo.html`, or
+- paste the file's GitHub URL into `htmlpreview.github.io`.
+
+Regenerate it after any change to the flow:
+
+```sh
+node prototype/onboarding-autoconnect/render-demo-html.mjs
+pnpm format
+```
+
+The second command matters: `oxfmt` reindents the emitted markup, and
+`pnpm format:check` covers `docs/`.
+
 ## Run it
 
 ```sh
@@ -152,6 +176,7 @@ because it imports the real workspace schema. The demo itself does not.
 prototype/onboarding-autoconnect/
   demo.mjs             entry point: flags, mode, step order
   check-contract.mts   validates the mocked thread payload against the real schema
+  render-demo-html.mjs runs the demo and writes docs/onboarding-proto-demo.html
   src/ui.mjs           terminal formatting; the [REAL] / [MOCK] labels
   src/detect.mjs       REAL host detection (PATH probes, tailscale status)
   src/mock-cloud.mjs   MOCK getbb.app + bb server API, with real payload shapes
@@ -194,6 +219,13 @@ is asking for.
 
 **`shims/hermes`** — a stub that answers `--version` and refuses `acp`, since
 the prototype mocks the protocol handshake rather than running one.
+
+**`render-demo-html.mjs`** — runs `demo.mjs` with `FORCE_COLOR=1` and converts
+the ANSI escapes to `<span>` elements, rather than shelling out to `aha` or
+capturing a pty, so regenerating the page needs nothing but Node. `ui.mjs`
+honours `FORCE_COLOR` for exactly this reason; `NO_COLOR` still wins over it.
+The converter tracks bold, dim, and foreground colour as state and emits one
+span per run of text, so no span nesting can go unbalanced.
 
 **`demo.mjs`** — the interactive confirm pulls from a single line iterator
 rather than `readline.question()`, so `printf 'y\nn\n' | ... --interactive`

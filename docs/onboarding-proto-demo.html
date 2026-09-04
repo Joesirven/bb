@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>bb onboarding auto-connect prototype — demo run</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        padding: 2.5rem 1.25rem 4rem;
+        background: #14161b;
+        color: #d5d8de;
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        line-height: 1.55;
+      }
+      main {
+        max-width: 62rem;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 1.45rem;
+        margin: 0 0 0.35rem;
+        color: #f0f2f5;
+      }
+      p.lede {
+        margin: 0 0 1.5rem;
+        color: #9aa1ad;
+        max-width: 48rem;
+      }
+      .cmd {
+        display: block;
+        background: #0e1014;
+        border: 1px solid #2a2e37;
+        border-radius: 0.4rem;
+        padding: 0.65rem 0.85rem;
+        margin: 0 0 1.5rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.85rem;
+        color: #9fc7ea;
+        overflow-x: auto;
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.1rem;
+        margin: 0 0 1.5rem;
+        font-size: 0.85rem;
+      }
+      .legend span.tag {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-weight: 700;
+      }
+      .legend .real {
+        color: #7fb975;
+      }
+      .legend .mock {
+        color: #d9a441;
+      }
+      .term {
+        background: #0e1014;
+        border: 1px solid #2a2e37;
+        border-radius: 0.5rem;
+        padding: 1.15rem 1.35rem;
+        overflow-x: auto;
+      }
+      .term pre {
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.8rem;
+        line-height: 1.5;
+        color: #d5d8de;
+        white-space: pre;
+      }
+      footer {
+        margin: 2rem 0 0;
+        font-size: 0.82rem;
+        color: #7f8794;
+        max-width: 48rem;
+      }
+      footer code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: #9aa1ad;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>bb onboarding auto-connect prototype</h1>
+      <p class="lede">
+        One scripted run of the proposed four-step setup flow, captured from a
+        real terminal. Nothing on this page is a screenshot: it is the demo's
+        own output, with its colors converted to markup.
+      </p>
+      <code class="cmd"
+        >node prototype/onboarding-autoconnect/demo.mjs --shim-hermes
+        --tailscale=missing</code
+      >
+      <div class="legend">
+        <div>
+          <span class="tag real">[REAL]</span> measured on the machine that ran
+          the demo
+        </div>
+        <div>
+          <span class="tag mock">[MOCK]</span> fake service, real
+          request/response shape
+        </div>
+      </div>
+      <div class="term">
+        <pre><span style="color:#b07cc6">## </span><span style="color:#b07cc6;font-weight:700">bb onboarding auto-connect prototype</span>
+<span style="opacity:.62">   Four proposed steps, run end to end. Prototype quality: mocked where a real service is out of scope.</span>
+
+   Mode: <span style="font-weight:700">scripted</span><span style="color:#d9a441">  (+ hermes shim on PATH)</span>
+   <span style="opacity:.62">   </span><span style="color:#d9a441;opacity:.62">--shim-hermes is active: the hermes that step 2 finds is a fake binary in prototype/onboarding-autoconnect/shims.</span>
+
+<span style="color:#4fa8a8">┌──────────────────────────────────────────────────────────────────────────┐</span>
+<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 1/4  Account-first machine adding                                  </span><span style="color:#4fa8a8"> │</span>
+<span style="color:#4fa8a8">└──────────────────────────────────────────────────────────────────────────┘</span>
+
+   <span style="font-weight:700">Today</span>
+     <span style="color:#e2686f">-</span> Open the getbb.app dashboard in a browser.
+     <span style="color:#e2686f">-</span> Copy a join code AND a server URL out of the page.
+     <span style="color:#e2686f">-</span> Paste both into the terminal on the new machine:
+     <span style="color:#e2686f">-</span>   bb connect --code &lt;code&gt; --server https://&lt;handle&gt;.getbb.app
+     <span style="color:#e2686f">-</span> A typo in the URL fails after the install script has already run.
+   <span style="font-weight:700">This prototype</span>
+     <span style="color:#7fb975">+</span> Sign in to your getbb account from the setup step.
+     <span style="color:#7fb975">+</span> bb mints and redeems the machine code for you.
+     <span style="color:#7fb975">+</span> The server URL comes from the account - never typed by hand.
+     <span style="color:#7fb975">+</span> The machine shows up under the account before the step ends.
+
+   Signing in as <span style="font-weight:700">demo@example.com</span> ...
+   <span style="color:#d9a441">[MOCK]</span> getbb.app account sign-in (no such endpoint in bb today)
+   <span style="color:#7fb975">PASS</span> Signed in. Account resolved its own server URL: <span style="font-weight:700">https://demo.getbb.app</span>
+
+   Minting a machine code for this host, on the account's behalf ...
+   <span style="color:#d9a441">[MOCK]</span> POST /api/connect/machine-code
+   <span style="opacity:.62">shape from plugins/connect/src/machine-code.ts: { code, expiresInMs, serverUrl }</span>
+   <span style="opacity:.62">response</span>
+     <span style="opacity:.62">{</span>
+     <span style="opacity:.62">  "code": "331D8E74A4",</span>
+     <span style="opacity:.62">  "expiresInMs": 600000,</span>
+     <span style="opacity:.62">  "serverUrl": "https://demo.getbb.app"</span>
+     <span style="opacity:.62">}</span>
+
+   Redeeming it for a durable tunnel credential ...
+   <span style="color:#d9a441">[MOCK]</span> POST /api/connect/redeem
+   <span style="opacity:.62">shape from plugins/connect/src/redeem.ts: { credential, handle }</span>
+   <span style="color:#7fb975">PASS</span> Machine paired. The user typed a password, not a URL.
+
+   <span style="color:#7fb975">[REAL]</span> This host is <span style="font-weight:700">workstation.local</span> (linux/x64, node v24.19.0)
+   Reading the account's machine list back, the way the dashboard would ...
+   <span style="color:#d9a441">[MOCK]</span> connect.listAccountServers RPC
+   <span style="opacity:.62">shape from plugins/connect/src/rpc.ts</span>
+
+   <span style="font-weight:700">Machines on this account</span>
+     <span style="opacity:.62">      </span> macbook-pro (already on the account)   <span style="opacity:.62">https://demo.getbb.app</span> <span style="color:#7fb975">live</span>
+     <span style="color:#7fb975">NEW -&gt;</span> workstation.local             <span style="opacity:.62">https://demo-workstation.getbb.app</span> <span style="color:#7fb975">live</span>
+
+   <span style="color:#7fb975">PASS</span> The machine the user is standing at is now on their account.
+
+<span style="color:#4fa8a8">┌──────────────────────────────────────────────────────────────────────────┐</span>
+<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 2/4  Companion-agent detection                                     </span><span style="color:#4fa8a8"> │</span>
+<span style="color:#4fa8a8">└──────────────────────────────────────────────────────────────────────────┘</span>
+   Probing PATH for known Agent Client Protocol agents ...
+   <span style="opacity:.62">$</span> <span style="color:#5b9dd9">which hermes</span>
+   <span style="opacity:.62">$</span> <span style="color:#5b9dd9">which instinct</span>
+
+   <span style="color:#7fb975">[REAL]</span> <span style="font-weight:700">Hermes Agent</span> found at /home/you/bb/prototype/onboarding-autoconnect/shims/hermes
+   <span style="opacity:.62">   provider id acp-hermes-agent - plugins/provider-acp/src/known-agents.ts (shipped)</span>
+   <span style="color:#e2686f">MISS</span> Instinct not on PATH
+   <span style="opacity:.62">   provider id acp-instinct - proposed by this feature request (not in bb today)</span>
+   <span style="opacity:.62">   </span><span style="color:#d9a441;opacity:.62">this agent is a proposal; bb has no acp-instinct provider today</span>
+
+<span style="opacity:.62">   ----------------------------------------------------------------------</span>
+   <span style="font-weight:700">Offer:</span> "Hermes Agent is installed on this machine. Connect it to bb?"
+   <span style="opacity:.62">?</span> Connect Hermes Agent over the Agent Client Protocol? <span style="opacity:.62">[scripted: yes]</span>
+   <span style="opacity:.62">$</span> <span style="color:#5b9dd9">hermes acp</span>
+   <span style="color:#d9a441">[MOCK]</span> Agent Client Protocol handshake (real bb runs this over stdio)
+   <span style="opacity:.62">provider registered</span>
+     <span style="opacity:.62">{</span>
+     <span style="opacity:.62">  "providerId": "acp-hermes-agent",</span>
+     <span style="opacity:.62">  "displayName": "Hermes Agent",</span>
+     <span style="opacity:.62">  "kind": "acp",</span>
+     <span style="opacity:.62">  "launch": {</span>
+     <span style="opacity:.62">    "command": "hermes",</span>
+     <span style="opacity:.62">    "args": [</span>
+     <span style="opacity:.62">      "acp"</span>
+     <span style="opacity:.62">    ]</span>
+     <span style="opacity:.62">  },</span>
+     <span style="opacity:.62">  "executablePath": "/home/you/bb/prototype/onboarding-autoconnect/shims/hermes",</span>
+     <span style="opacity:.62">  "signInCommand": "hermes login",</span>
+     <span style="opacity:.62">  "status": "connected"</span>
+     <span style="opacity:.62">}</span>
+   <span style="color:#7fb975">PASS</span> Hermes Agent is now a usable provider: acp-hermes-agent
+
+<span style="color:#4fa8a8">┌──────────────────────────────────────────────────────────────────────────┐</span>
+<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 3/4  Tailscale offer - reachable from phone and laptop             </span><span style="color:#4fa8a8"> │</span>
+<span style="color:#4fa8a8">└──────────────────────────────────────────────────────────────────────────┘</span>
+   Detecting Tailscale on this machine ...
+   <span style="opacity:.62">$</span> <span style="color:#5b9dd9">which tailscale</span>
+   <span style="opacity:.62">$</span> <span style="color:#5b9dd9">tailscale status --json</span>
+
+   <span style="color:#d9a441">[MOCK]</span> --tailscale=missing overrides the real probe so the offer branch is demoable on a machine that is already set up
+   <span style="opacity:.62">   real probe said: installed=true backendState=Running</span>
+   <span style="color:#e2686f">MISS</span> tailscale is not on PATH
+
+   <span style="font-weight:700">Offer:</span> "This machine is not reachable from your phone yet. Set up Tailscale?"
+   <span style="opacity:.62">   tailscale is not on PATH</span>
+   <span style="opacity:.62">?</span> Set up Tailscale now? <span style="opacity:.62">[scripted: yes]</span>
+   Would run:
+   <span style="opacity:.62">$</span> <span style="color:#5b9dd9">curl -fsSL https://tailscale.com/install.sh | sh</span>
+   <span style="opacity:.62">$</span> <span style="color:#5b9dd9">sudo tailscale up --ssh</span>
+   <span style="color:#d9a441">[MOCK]</span> install / login is NOT executed - this is a dry run
+   <span style="opacity:.62">   A shipped version would run these in a pty and stream the output, the</span>
+   <span style="opacity:.62">   way bb already streams managed provider-CLI installs.</span>
+   <span style="color:#7fb975">PASS</span> Dry run complete.
+
+<span style="color:#4fa8a8">┌──────────────────────────────────────────────────────────────────────────┐</span>
+<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 4/4  Personal-agent registration                                   </span><span style="color:#4fa8a8"> │</span>
+<span style="color:#4fa8a8">└──────────────────────────────────────────────────────────────────────────┘</span>
+   Registering a persistent personal agent on provider <span style="font-weight:700">acp-hermes-agent</span> ...
+   <span style="opacity:.62">   provider carried over from the agent connected in step 2</span>
+
+   <span style="opacity:.62">?</span> Create a persistent personal agent for this bb? <span style="opacity:.62">[scripted: yes]</span>
+   <span style="color:#d9a441">[MOCK]</span> POST /api/v1/threads
+   <span style="opacity:.62">   request body is a real createThreadRequestSchema shape, checked by check-contract.mts</span>
+   <span style="opacity:.62">request</span>
+     <span style="opacity:.62">{</span>
+     <span style="opacity:.62">  "projectId": "proj_demo_bb_src",</span>
+     <span style="opacity:.62">  "providerId": "acp-hermes-agent",</span>
+     <span style="opacity:.62">  "origin": "app",</span>
+     <span style="opacity:.62">  "visibility": "visible",</span>
+     <span style="opacity:.62">  "title": "Personal agent",</span>
+     <span style="opacity:.62">  "input": [</span>
+     <span style="opacity:.62">    {</span>
+     <span style="opacity:.62">      "type": "text",</span>
+     <span style="opacity:.62">      "text": "You are the personal agent for this bb. You persist across sessions and are reachable from any device on this account.",</span>
+     <span style="opacity:.62">      "mentions": []</span>
+     <span style="opacity:.62">    }</span>
+     <span style="opacity:.62">  ],</span>
+     <span style="opacity:.62">  "environment": {</span>
+     <span style="opacity:.62">    "type": "reuse",</span>
+     <span style="opacity:.62">    "environmentId": "env_demo_default"</span>
+     <span style="opacity:.62">  },</span>
+     <span style="opacity:.62">  "startedOnBehalfOf": null,</span>
+     <span style="opacity:.62">  "originKind": null</span>
+     <span style="opacity:.62">}</span>
+   <span style="opacity:.62">response</span>
+     <span style="opacity:.62">{</span>
+     <span style="opacity:.62">  "threadId": "thr_04bb0eb75e6a",</span>
+     <span style="opacity:.62">  "projectId": "proj_demo_bb_src",</span>
+     <span style="opacity:.62">  "providerId": "acp-hermes-agent",</span>
+     <span style="opacity:.62">  "title": "Personal agent",</span>
+     <span style="opacity:.62">  "status": "idle",</span>
+     <span style="opacity:.62">  "url": "https://demo.getbb.app/threads/thr_04bb0eb75e6a"</span>
+     <span style="opacity:.62">}</span>
+   <span style="color:#7fb975">PASS</span> Personal agent registered: thr_04bb0eb75e6a
+   Reachable at <span style="font-weight:700">https://demo.getbb.app/threads/thr_04bb0eb75e6a</span> from any device signed in to the account.
+
+<span style="color:#b07cc6">## </span><span style="color:#b07cc6;font-weight:700">Flow complete</span>
+<span style="opacity:.62">   What the user got, without typing a server URL</span>
+
+   <span style="font-weight:700">1  Machine on the account       </span> https://demo-workstation.getbb.app
+   <span style="font-weight:700">2  Companion agents connected   </span> acp-hermes-agent
+   <span style="font-weight:700">3  Reachable from phone         </span> offered and accepted (dry run: install-and-login)
+   <span style="font-weight:700">4  Personal agent               </span> thr_04bb0eb75e6a
+
+<span style="opacity:.62">   ----------------------------------------------------------------------</span>
+   <span style="opacity:.62">   [REAL] lines above were measured on this machine. [MOCK] lines are fake</span>
+   <span style="opacity:.62">   services with real request/response shapes. See PROTOTYPE.md for the split.</span>
+
+</pre>
+      </div>
+      <footer>
+        Regenerate with
+        <code>node prototype/onboarding-autoconnect/render-demo-html.mjs</code>,
+        then <code>pnpm format</code>. The machine name and checkout path are
+        replaced with <code>workstation.local</code> and
+        <code>/home/you/bb</code>; nothing else is edited. See
+        <code>PROTOTYPE.md</code> for what is real, what is mocked, and why.
+      </footer>
+    </main>
+  </body>
+</html>

@@ -1,5 +1,9 @@
+const forceColor = process.env.FORCE_COLOR;
+
 const useColor =
-  process.stdout.isTTY === true && process.env.NO_COLOR === undefined;
+  process.env.NO_COLOR === undefined &&
+  (process.stdout.isTTY === true ||
+    (forceColor !== undefined && forceColor !== "" && forceColor !== "0"));
 
 const ESC = String.fromCharCode(27);
 
