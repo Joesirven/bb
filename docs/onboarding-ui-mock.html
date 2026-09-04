@@ -63,18 +63,33 @@ h2{font-size:14px;font-weight:600;color:var(--foreground)}
       <div class="row">
         <div class="rowicon">⌁</div>
         <div class="rowbody">
-          <div class="rowtitle">Connect your agents <span class="badge">Hermes Agent detected</span></div>
-          <div class="rowsub">Hermes connects over the Agent Client Protocol. Running an external agent like Instinct? Register it with its URL and token.</div>
+          <div class="rowtitle">Hermes Agent <span class="badge">Detected locally</span></div>
+          <div class="rowsub">Connects over the Agent Client Protocol (ACP) - no credentials needed</div>
         </div>
         <button class="btn">Connect</button>
       </div>
       <div class="row">
+        <div class="rowicon">⇄</div>
+        <div class="rowbody">
+          <div class="rowtitle">Remote agent <span class="badge">URL + token</span></div>
+          <div class="rowsub">Any agent exposing an HTTP endpoint - register its URL and token</div>
+        </div>
+        <button class="btn">Register</button>
+      </div>
+      <div class="row">
+        <div class="rowicon">⤳</div>
+        <div class="rowbody">
+          <div class="rowtitle">Agent without a URL <span class="badge">SSH-only, e.g. Instinct</span></div>
+          <div class="rowsub">Pairs over your tailnet - bb mints a one-time token, you paste it to the agent, it dials back through the tunnel</div>
+        </div>
+        <button class="btn">Mint pairing token</button>
+      </div>
+      <div class="row">
         <div class="rowicon">◈</div>
         <div class="rowbody">
-          <div class="rowtitle">Set up Tailscale <span class="badge">Not reachable remotely</span></div>
-          <div class="rowsub">Reach this machine from your phone and laptop - bb can install and log in for you</div>
+          <div class="rowtitle">Tailscale <span class="badge ok">✓ Found - you're reachable</span></div>
+          <div class="rowsub">tailscale status reports this machine on your tailnet. When it's missing, bb offers to install and log in for you instead.</div>
         </div>
-        <button class="btn">Set up</button>
       </div>
     </div>
     <div class="footer"><span class="dot"></span> workstation online &nbsp;·&nbsp; <span class="dot blue"></span> demo.getbb.app</div>

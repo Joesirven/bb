@@ -129,3 +129,44 @@ export async function registerExternalAgent(args) {
     },
   };
 }
+
+export async function mintPairingToken(args) {
+  await roundTrip(args.fast);
+  const token = `bbpair_${randomUUID().replace(/-/gu, "").slice(0, 20)}`;
+  return {
+    token,
+    expiresInMs: 15 * 60 * 1000,
+    dialBackUrl: `https://${args.handle}.getbb.app/api/connect/agent-dial-back`,
+    tailnetHint: args.magicDnsName,
+  };
+}
+
+export function pairingInstructions(pairing, agentName) {
+  return [
+    `Run this where ${agentName} lives, or paste it into its console:`,
+    "",
+    `  bb-agent pair --token ${maskToken(pairing.token)} \\`,
+    `             --dial-back ${pairing.dialBackUrl}`,
+    "",
+    "The token is single-use and expires in 15 minutes. It travels over your",
+    "tailnet, so it is never exposed to the public internet.",
+  ];
+}
+
+export async function awaitAgentDialBack(args) {
+  await roundTrip(args.fast);
+  await roundTrip(args.fast);
+  const providerId = `paired-${args.displayName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-|-$/gu, "")}`;
+  return {
+    providerId,
+    displayName: args.displayName,
+    kind: "paired",
+    transport: "tailnet",
+    peer: args.magicDnsName ?? "unknown-tailnet-peer",
+    status: "connected",
+    credentialRef: `secret://${shortId("cred")}`,
+  };
+}

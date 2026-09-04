@@ -21,10 +21,13 @@ import {
   missingTailscaleState,
 } from "./detect.mjs";
 import {
+  awaitAgentDialBack,
   connectAcpAgent,
   listAccountServers,
   maskToken,
   mintMachineCode,
+  mintPairingToken,
+  pairingInstructions,
   planTailscaleSetup,
   redeemMachineCode,
   registerExternalAgent,
@@ -120,21 +123,23 @@ export async function stepAccountFirstMachine(ctx) {
 export async function stepConnectAgents(ctx) {
   stepHeader(2, TOTAL_STEPS, "Connect your agents");
 
-  say(
-    "You add an agent you already have. bb never creates one for you, and this",
-  );
-  say("step covers both ways an agent can already exist.");
+  say("You add an agent you already have. bb never creates one for you.");
+  say("An agent can already exist in three shapes, so this step has three.");
   blank();
   say(
-    `${style.bold("(a)")} Installed on this machine, speaking the Agent Client Protocol.`,
+    `${style.bold("(a)")} Local CLI agent, speaking the Agent Client Protocol.`,
   );
   say(
-    `${style.bold("(b)")} Running somewhere else, reached over a URL with a token.`,
+    `${style.bold("(b)")} Remote agent exposing an HTTP endpoint - URL plus token.`,
+  );
+  say(
+    `${style.bold("(c)")} Agent with no URL at all - pairs back over your tailnet.`,
   );
   blank();
   rule();
 
-  say(style.bold("(a) Agents installed on this machine"));
+  say(style.bold("(a) Local CLI agent via the Agent Client Protocol"));
+  note("   Connects over ACP - no credentials needed");
   command("which hermes");
   blank();
 
@@ -177,9 +182,10 @@ export async function stepConnectAgents(ctx) {
 
   blank();
   rule();
-  say(style.bold("(b) An agent running somewhere else"));
+  say(style.bold("(b) Remote agent with a URL and a token"));
+  note("   Any agent exposing an HTTP endpoint - register its URL and token");
   say(
-    `${style.bold("Offer:")} "Already run an agent elsewhere - Instinct, or your own - Add it by URL."`,
+    `${style.bold("Offer:")} "Already run an agent elsewhere - Add it by URL."`,
   );
   note(
     "   bb can add a user-supplied ACP agent today, but only as a local command",
@@ -191,52 +197,126 @@ export async function stepConnectAgents(ctx) {
   blank();
 
   const registered = [];
-  const wantsExternal = await ctx.confirm("Register an external agent now?");
-  if (!wantsExternal) {
-    note("Declined. Setup continues with whatever is installed locally.");
-    return { agents, connected, registered };
+  if (await ctx.confirm("Register a remote agent now?")) {
+    const displayName = await ctx.ask("Agent name", ctx.remoteAgent.name);
+    const url = await ctx.ask("Agent URL", ctx.remoteAgent.url);
+    const token = await ctx.askSecret("Access token", ctx.remoteAgent.token);
+    blank();
+    if (ctx.interactive) {
+      real(`Token read from the prompt; shown as ${maskToken(token)}`);
+    } else {
+      mock(
+        `Token is a scripted placeholder, never a real credential; shown as ${maskToken(token)}`,
+      );
+    }
+    note(
+      "   The token is masked everywhere it is printed. A shipped version would",
+    );
+    note("   hand it to bb's secret storage rather than echo it at all.");
+    blank();
+    const result = await registerExternalAgent({
+      displayName,
+      url,
+      token,
+      fast: ctx.fast,
+    });
+    mock("POST /api/v1/providers/external - invented; bb has no such endpoint");
+    json("request", result.request);
+    json("response", result.response);
+    ok(
+      `${displayName} is now a usable provider: ${result.response.providerId}`,
+    );
+    registered.push(result.response);
+  } else {
+    note("Declined. Setup continues.");
   }
 
-  const displayName = await ctx.ask("Agent name", ctx.externalAgent.name);
-  const url = await ctx.ask("Agent URL", ctx.externalAgent.url);
-  const token = await ctx.askSecret("Access token", ctx.externalAgent.token);
   blank();
-  if (ctx.interactive) {
-    real(`Token read from the prompt; shown as ${maskToken(token)}`);
-  } else {
+  rule();
+  say(style.bold("(c) Agent with no URL - pairs over your tailnet"));
+  note("   SSH-only agents, e.g. Instinct: nothing for bb to dial out to");
+  note(
+    "   Instead bb mints a one-time token, you paste it to the agent, and the",
+  );
+  note("   agent dials back to bb through the tunnel.");
+  blank();
+
+  const paired = [];
+  const probedTailnet = await detectTailscale({ env: ctx.env });
+  const tailnet =
+    ctx.tailscaleOverride === "auto"
+      ? probedTailnet
+      : ctx.tailscaleOverride === "missing"
+        ? missingTailscaleState()
+        : loggedOutTailscaleState(probedTailnet);
+  if (ctx.tailscaleOverride !== "auto") {
     mock(
-      `Token is a scripted placeholder, never a real credential; shown as ${maskToken(token)}`,
+      `--tailscale=${ctx.tailscaleOverride} also applies here, so this shape shows its blocked state`,
     );
   }
-  note(
-    "   The token is masked everywhere it is printed. A shipped version would",
-  );
-  note("   hand it to bb's secret storage rather than echo it at all.");
-  blank();
+  if (!tailnet.loggedIn) {
+    no(
+      "This machine is not on a tailnet, so there is no path to dial back on.",
+    );
+    note(
+      `   real probe: installed=${probedTailnet.installed} backendState=${probedTailnet.backendState ?? "null"}`,
+    );
+    note(
+      "   bb would gate this shape behind the Tailscale step below rather than",
+    );
+    note("   minting a token that can never be redeemed.");
+    return { agents, connected, registered, paired };
+  }
 
-  const result = await registerExternalAgent({
-    displayName,
-    url,
-    token,
+  real(`This machine is on tailnet ${tailnet.tailnetName ?? "unknown"}`);
+  real(`Dial-back peer would be ${tailnet.magicDnsName ?? "unknown"}`);
+  blank();
+  say(
+    `${style.bold("Offer:")} "Running an agent bb cannot reach over HTTP - Mint a pairing token."`,
+  );
+
+  if (!(await ctx.confirm("Mint a pairing token now?"))) {
+    note("Declined. Setup continues.");
+    return { agents, connected, registered, paired };
+  }
+
+  const displayName = await ctx.ask("Agent name", ctx.pairedAgent.name);
+  const pairing = await mintPairingToken({
+    handle: ctx.handle,
+    magicDnsName: tailnet.magicDnsName,
     fast: ctx.fast,
   });
-  mock("POST /api/v1/providers/external - invented; bb has no such endpoint");
-  json("request", result.request);
-  json("response", result.response);
-  ok(`${displayName} is now a usable provider: ${result.response.providerId}`);
-  registered.push(result.response);
+  mock(
+    "POST /api/connect/agent-pairing-token - invented; bb has no such endpoint",
+  );
+  ok(`One-time pairing token minted, shown as ${maskToken(pairing.token)}`);
+  note("   The full token would be copyable in the UI and never logged.");
+  blank();
 
-  return { agents, connected, registered };
+  say(style.bold("Paste this to your agent"));
+  for (const line of pairingInstructions(pairing, displayName)) {
+    console.log(line === "" ? "" : `     ${style.dim(line)}`);
+  }
+  blank();
+
+  say(`Waiting for ${displayName} to dial back through the tailnet ...`);
+  const provider = await awaitAgentDialBack({
+    displayName,
+    magicDnsName: tailnet.magicDnsName,
+    fast: ctx.fast,
+  });
+  mock("agent dial-back (simulated; no agent actually connected)");
+  json("provider paired", provider);
+  ok(`${displayName} is now a usable provider: ${provider.providerId}`);
+  paired.push(provider);
+
+  return { agents, connected, registered, paired };
 }
 
 export async function stepTailscale(ctx) {
-  stepHeader(
-    3,
-    TOTAL_STEPS,
-    "Tailscale offer - reachable from phone and laptop",
-  );
+  stepHeader(3, TOTAL_STEPS, "Tailscale - reachable from phone and laptop");
 
-  say("Detecting Tailscale on this machine ...");
+  say("Detecting first. The offer only appears when Tailscale is missing.");
   command("which tailscale");
   command("tailscale status --json");
   blank();
@@ -256,26 +336,35 @@ export async function stepTailscale(ctx) {
     );
   }
 
+  const plan = planTailscaleSetup(detection);
+
+  if (plan.action === "none") {
+    real(`tailscale binary at ${detection.executablePath}`);
+    real(`BackendState = ${detection.backendState ?? "unknown"}`);
+    real(`tailnet ${detection.tailnetName ?? "unknown"}`);
+    real(`MagicDNS name ${detection.magicDnsName ?? "unknown"}`);
+    blank();
+    ok("Tailscale found - you're reachable from your other devices.");
+    note("   No prompt, no install, nothing to answer. The step is done.");
+    say(
+      `bb can point straight at ${style.bold(`http://${detection.magicDnsName ?? "<magic-dns-name>"}:38886`)} from a phone on the same tailnet.`,
+    );
+    return {
+      detection,
+      plan,
+      offered: false,
+      accepted: false,
+      executed: false,
+    };
+  }
+
   if (detection.installed) {
     real(`tailscale binary at ${detection.executablePath}`);
     real(`BackendState = ${detection.backendState ?? "unknown"}`);
-    if (detection.loggedIn) {
-      real(`tailnet ${detection.tailnetName ?? "unknown"}`);
-      real(`MagicDNS name ${detection.magicDnsName ?? "unknown"}`);
-    }
   } else {
     no("tailscale is not on PATH");
   }
   blank();
-
-  const plan = planTailscaleSetup(detection);
-  if (plan.action === "none") {
-    ok(`Nothing to offer: ${plan.reason}.`);
-    say(
-      `bb can point straight at ${style.bold(`http://${detection.magicDnsName ?? "<magic-dns-name>"}:38886`)} from a phone on the same tailnet.`,
-    );
-    return { detection, plan, accepted: false, executed: false };
-  }
 
   say(
     `${style.bold("Offer:")} "This machine is not reachable from your phone yet. Set up Tailscale?"`,
@@ -283,8 +372,11 @@ export async function stepTailscale(ctx) {
   note(`   ${plan.reason}`);
   const accepted = await ctx.confirm("Set up Tailscale now?");
   if (!accepted) {
-    note("Declined. Setup continues; bb stays reachable on localhost only.");
-    return { detection, plan, accepted: false, executed: false };
+    note(
+      "Declined, and that is a real answer. bb stays reachable on localhost",
+    );
+    note("   only, and does not ask again during setup.");
+    return { detection, plan, offered: true, accepted: false, executed: false };
   }
 
   say("Would run:");
@@ -296,7 +388,30 @@ export async function stepTailscale(ctx) {
   note("   way bb already streams managed provider-CLI installs.");
   ok("Dry run complete.");
 
-  return { detection, plan, accepted: true, executed: false };
+  return { detection, plan, offered: true, accepted: true, executed: false };
+}
+
+export async function demonstrateTailscaleOfferPath(ctx) {
+  banner(
+    "Also showing: the offer path",
+    "This machine already has Tailscale, so the step above took the quiet path. Detection is forced off here so both branches are visible in one run.",
+  );
+  const detection = missingTailscaleState();
+  const plan = planTailscaleSetup(detection);
+  blank();
+  mock("detection forced off - the real probe found Tailscale running");
+  no("tailscale is not on PATH");
+  blank();
+  say(
+    `${style.bold("Offer:")} "This machine is not reachable from your phone yet. Set up Tailscale?"`,
+  );
+  note(`   ${plan.reason}`);
+  await ctx.confirm("Set up Tailscale now?");
+  say("Would run:");
+  for (const line of plan.commands) command(line);
+  mock("install / login is NOT executed - this is a dry run");
+  ok("Dry run complete.");
+  blank();
 }
 
 export function summary(results) {
@@ -307,7 +422,10 @@ export function summary(results) {
       (provider) => `${provider.providerId} (local, ACP)`,
     ),
     ...results.agents.registered.map(
-      (provider) => `${provider.providerId} (external, URL)`,
+      (provider) => `${provider.providerId} (remote, URL)`,
+    ),
+    ...results.agents.paired.map(
+      (provider) => `${provider.providerId} (no URL, tailnet)`,
     ),
   ];
   const lines = [
@@ -319,12 +437,12 @@ export function summary(results) {
       "2  Agents connected",
       agentSummary.length > 0
         ? agentSummary.join(", ")
-        : "none (nothing detected and no external agent added)",
+        : "none (nothing detected and every offer declined)",
     ],
     [
       "3  Reachable from phone",
       results.tailscale.plan.action === "none"
-        ? `yes - ${results.tailscale.detection.magicDnsName ?? "tailnet"}`
+        ? `already set up - ${results.tailscale.detection.magicDnsName ?? "tailnet"} (no offer shown)`
         : results.tailscale.accepted
           ? `offered and accepted (dry run: ${results.tailscale.plan.action})`
           : `offered, declined (${results.tailscale.plan.action})`,

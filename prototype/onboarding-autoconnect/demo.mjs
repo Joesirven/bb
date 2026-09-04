@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { banner, blank, note, say, style } from "./src/ui.mjs";
 import { describeHost } from "./src/detect.mjs";
 import {
+  demonstrateTailscaleOfferPath,
   stepAccountFirstMachine,
   stepConnectAgents,
   stepTailscale,
@@ -29,10 +30,11 @@ Flags:
   --tailscale=<mode>     auto (default) | missing | logged-out
                          Override step 3's real probe to demo the offer branch.
   --decline-all          Answer no to every offer (scripted mode only).
-  --agent-name=<name>    External agent name for step 2. Default Instinct
-  --agent-url=<url>      External agent URL. Default an example.com endpoint.
+  --agent-name=<name>    Remote agent name for step 2b. Default Remote Agent
+  --agent-url=<url>      Remote agent URL. Default an example.com endpoint.
                          The access token is never taken from a flag; scripted
                          runs use a placeholder and --interactive prompts.
+  --paired-agent=<name>  No-URL agent name for step 2c. Default Instinct
   --email=<address>      Account email shown in step 1. Default demo@example.com
   --handle=<handle>      Account handle. Default demo
   --fast                 Skip the simulated network latency.
@@ -50,8 +52,9 @@ function parseArgs(argv) {
     declineAll: false,
     email: "demo@example.com",
     handle: "demo",
-    agentName: "Instinct",
-    agentUrl: "https://instinct.example.com/agent",
+    agentName: "Remote Agent",
+    agentUrl: "https://agent.example.com/acp",
+    pairedAgentName: "Instinct",
     fast: false,
   };
   for (const arg of argv) {
@@ -73,6 +76,8 @@ function parseArgs(argv) {
     else if (arg.startsWith("--handle=")) options.handle = arg.slice(9);
     else if (arg.startsWith("--agent-name=")) options.agentName = arg.slice(13);
     else if (arg.startsWith("--agent-url=")) options.agentUrl = arg.slice(12);
+    else if (arg.startsWith("--paired-agent="))
+      options.pairedAgentName = arg.slice(15);
     else throw new Error(`Unknown flag "${arg}"\n\n${USAGE}`);
   }
   return { help: false, options };
@@ -172,11 +177,12 @@ async function main() {
     env,
     fast: options.fast,
     tailscaleOverride: options.tailscale,
-    externalAgent: {
+    remoteAgent: {
       name: options.agentName,
       url: options.agentUrl,
       token: PLACEHOLDER_TOKEN,
     },
+    pairedAgent: { name: options.pairedAgentName },
     interactive: options.interactive,
     ...(rl === null
       ? {
@@ -205,6 +211,13 @@ async function main() {
     const account = await stepAccountFirstMachine(ctx);
     const agents = await stepConnectAgents(ctx);
     const tailscale = await stepTailscale(ctx);
+    if (
+      !options.interactive &&
+      options.tailscale === "auto" &&
+      tailscale.plan.action === "none"
+    ) {
+      await demonstrateTailscaleOfferPath(ctx);
+    }
     summary({ account, agents, tailscale });
   } finally {
     rl?.close();

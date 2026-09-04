@@ -59,24 +59,32 @@ nothing but `which`, `tailscale status --json`, and stdout.
 
 ### Flags
 
-| Flag                                    | Effect                                                                                                                                     |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--interactive`                         | Prompt at each offer instead of auto-answering. Works with a terminal or piped stdin.                                                      |
-| `--shim-hermes`                         | Prepend a fake `hermes` to `PATH` so step 2 finds something on a machine that has no Hermes Agent. Always labelled in the output.          |
-| `--tailscale=auto\|missing\|logged-out` | `auto` (default) uses the real probe. The other two override it so the offer branch is demoable on a machine that is already on a tailnet. |
-| `--decline-all`                         | Answer no to every offer (scripted mode).                                                                                                  |
-| `--email=`, `--handle=`                 | Account identity shown in step 1.                                                                                                          |
-| `--fast`                                | Skip the simulated network latency.                                                                                                        |
-| `--help`                                | Usage.                                                                                                                                     |
+| Flag                                    | Effect                                                                                                                                                                                                |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--interactive`                         | Prompt at each offer instead of auto-answering. Works with a terminal or piped stdin. Detection is always real; the forced-path demonstrations are skipped.                                           |
+| `--shim-hermes`                         | Prepend a fake `hermes` to `PATH` so step 2a finds something on a machine that has no Hermes Agent. Always labelled in the output.                                                                    |
+| `--tailscale=auto\|missing\|logged-out` | `auto` (default) uses the real probe. The other two force the state, and apply to both step 2c and step 3 so the blocked and offered branches are demoable on a machine that is already on a tailnet. |
+| `--decline-all`                         | Answer no to every offer (scripted mode).                                                                                                                                                             |
+| `--agent-name=`, `--agent-url=`         | The remote agent registered in step 2b.                                                                                                                                                               |
+| `--paired-agent=`                       | The no-URL agent paired in step 2c.                                                                                                                                                                   |
+| `--email=`, `--handle=`                 | Account identity shown in step 1.                                                                                                                                                                     |
+| `--fast`                                | Skip the simulated network latency.                                                                                                                                                                   |
+| `--help`                                | Usage.                                                                                                                                                                                                |
+
+There is deliberately no flag for either token. See
+[the token handling note](#2-connect-your-agents).
 
 The two suggested runs:
 
 ```sh
-# The full happy path, on a machine that has neither Hermes nor Tailscale.
-node prototype/onboarding-autoconnect/demo.mjs --shim-hermes --tailscale=missing
+# Real probes. On a machine that already has Tailscale this takes the quiet
+# path, then replays the offer path with detection forced off, so one run
+# shows both branches.
+node prototype/onboarding-autoconnect/demo.mjs --shim-hermes
 
-# What the flow does on a machine that is already set up: real probes, no offers.
-node prototype/onboarding-autoconnect/demo.mjs
+# A machine with neither Hermes nor Tailscale: every offer fires, and step 2c
+# shows its blocked state because there is no tailnet to dial back over.
+node prototype/onboarding-autoconnect/demo.mjs --tailscale=missing
 ```
 
 ## The three steps
@@ -98,45 +106,82 @@ their new machine land next to the ones they already had.
 ### 2. Connect your agents
 
 The user adds an agent they already have. **bb never creates one.** That is the
-whole model of this step, and it has two paths because an agent can already
-exist in two different places.
+whole model of this step. It has three paths because an agent can already exist
+in three shapes, and the third one is the interesting case.
 
-**(a) Installed on this machine.** bb already knows how to run Hermes Agent:
-`acp-hermes-agent` is a registered Agent Client Protocol provider in
+**(a) Local CLI agent, over the Agent Client Protocol.** bb already knows how
+to run Hermes Agent: `acp-hermes-agent` is a registered provider in
 `plugins/provider-acp/src/known-agents.ts` (added upstream in PR #552),
 launched as `hermes acp`, and already marked `visibility: "installed"` so bb
 only surfaces it where it is present. bb also already resolves agent
 executables on `PATH` (`resolveExecutablePath` in
 `packages/provider-bridge-protocol/src/bridge-kit/provider-maintenance-kit.ts`).
-What is missing is the first-run moment that puts the two together. This path
-probes `PATH` and offers a one-click connect for what it finds.
+What is missing is the first-run moment that puts the two together. No
+credentials involved.
 
-**(b) Running somewhere else.** An agent like Instinct that the user already
-runs elsewhere is added by URL plus an access token. bb can add a user-supplied
-ACP agent today, but only as a **local command** — `customAcpAgentSchema` in
-`plugins/provider-acp/src/agents.ts` takes `command`, `args`, and `env`. A
-remote agent reached over a URL has no counterpart in bb, so this registration
-call is invented rather than mirrored.
+**(b) Remote agent with a URL and a token.** Anything exposing an HTTP
+endpoint. bb can add a user-supplied ACP agent today, but only as a **local
+command** — `customAcpAgentSchema` in `plugins/provider-acp/src/agents.ts`
+takes `command`, `args`, and `env`. A remote agent reached over a URL has no
+counterpart in bb, so this registration call is invented.
 
-The token is masked everywhere the demo prints it, and there is deliberately no
-`--agent-token` flag: a credential does not belong in shell history. Scripted
-runs use a visible placeholder; `--interactive` prompts for one and never
-echoes it back in full. A shipped version would hand it to bb's secret storage
-(`packages/secret-storage`) instead of showing it at all.
+**(c) Agent with no URL at all.** This is the shape the other two miss. An
+SSH-only agent such as Instinct has nothing for bb to dial out to, so the
+direction of the connection has to reverse:
 
-### 3. Tailscale offer
+1. bb confirms this machine is on a tailnet — a real `tailscale status` probe.
+2. bb mints a **one-time pairing token**, single-use and short-lived.
+3. bb shows copy-paste instructions to deliver that token to the agent.
+4. The agent **dials back** to bb through the tailnet, and the pairing
+   completes from the agent's side.
+
+Nothing is exposed to the public internet: the dial-back rides the tailnet the
+machine is already on. If the machine is _not_ on a tailnet, bb blocks this
+shape rather than minting a token that could never be redeemed, and points at
+the Tailscale step instead. The demo shows that blocked state under
+`--tailscale=missing`.
+
+Both the pairing-token endpoint and the dial-back are invented, and the demo
+labels them `[MOCK]` exactly like the remote registration.
+
+#### Token handling
+
+Both tokens — the remote agent's access token and the minted pairing token —
+are masked wherever the demo prints them, keeping only the last four
+characters. There is deliberately **no `--agent-token` flag and no
+`--pairing-token` flag**: a credential does not belong in shell history or in a
+committed transcript. Scripted runs use a visible placeholder; `--interactive`
+prompts and never echoes the value back in full. A shipped version would hand
+both to bb's secret storage (`packages/secret-storage`) rather than display
+them at all.
+
+### 3. Tailscale — detect first, offer only when missing
 
 Step 1 puts the machine on the account; being reachable from a phone is a
 separate problem. bb's own documentation already reaches for Tailscale
 (`docs/multiple-devices.md` suggests `tailscale serve --bg --https=443
 http://127.0.0.1:38886`), which means the flow currently depends on a doc the
-new user has not read yet. This step detects the state during onboarding and
-offers the fix.
+new user has not read yet.
 
-Detection is real and distinguishes two cases that need different offers:
-`which tailscale` for presence, and `tailscale status --json` for
-`BackendState` (`Running` means logged in; `NeedsLogin` / `Stopped` mean
-installed but unusable).
+**The step detects before it asks.** Plenty of people running bb are running it
+on a VPS where Tailscale is already set up, and those people should not be
+prompted to install something they have. When the probe finds a working
+tailnet, the step shows a quiet confirmation — _Tailscale found, you're
+reachable from your other devices_ — and there is nothing to answer.
+
+The offer only appears when Tailscale is genuinely missing or logged out. If it
+appears and the user says no, that is a real answer: bb stays on localhost and
+does not ask again during setup.
+
+Detection is real and distinguishes the three cases that need different
+handling: `which tailscale` for presence, and `tailscale status --json` for
+`BackendState` (`Running` means logged in and the step goes quiet; `NeedsLogin`
+and `Stopped` mean installed but unusable, which still needs the offer).
+
+Because a scripted run on one machine can only take one branch, the demo
+replays the other one immediately afterwards under an _Also showing: the offer
+path_ banner, with detection forced off and labelled `[MOCK]`. Interactive runs
+skip the replay and show only what is true of the machine.
 
 ## What is real vs mocked
 
@@ -145,30 +190,37 @@ installed but unusable).
 - `which hermes` companion-agent detection, using the same probe shape bb uses
   (`which`, or `where` on Windows, five second timeout, first non-empty line).
 - `which tailscale` and `tailscale status --json`, including parsing
-  `BackendState`, the tailnet name, and the MagicDNS name.
+  `BackendState`, the tailnet name, and the MagicDNS name. Used twice: to gate
+  step 2c's pairing, and to decide whether step 3 shows an offer at all.
 - Host facts: hostname, platform, architecture, Node version.
 - The Hermes Agent registry entry (id, display name, `hermes acp` launch spec)
   is copied verbatim from the shipped registry.
 
 **Mocked — no network call leaves the machine:**
 
-| Mocked                            | Real shape it mirrors                                                                                                  |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| getbb.app account sign-in         | **Nothing.** This endpoint does not exist in bb today; it is what the feature request asks for.                        |
-| `POST /api/connect/machine-code`  | `machineCodeResponseSchema` in `plugins/connect/src/machine-code.ts`                                                   |
-| `POST /api/connect/redeem`        | `RedeemedCredential` in `plugins/connect/src/redeem.ts`                                                                |
-| `connect.listAccountServers`      | `listAccountServersResultSchema` in `plugins/connect/src/rpc.ts`                                                       |
-| Agent Client Protocol handshake   | Real bb launches `hermes acp` over stdio through the ACP bridge                                                        |
-| Tailscale install / login         | Dry run only. The commands are printed, never executed.                                                                |
-| `POST /api/v1/providers/external` | **Nothing.** Invented. bb adds user-supplied agents as local commands (`customAcpAgentSchema`), never as a remote URL. |
+| Mocked                                  | Real shape it mirrors                                                                                                        |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| getbb.app account sign-in               | **Nothing.** This endpoint does not exist in bb today; it is what the feature request asks for.                              |
+| `POST /api/connect/machine-code`        | `machineCodeResponseSchema` in `plugins/connect/src/machine-code.ts`                                                         |
+| `POST /api/connect/redeem`              | `RedeemedCredential` in `plugins/connect/src/redeem.ts`                                                                      |
+| `connect.listAccountServers`            | `listAccountServersResultSchema` in `plugins/connect/src/rpc.ts`                                                             |
+| Agent Client Protocol handshake         | Real bb launches `hermes acp` over stdio through the ACP bridge                                                              |
+| Tailscale install / login               | Dry run only. The commands are printed, never executed.                                                                      |
+| `POST /api/v1/providers/external`       | **Nothing.** Invented. bb adds user-supplied agents as local commands (`customAcpAgentSchema`), never as a remote URL.       |
+| `POST /api/connect/agent-pairing-token` | **Nothing.** Invented. bb mints machine codes (`/api/connect/machine-code`) but has no notion of a token an _agent_ redeems. |
+| Agent dial-back over the tailnet        | **Nothing.** Invented, and simulated — no agent connects. The tailnet it would ride on is detected for real.                 |
 
 Two more things to be clear about:
 
 - The `hermes` that `--shim-hermes` puts on `PATH` is a stub shell script in
   `prototype/onboarding-autoconnect/shims/hermes`. It is not Hermes Agent. The
   detection finding it is genuine; what it finds is fake.
-- `--tailscale=missing` and `--tailscale=logged-out` override the real probe.
-  When they are used, the demo prints what the real probe actually said.
+- `--tailscale=missing` and `--tailscale=logged-out` override the real probe,
+  in both step 2c and step 3. Whenever they are used, the demo prints what the
+  real probe actually said.
+- The _Also showing: the offer path_ replay after step 3 is a demonstration,
+  not a second detection. It is labelled `[MOCK]` and only appears in scripted
+  runs on a machine that already has Tailscale.
 
 ## Layout
 
@@ -179,7 +231,7 @@ prototype/onboarding-autoconnect/
   src/ui.mjs           terminal formatting; the [REAL] / [MOCK] labels
   src/detect.mjs       REAL host detection (PATH probes, tailscale status)
   src/mock-cloud.mjs   MOCK getbb.app + bb server API, with real payload shapes
-  src/steps.mjs        the three steps
+  src/steps.mjs        the three steps, plus the forced offer-path replay
   shims/hermes         fake `hermes` binary for the demo
 ```
 
@@ -210,12 +262,15 @@ while still being informative, so a parse failure is read as "installed, not
 logged in".
 
 **`src/mock-cloud.mjs`** — every function is fake and no network call leaves
-the machine. The connect-pairing shapes are copied from real code so the flow
+the machine. The machine-pairing shapes are copied from real code so the flow
 can be checked against the contracts it would have to fit; see the table above
-for the file each one mirrors. Two have no upstream counterpart at all, because
-they are what this feature request is asking for: the account sign-in, and the
-external-agent registration. `maskToken` keeps only the last four characters,
-so no printed line and no committed transcript can carry a usable credential.
+for the file each one mirrors. Four have no upstream counterpart at all,
+because they are what this feature request is asking for: the account sign-in,
+the remote-agent registration, the agent pairing token, and the dial-back.
+`maskToken` keeps only the last four characters, so no printed line and no
+committed transcript can carry a usable credential — including the pairing
+token inside the copy-paste instructions, which is masked in the demo and would
+be copyable but never logged in a real implementation.
 
 **`shims/hermes`** — a stub that answers `--version` and refuses `acp`, since
 the prototype mocks the protocol handshake rather than running one.
@@ -232,12 +287,87 @@ rather than `readline.question()`, so `printf 'y\nn\n' | ... --interactive`
 works; `question()` rejects with "readline was closed" once a pipe has reached
 EOF, while the iterator still yields the lines that arrived before it.
 
+## Draft text for the upstream issue
+
+Copy-paste starting point for the feature request against
+[get-bb/bb](https://github.com/get-bb/bb). Everything below is claim-checked
+against the prototype.
+
+---
+
+**Setting up a new bb asks the user to be a clipboard.**
+
+Adding a machine today means copying a join code _and_ a server URL out of the
+getbb.app dashboard and retyping them on the new box — either as
+`bb connect --code <code> --server https://<handle>.getbb.app`, or inside the
+`curl … /install.sh … --server <serverUrl>` one-liner from `AddMachineDialog`.
+The server URL is something the account already knows. A typo in it fails after
+the install script has already run.
+
+**Proposal: sign in to the getbb account, and let the account supply the rest.**
+Three steps, in this order.
+
+**1. Account-first machine adding.** Sign in during setup; bb mints and redeems
+the machine code on the account's behalf and shows the machine appearing under
+the account before the step ends. The existing `/api/connect/machine-code` and
+`/api/connect/redeem` endpoints already carry this; what is missing is an
+account sign-in that hands the CLI a session.
+
+**2. Connect your agents — the user adds an agent they already have, and bb
+never creates one.** Three shapes, because an agent can already exist in three
+places:
+
+- _Local CLI agent over ACP._ Already fully supported — `acp-hermes-agent`
+  ships in `plugins/provider-acp/src/known-agents.ts` and bb already resolves
+  executables on `PATH`. Only the first-run moment that surfaces it is missing.
+- _Remote agent with a URL and a token._ bb can add a user-supplied ACP agent
+  today, but only as a local **command** (`customAcpAgentSchema`). There is no
+  shape for an agent reached over a URL.
+- _Agent with no URL._ An SSH-only agent such as Instinct cannot be dialled out
+  to at all. bb should confirm the machine is on a tailnet, mint a **one-time
+  pairing token**, show copy-paste instructions for delivering it to the agent,
+  and let the agent **dial back** through the tailnet. Nothing is exposed to
+  the public internet. When there is no tailnet, the shape should be blocked
+  rather than minting a token that can never be redeemed.
+
+**3. Tailscale — detect first, offer only when missing.** Being on the account
+is not the same as being reachable from a phone, and bb's own
+`docs/multiple-devices.md` already reaches for Tailscale. But plenty of people
+run bb on a VPS where Tailscale is already configured, and they should not be
+prompted to install what they have. Detect with `tailscale status`; when it is
+found, show a quiet confirmation and move on. Offer only when it is genuinely
+missing or logged out — and if the user says no, respect it: stay on localhost
+and do not ask again.
+
+**New contracts this needs.** Everything else above already exists. These do
+not:
+
+1. A **getbb account sign-in** that returns a session plus the account's own
+   server URL.
+2. **Registration for a remote agent by URL and token** — bb's user-supplied
+   agent shape is a local command today.
+3. A **pairing token an agent redeems**, plus the **dial-back** endpoint it
+   redeems against. bb mints machine codes, but has no notion of a credential
+   that an _agent_ presents back to bb.
+
+**Prototype.** A runnable prototype of all three steps is at
+`Joesirven/bb@onboarding-autoconnect-prototype`, with `PROTOTYPE.md` covering
+how to run it and exactly which parts are real detection versus mocked
+services. Two browsable pages: a captured demo run and a settings-screen mock.
+
+---
+
 ## Not done
 
 This is a demo of a flow, not an implementation of it. Not included: any UI,
 any server route, any host daemon command, any persistence, and any test
-coverage. bb does not create agents anywhere in this flow — every path adds one
-the user already has.
+coverage. bb does not create agents anywhere in this flow — all three shapes
+add one the user already has.
+
+The step 2c arc is the least real part: the tailnet check underneath it is a
+genuine `tailscale status` probe, but the pairing token, the copy-paste
+instructions, and the dial-back are all invented, and no agent ever connects.
+It demonstrates the shape of the flow, not a working handshake.
 
 Worth stating plainly: **there is no onboarding flow in `main` for this to plug
 into.** The previous first-run flow was deleted in
@@ -253,10 +383,12 @@ exists as an endpoint.
 
 ## Transcript
 
-`node prototype/onboarding-autoconnect/demo.mjs --shim-hermes --tailscale=missing --email=you@example.com --handle=you`
+`node prototype/onboarding-autoconnect/demo.mjs --shim-hermes --email=you@example.com --handle=you`
 
-This is a real run. The machine name and the checkout path have been replaced
-with `workstation.local` and `/home/you/bb`; nothing else is edited.
+A real run on a machine that already has Tailscale, so step 3 takes the quiet
+path and the offer path is replayed after it. The machine name, checkout path,
+and tailnet identifiers are replaced with `workstation.local`, `/home/you/bb`,
+and `tailnet-demo.ts.net`; nothing else is edited.
 
 ```
 
@@ -291,7 +423,7 @@ with `workstation.local` and `/home/you/bb`; nothing else is edited.
    shape from plugins/connect/src/machine-code.ts: { code, expiresInMs, serverUrl }
    response
      {
-       "code": "617020BB71",
+       "code": "3C75B98730",
        "expiresInMs": 600000,
        "serverUrl": "https://you.getbb.app"
      }
@@ -315,14 +447,16 @@ with `workstation.local` and `/home/you/bb`; nothing else is edited.
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ STEP 2/3  Connect your agents                                            │
 └──────────────────────────────────────────────────────────────────────────┘
-   You add an agent you already have. bb never creates one for you, and this
-   step covers both ways an agent can already exist.
+   You add an agent you already have. bb never creates one for you.
+   An agent can already exist in three shapes, so this step has three.
 
-   (a) Installed on this machine, speaking the Agent Client Protocol.
-   (b) Running somewhere else, reached over a URL with a token.
+   (a) Local CLI agent, speaking the Agent Client Protocol.
+   (b) Remote agent exposing an HTTP endpoint - URL plus token.
+   (c) Agent with no URL at all - pairs back over your tailnet.
 
    ----------------------------------------------------------------------
-   (a) Agents installed on this machine
+   (a) Local CLI agent via the Agent Client Protocol
+      Connects over ACP - no credentials needed
    $ which hermes
 
    [REAL] Hermes Agent found at /home/you/bb/prototype/onboarding-autoconnect/shims/hermes
@@ -350,15 +484,16 @@ with `workstation.local` and `/home/you/bb`; nothing else is edited.
    PASS Hermes Agent is now a usable provider: acp-hermes-agent
 
    ----------------------------------------------------------------------
-   (b) An agent running somewhere else
-   Offer: "Already run an agent elsewhere - Instinct, or your own - Add it by URL."
+   (b) Remote agent with a URL and a token
+      Any agent exposing an HTTP endpoint - register its URL and token
+   Offer: "Already run an agent elsewhere - Add it by URL."
       bb can add a user-supplied ACP agent today, but only as a local command
       (customAcpAgentSchema in plugins/provider-acp/src/agents.ts). A remote
       agent reached over a URL has no counterpart in bb yet.
 
-   ? Register an external agent now? [scripted: yes]
-   ? Agent name: Instinct [scripted]
-   ? Agent URL: https://instinct.example.com/agent [scripted]
+   ? Register a remote agent now? [scripted: yes]
+   ? Agent name: Remote Agent [scripted]
+   ? Agent URL: https://agent.example.com/acp [scripted]
    ? Access token: [scripted: placeholder, never a real credential]
 
    [MOCK] Token is a scripted placeholder, never a real credential; shown as ************0000
@@ -368,9 +503,9 @@ with `workstation.local` and `/home/you/bb`; nothing else is edited.
    [MOCK] POST /api/v1/providers/external - invented; bb has no such endpoint
    request
      {
-       "displayName": "Instinct",
+       "displayName": "Remote Agent",
        "kind": "external",
-       "endpointUrl": "https://instinct.example.com/agent",
+       "endpointUrl": "https://agent.example.com/acp",
        "auth": {
          "type": "bearer",
          "token": "************0000"
@@ -378,24 +513,74 @@ with `workstation.local` and `/home/you/bb`; nothing else is edited.
      }
    response
      {
-       "providerId": "external-instinct",
-       "displayName": "Instinct",
+       "providerId": "external-remote-agent",
+       "displayName": "Remote Agent",
        "kind": "external",
-       "endpointUrl": "https://instinct.example.com/agent",
+       "endpointUrl": "https://agent.example.com/acp",
        "status": "connected",
-       "credentialRef": "secret://cred_b787b9751821"
+       "credentialRef": "secret://cred_c68cd75e3983"
      }
-   PASS Instinct is now a usable provider: external-instinct
+   PASS Remote Agent is now a usable provider: external-remote-agent
+
+   ----------------------------------------------------------------------
+   (c) Agent with no URL - pairs over your tailnet
+      SSH-only agents, e.g. Instinct: nothing for bb to dial out to
+      Instead bb mints a one-time token, you paste it to the agent, and the
+      agent dials back to bb through the tunnel.
+
+   [REAL] This machine is on tailnet tailnet-demo.ts.net
+   [REAL] Dial-back peer would be workstation.tailnet-demo.ts.net
+
+   Offer: "Running an agent bb cannot reach over HTTP - Mint a pairing token."
+   ? Mint a pairing token now? [scripted: yes]
+   ? Agent name: Instinct [scripted]
+   [MOCK] POST /api/connect/agent-pairing-token - invented; bb has no such endpoint
+   PASS One-time pairing token minted, shown as ************ae04
+      The full token would be copyable in the UI and never logged.
+
+   Paste this to your agent
+     Run this where Instinct lives, or paste it into its console:
+
+       bb-agent pair --token ************ae04 \
+                  --dial-back https://you.getbb.app/api/connect/agent-dial-back
+
+     The token is single-use and expires in 15 minutes. It travels over your
+     tailnet, so it is never exposed to the public internet.
+
+   Waiting for Instinct to dial back through the tailnet ...
+   [MOCK] agent dial-back (simulated; no agent actually connected)
+   provider paired
+     {
+       "providerId": "paired-instinct",
+       "displayName": "Instinct",
+       "kind": "paired",
+       "transport": "tailnet",
+       "peer": "workstation.tailnet-demo.ts.net",
+       "status": "connected",
+       "credentialRef": "secret://cred_ba5f4a63e807"
+     }
+   PASS Instinct is now a usable provider: paired-instinct
 
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ STEP 3/3  Tailscale offer - reachable from phone and laptop              │
+│ STEP 3/3  Tailscale - reachable from phone and laptop                    │
 └──────────────────────────────────────────────────────────────────────────┘
-   Detecting Tailscale on this machine ...
+   Detecting first. The offer only appears when Tailscale is missing.
    $ which tailscale
    $ tailscale status --json
 
-   [MOCK] --tailscale=missing overrides the real probe so the offer branch is demoable on a machine that is already set up
-      real probe said: installed=true backendState=Running
+   [REAL] tailscale binary at /usr/bin/tailscale
+   [REAL] BackendState = Running
+   [REAL] tailnet tailnet-demo.ts.net
+   [REAL] MagicDNS name workstation.tailnet-demo.ts.net
+
+   PASS Tailscale found - you're reachable from your other devices.
+      No prompt, no install, nothing to answer. The step is done.
+   bb can point straight at http://workstation.tailnet-demo.ts.net:38886 from a phone on the same tailnet.
+
+## Also showing: the offer path
+   This machine already has Tailscale, so the step above took the quiet path. Detection is forced off here so both branches are visible in one run.
+
+   [MOCK] detection forced off - the real probe found Tailscale running
    MISS tailscale is not on PATH
 
    Offer: "This machine is not reachable from your phone yet. Set up Tailscale?"
@@ -405,16 +590,15 @@ with `workstation.local` and `/home/you/bb`; nothing else is edited.
    $ curl -fsSL https://tailscale.com/install.sh | sh
    $ sudo tailscale up --ssh
    [MOCK] install / login is NOT executed - this is a dry run
-      A shipped version would run these in a pty and stream the output, the
-      way bb already streams managed provider-CLI installs.
    PASS Dry run complete.
+
 
 ## Flow complete
    What the user got, without typing a server URL
 
    1  Machine on the account        https://you-workstation.getbb.app
-   2  Agents connected              acp-hermes-agent (local, ACP), external-instinct (external, URL)
-   3  Reachable from phone          offered and accepted (dry run: install-and-login)
+   2  Agents connected              acp-hermes-agent (local, ACP), external-remote-agent (remote, URL), paired-instinct (no URL, tailnet)
+   3  Reachable from phone          already set up - workstation.tailnet-demo.ts.net (no offer shown)
 
    ----------------------------------------------------------------------
       [REAL] lines above were measured on this machine. [MOCK] lines are fake

@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { detectTailscale } from "./src/detect.mjs";
 
 const run = promisify(execFile);
 
@@ -12,7 +13,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../..");
 const OUTPUT = resolve(REPO_ROOT, "docs/onboarding-proto-demo.html");
 
-const DEMO_ARGS = ["--shim-hermes", "--tailscale=missing"];
+const DEMO_ARGS = ["--shim-hermes"];
 
 const PALETTE = {
   31: "#e2686f",
@@ -23,15 +24,24 @@ const PALETTE = {
   36: "#4fa8a8",
 };
 
-const REDACTIONS = [
-  [hostname(), "workstation.local"],
-  [hostname().split(".")[0], "workstation"],
-  [REPO_ROOT, "/home/you/bb"],
-];
+async function buildRedactions() {
+  const tailnet = await detectTailscale();
+  return [
+    ...(tailnet.magicDnsName === null
+      ? []
+      : [[tailnet.magicDnsName, "workstation.tailnet-demo.ts.net"]]),
+    ...(tailnet.tailnetName === null
+      ? []
+      : [[tailnet.tailnetName, "tailnet-demo.ts.net"]]),
+    [hostname(), "workstation.local"],
+    [hostname().split(".")[0], "workstation"],
+    [REPO_ROOT, "/home/you/bb"],
+  ];
+}
 
-function redact(text) {
+function redact(text, redactions) {
   let out = text;
-  for (const [from, to] of REDACTIONS) {
+  for (const [from, to] of redactions) {
     if (from.length > 0) out = out.split(from).join(to);
   }
   return out;
@@ -159,7 +169,7 @@ function page(body, commandLine) {
 <main>
   <h1>bb onboarding auto-connect prototype</h1>
   <p class="lede">
-    One scripted run of the proposed four-step setup flow, captured from a real
+    One scripted run of the proposed three-step setup flow, captured from a real
     terminal. Nothing on this page is a screenshot: it is the demo's own output,
     with its colors converted to markup.
   </p>
@@ -173,9 +183,9 @@ function page(body, commandLine) {
     Regenerate with
     <code>node prototype/onboarding-autoconnect/render-demo-html.mjs</code>,
     then <code>pnpm format</code>.
-    The machine name and checkout path are replaced with
-    <code>workstation.local</code> and <code>/home/you/bb</code>; nothing else
-    is edited. See <code>PROTOTYPE.md</code> for what is real, what is mocked,
+    The machine name, checkout path, and tailnet identifiers are replaced with
+    <code>workstation.local</code>, <code>/home/you/bb</code>, and
+    <code>tailnet-demo.ts.net</code>; nothing else is edited. See <code>PROTOTYPE.md</code> for what is real, what is mocked,
     and why.
   </footer>
 </main>
@@ -191,7 +201,11 @@ const { stdout } = await run(process.execPath, ["demo.mjs", ...DEMO_ARGS], {
 });
 
 const commandLine = `node prototype/onboarding-autoconnect/demo.mjs ${DEMO_ARGS.join(" ")}`;
-const html = page(ansiToHtml(redact(stdout)).replace(/^\n+/u, ""), commandLine);
+const redactions = await buildRedactions();
+const html = page(
+  ansiToHtml(redact(stdout, redactions)).replace(/^\n+/u, ""),
+  commandLine,
+);
 await writeFile(OUTPUT, html, "utf8");
 console.log(
   `Wrote ${OUTPUT} (${html.length} bytes). Run \`pnpm format\` to reindent it.`,
