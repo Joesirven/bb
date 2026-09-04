@@ -1,0 +1,23 @@
+#!/bin/sh
+# Fake `hermes` binary for the onboarding auto-connect demo.
+#
+# It exists so step 2 has something real to find with `which` on a machine that
+# does not have Hermes Agent installed. The demo prepends this directory to PATH
+# only when run with --shim-hermes, and always labels the detection as shimmed.
+#
+# The real Hermes Agent speaks the Agent Client Protocol over stdio via
+# `hermes acp`. This stub answers `--version` and refuses `acp`, because the
+# prototype mocks the protocol handshake rather than running one.
+case "$1" in
+  --version|-v|version)
+    echo "hermes 0.0.0-demo-shim"
+    ;;
+  acp)
+    echo "hermes: demo shim - the onboarding prototype mocks the ACP handshake" >&2
+    exit 1
+    ;;
+  *)
+    echo "hermes: demo shim (no real agent here)" >&2
+    exit 1
+    ;;
+esac
