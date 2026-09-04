@@ -28,7 +28,6 @@
     "apps/mobile/.expo/",
     "apps/mobile/expo-env.d.ts",
     "apps/mobile/build-output/",
-    "packages/templates/src/templates/",
-    "docs/onboarding-ui-mock.html"
+    "packages/templates/src/templates/"
   ]
 }
