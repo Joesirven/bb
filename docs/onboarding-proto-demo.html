@@ -115,13 +115,13 @@
       </div>
       <div class="term">
         <pre><span style="color:#b07cc6">## </span><span style="color:#b07cc6;font-weight:700">bb onboarding auto-connect prototype</span>
-<span style="opacity:.62">   Four proposed steps, run end to end. Prototype quality: mocked where a real service is out of scope.</span>
+<span style="opacity:.62">   Three proposed steps, run end to end. Prototype quality: mocked where a real service is out of scope.</span>
 
    Mode: <span style="font-weight:700">scripted</span><span style="color:#d9a441">  (+ hermes shim on PATH)</span>
    <span style="opacity:.62">   </span><span style="color:#d9a441;opacity:.62">--shim-hermes is active: the hermes that step 2 finds is a fake binary in prototype/onboarding-autoconnect/shims.</span>
 
 <span style="color:#4fa8a8">┌──────────────────────────────────────────────────────────────────────────┐</span>
-<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 1/4  Account-first machine adding                                  </span><span style="color:#4fa8a8"> │</span>
+<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 1/3  Account-first machine adding                                  </span><span style="color:#4fa8a8"> │</span>
 <span style="color:#4fa8a8">└──────────────────────────────────────────────────────────────────────────┘</span>
 
    <span style="font-weight:700">Today</span>
@@ -145,7 +145,7 @@
    <span style="opacity:.62">shape from plugins/connect/src/machine-code.ts: { code, expiresInMs, serverUrl }</span>
    <span style="opacity:.62">response</span>
      <span style="opacity:.62">{</span>
-     <span style="opacity:.62">  "code": "331D8E74A4",</span>
+     <span style="opacity:.62">  "code": "02D9FB961B",</span>
      <span style="opacity:.62">  "expiresInMs": 600000,</span>
      <span style="opacity:.62">  "serverUrl": "https://demo.getbb.app"</span>
      <span style="opacity:.62">}</span>
@@ -167,19 +167,21 @@
    <span style="color:#7fb975">PASS</span> The machine the user is standing at is now on their account.
 
 <span style="color:#4fa8a8">┌──────────────────────────────────────────────────────────────────────────┐</span>
-<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 2/4  Companion-agent detection                                     </span><span style="color:#4fa8a8"> │</span>
+<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 2/3  Connect your agents                                           </span><span style="color:#4fa8a8"> │</span>
 <span style="color:#4fa8a8">└──────────────────────────────────────────────────────────────────────────┘</span>
-   Probing PATH for known Agent Client Protocol agents ...
+   You add an agent you already have. bb never creates one for you, and this
+   step covers both ways an agent can already exist.
+
+   <span style="font-weight:700">(a)</span> Installed on this machine, speaking the Agent Client Protocol.
+   <span style="font-weight:700">(b)</span> Running somewhere else, reached over a URL with a token.
+
+<span style="opacity:.62">   ----------------------------------------------------------------------</span>
+   <span style="font-weight:700">(a) Agents installed on this machine</span>
    <span style="opacity:.62">$</span> <span style="color:#5b9dd9">which hermes</span>
-   <span style="opacity:.62">$</span> <span style="color:#5b9dd9">which instinct</span>
 
    <span style="color:#7fb975">[REAL]</span> <span style="font-weight:700">Hermes Agent</span> found at /home/you/bb/prototype/onboarding-autoconnect/shims/hermes
    <span style="opacity:.62">   provider id acp-hermes-agent - plugins/provider-acp/src/known-agents.ts (shipped)</span>
-   <span style="color:#e2686f">MISS</span> Instinct not on PATH
-   <span style="opacity:.62">   provider id acp-instinct - proposed by this feature request (not in bb today)</span>
-   <span style="opacity:.62">   </span><span style="color:#d9a441;opacity:.62">this agent is a proposal; bb has no acp-instinct provider today</span>
 
-<span style="opacity:.62">   ----------------------------------------------------------------------</span>
    <span style="font-weight:700">Offer:</span> "Hermes Agent is installed on this machine. Connect it to bb?"
    <span style="opacity:.62">?</span> Connect Hermes Agent over the Agent Client Protocol? <span style="opacity:.62">[scripted: yes]</span>
    <span style="opacity:.62">$</span> <span style="color:#5b9dd9">hermes acp</span>
@@ -201,8 +203,46 @@
      <span style="opacity:.62">}</span>
    <span style="color:#7fb975">PASS</span> Hermes Agent is now a usable provider: acp-hermes-agent
 
+<span style="opacity:.62">   ----------------------------------------------------------------------</span>
+   <span style="font-weight:700">(b) An agent running somewhere else</span>
+   <span style="font-weight:700">Offer:</span> "Already run an agent elsewhere - Instinct, or your own - Add it by URL."
+   <span style="opacity:.62">   bb can add a user-supplied ACP agent today, but only as a local command</span>
+   <span style="opacity:.62">   (customAcpAgentSchema in plugins/provider-acp/src/agents.ts). A remote</span>
+   <span style="opacity:.62">   agent reached over a URL has no counterpart in bb yet.</span>
+
+   <span style="opacity:.62">?</span> Register an external agent now? <span style="opacity:.62">[scripted: yes]</span>
+   <span style="opacity:.62">?</span> Agent name: Instinct <span style="opacity:.62">[scripted]</span>
+   <span style="opacity:.62">?</span> Agent URL: https://instinct.example.com/agent <span style="opacity:.62">[scripted]</span>
+   <span style="opacity:.62">?</span> Access token: <span style="opacity:.62">[scripted: placeholder, never a real credential]</span>
+
+   <span style="color:#d9a441">[MOCK]</span> Token is a scripted placeholder, never a real credential; shown as ************0000
+   <span style="opacity:.62">   The token is masked everywhere it is printed. A shipped version would</span>
+   <span style="opacity:.62">   hand it to bb's secret storage rather than echo it at all.</span>
+
+   <span style="color:#d9a441">[MOCK]</span> POST /api/v1/providers/external - invented; bb has no such endpoint
+   <span style="opacity:.62">request</span>
+     <span style="opacity:.62">{</span>
+     <span style="opacity:.62">  "displayName": "Instinct",</span>
+     <span style="opacity:.62">  "kind": "external",</span>
+     <span style="opacity:.62">  "endpointUrl": "https://instinct.example.com/agent",</span>
+     <span style="opacity:.62">  "auth": {</span>
+     <span style="opacity:.62">    "type": "bearer",</span>
+     <span style="opacity:.62">    "token": "************0000"</span>
+     <span style="opacity:.62">  }</span>
+     <span style="opacity:.62">}</span>
+   <span style="opacity:.62">response</span>
+     <span style="opacity:.62">{</span>
+     <span style="opacity:.62">  "providerId": "external-instinct",</span>
+     <span style="opacity:.62">  "displayName": "Instinct",</span>
+     <span style="opacity:.62">  "kind": "external",</span>
+     <span style="opacity:.62">  "endpointUrl": "https://instinct.example.com/agent",</span>
+     <span style="opacity:.62">  "status": "connected",</span>
+     <span style="opacity:.62">  "credentialRef": "secret://cred_04d87fef8199"</span>
+     <span style="opacity:.62">}</span>
+   <span style="color:#7fb975">PASS</span> Instinct is now a usable provider: external-instinct
+
 <span style="color:#4fa8a8">┌──────────────────────────────────────────────────────────────────────────┐</span>
-<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 3/4  Tailscale offer - reachable from phone and laptop             </span><span style="color:#4fa8a8"> │</span>
+<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 3/3  Tailscale offer - reachable from phone and laptop             </span><span style="color:#4fa8a8"> │</span>
 <span style="color:#4fa8a8">└──────────────────────────────────────────────────────────────────────────┘</span>
    Detecting Tailscale on this machine ...
    <span style="opacity:.62">$</span> <span style="color:#5b9dd9">which tailscale</span>
@@ -223,55 +263,12 @@
    <span style="opacity:.62">   way bb already streams managed provider-CLI installs.</span>
    <span style="color:#7fb975">PASS</span> Dry run complete.
 
-<span style="color:#4fa8a8">┌──────────────────────────────────────────────────────────────────────────┐</span>
-<span style="color:#4fa8a8">│ </span><span style="font-weight:700">STEP 4/4  Personal-agent registration                                   </span><span style="color:#4fa8a8"> │</span>
-<span style="color:#4fa8a8">└──────────────────────────────────────────────────────────────────────────┘</span>
-   Registering a persistent personal agent on provider <span style="font-weight:700">acp-hermes-agent</span> ...
-   <span style="opacity:.62">   provider carried over from the agent connected in step 2</span>
-
-   <span style="opacity:.62">?</span> Create a persistent personal agent for this bb? <span style="opacity:.62">[scripted: yes]</span>
-   <span style="color:#d9a441">[MOCK]</span> POST /api/v1/threads
-   <span style="opacity:.62">   request body is a real createThreadRequestSchema shape, checked by check-contract.mts</span>
-   <span style="opacity:.62">request</span>
-     <span style="opacity:.62">{</span>
-     <span style="opacity:.62">  "projectId": "proj_demo_bb_src",</span>
-     <span style="opacity:.62">  "providerId": "acp-hermes-agent",</span>
-     <span style="opacity:.62">  "origin": "app",</span>
-     <span style="opacity:.62">  "visibility": "visible",</span>
-     <span style="opacity:.62">  "title": "Personal agent",</span>
-     <span style="opacity:.62">  "input": [</span>
-     <span style="opacity:.62">    {</span>
-     <span style="opacity:.62">      "type": "text",</span>
-     <span style="opacity:.62">      "text": "You are the personal agent for this bb. You persist across sessions and are reachable from any device on this account.",</span>
-     <span style="opacity:.62">      "mentions": []</span>
-     <span style="opacity:.62">    }</span>
-     <span style="opacity:.62">  ],</span>
-     <span style="opacity:.62">  "environment": {</span>
-     <span style="opacity:.62">    "type": "reuse",</span>
-     <span style="opacity:.62">    "environmentId": "env_demo_default"</span>
-     <span style="opacity:.62">  },</span>
-     <span style="opacity:.62">  "startedOnBehalfOf": null,</span>
-     <span style="opacity:.62">  "originKind": null</span>
-     <span style="opacity:.62">}</span>
-   <span style="opacity:.62">response</span>
-     <span style="opacity:.62">{</span>
-     <span style="opacity:.62">  "threadId": "thr_04bb0eb75e6a",</span>
-     <span style="opacity:.62">  "projectId": "proj_demo_bb_src",</span>
-     <span style="opacity:.62">  "providerId": "acp-hermes-agent",</span>
-     <span style="opacity:.62">  "title": "Personal agent",</span>
-     <span style="opacity:.62">  "status": "idle",</span>
-     <span style="opacity:.62">  "url": "https://demo.getbb.app/threads/thr_04bb0eb75e6a"</span>
-     <span style="opacity:.62">}</span>
-   <span style="color:#7fb975">PASS</span> Personal agent registered: thr_04bb0eb75e6a
-   Reachable at <span style="font-weight:700">https://demo.getbb.app/threads/thr_04bb0eb75e6a</span> from any device signed in to the account.
-
 <span style="color:#b07cc6">## </span><span style="color:#b07cc6;font-weight:700">Flow complete</span>
 <span style="opacity:.62">   What the user got, without typing a server URL</span>
 
    <span style="font-weight:700">1  Machine on the account       </span> https://demo-workstation.getbb.app
-   <span style="font-weight:700">2  Companion agents connected   </span> acp-hermes-agent
+   <span style="font-weight:700">2  Agents connected             </span> acp-hermes-agent (local, ACP), external-instinct (external, URL)
    <span style="font-weight:700">3  Reachable from phone         </span> offered and accepted (dry run: install-and-login)
-   <span style="font-weight:700">4  Personal agent               </span> thr_04bb0eb75e6a
 
 <span style="opacity:.62">   ----------------------------------------------------------------------</span>
    <span style="opacity:.62">   [REAL] lines above were measured on this machine. [MOCK] lines are fake</span>

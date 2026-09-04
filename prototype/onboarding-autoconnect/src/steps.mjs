@@ -23,14 +23,15 @@ import {
 import {
   connectAcpAgent,
   listAccountServers,
+  maskToken,
   mintMachineCode,
   planTailscaleSetup,
   redeemMachineCode,
-  registerPersonalAgent,
+  registerExternalAgent,
   signInWithGetbbAccount,
 } from "./mock-cloud.mjs";
 
-const TOTAL_STEPS = 4;
+const TOTAL_STEPS = 3;
 
 export async function stepAccountFirstMachine(ctx) {
   stepHeader(1, TOTAL_STEPS, "Account-first machine adding");
@@ -116,12 +117,25 @@ export async function stepAccountFirstMachine(ctx) {
   return { session, credential, servers, machineCode };
 }
 
-export async function stepCompanionAgents(ctx) {
-  stepHeader(2, TOTAL_STEPS, "Companion-agent detection");
+export async function stepConnectAgents(ctx) {
+  stepHeader(2, TOTAL_STEPS, "Connect your agents");
 
-  say("Probing PATH for known Agent Client Protocol agents ...");
+  say(
+    "You add an agent you already have. bb never creates one for you, and this",
+  );
+  say("step covers both ways an agent can already exist.");
+  blank();
+  say(
+    `${style.bold("(a)")} Installed on this machine, speaking the Agent Client Protocol.`,
+  );
+  say(
+    `${style.bold("(b)")} Running somewhere else, reached over a URL with a token.`,
+  );
+  blank();
+  rule();
+
+  say(style.bold("(a) Agents installed on this machine"));
   command("which hermes");
-  command("which instinct");
   blank();
 
   const agents = await detectCompanionAgents({ env: ctx.env });
@@ -132,25 +146,17 @@ export async function stepCompanionAgents(ctx) {
       no(`${agent.displayName} not on PATH`);
     }
     note(`   provider id ${agent.id} - ${agent.registrySource}`);
-    if (agent.proposed) {
-      note(
-        `   ${style.yellow("this agent is a proposal; bb has no acp-instinct provider today")}`,
-      );
-    }
   }
   blank();
 
+  const connected = [];
   const detected = agents.filter((agent) => agent.installed);
   if (detected.length === 0) {
     note(
-      "Nothing on PATH, so this step would show nothing. Re-run with --shim-hermes to see the offer.",
+      "Nothing on PATH, so bb offers nothing here. Re-run with --shim-hermes to see the offer.",
     );
-    return { agents, connected: [] };
   }
-
-  const connected = [];
   for (const agent of detected) {
-    rule();
     say(
       `${style.bold("Offer:")} "${agent.displayName} is installed on this machine. Connect it to bb?"`,
     );
@@ -169,7 +175,58 @@ export async function stepCompanionAgents(ctx) {
     connected.push(provider);
   }
 
-  return { agents, connected };
+  blank();
+  rule();
+  say(style.bold("(b) An agent running somewhere else"));
+  say(
+    `${style.bold("Offer:")} "Already run an agent elsewhere - Instinct, or your own - Add it by URL."`,
+  );
+  note(
+    "   bb can add a user-supplied ACP agent today, but only as a local command",
+  );
+  note(
+    "   (customAcpAgentSchema in plugins/provider-acp/src/agents.ts). A remote",
+  );
+  note("   agent reached over a URL has no counterpart in bb yet.");
+  blank();
+
+  const registered = [];
+  const wantsExternal = await ctx.confirm("Register an external agent now?");
+  if (!wantsExternal) {
+    note("Declined. Setup continues with whatever is installed locally.");
+    return { agents, connected, registered };
+  }
+
+  const displayName = await ctx.ask("Agent name", ctx.externalAgent.name);
+  const url = await ctx.ask("Agent URL", ctx.externalAgent.url);
+  const token = await ctx.askSecret("Access token", ctx.externalAgent.token);
+  blank();
+  if (ctx.interactive) {
+    real(`Token read from the prompt; shown as ${maskToken(token)}`);
+  } else {
+    mock(
+      `Token is a scripted placeholder, never a real credential; shown as ${maskToken(token)}`,
+    );
+  }
+  note(
+    "   The token is masked everywhere it is printed. A shipped version would",
+  );
+  note("   hand it to bb's secret storage rather than echo it at all.");
+  blank();
+
+  const result = await registerExternalAgent({
+    displayName,
+    url,
+    token,
+    fast: ctx.fast,
+  });
+  mock("POST /api/v1/providers/external - invented; bb has no such endpoint");
+  json("request", result.request);
+  json("response", result.response);
+  ok(`${displayName} is now a usable provider: ${result.response.providerId}`);
+  registered.push(result.response);
+
+  return { agents, connected, registered };
 }
 
 export async function stepTailscale(ctx) {
@@ -242,68 +299,27 @@ export async function stepTailscale(ctx) {
   return { detection, plan, accepted: true, executed: false };
 }
 
-export async function stepPersonalAgent(ctx, previous) {
-  stepHeader(4, TOTAL_STEPS, "Personal-agent registration");
-
-  const provider =
-    previous.companions.connected[0]?.providerId ?? ctx.fallbackProviderId;
-  say(
-    `Registering a persistent personal agent on provider ${style.bold(provider)} ...`,
-  );
-  if (previous.companions.connected.length > 0) {
-    note("   provider carried over from the agent connected in step 2");
-  } else {
-    note(
-      `   no companion agent was connected in step 2, so falling back to ${ctx.fallbackProviderId}`,
-    );
-  }
-  blank();
-
-  const accepted = await ctx.confirm(
-    "Create a persistent personal agent for this bb?",
-  );
-  if (!accepted) {
-    note("Declined. The user can create one later from the app.");
-    return { registered: false };
-  }
-
-  const result = await registerPersonalAgent({
-    projectId: ctx.projectId,
-    environmentId: ctx.environmentId,
-    providerId: provider,
-    title: "Personal agent",
-    systemPrompt:
-      "You are the personal agent for this bb. You persist across sessions and are reachable from any device on this account.",
-    serverUrl: previous.account.session.serverUrl,
-    fast: ctx.fast,
-  });
-  mock("POST /api/v1/threads");
-  note(
-    "   request body is a real createThreadRequestSchema shape, checked by check-contract.mts",
-  );
-  json("request", result.request);
-  json("response", result.response);
-  ok(`Personal agent registered: ${result.response.threadId}`);
-  say(
-    `Reachable at ${style.bold(result.response.url)} from any device signed in to the account.`,
-  );
-
-  return { registered: true, ...result };
-}
-
 export function summary(results) {
   banner("Flow complete", "What the user got, without typing a server URL");
   blank();
+  const agentSummary = [
+    ...results.agents.connected.map(
+      (provider) => `${provider.providerId} (local, ACP)`,
+    ),
+    ...results.agents.registered.map(
+      (provider) => `${provider.providerId} (external, URL)`,
+    ),
+  ];
   const lines = [
     [
       "1  Machine on the account",
       results.account.servers.servers.at(-1)?.url ?? "-",
     ],
     [
-      "2  Companion agents connected",
-      results.companions.connected.length > 0
-        ? results.companions.connected.map((p) => p.providerId).join(", ")
-        : "none (nothing detected or offer declined)",
+      "2  Agents connected",
+      agentSummary.length > 0
+        ? agentSummary.join(", ")
+        : "none (nothing detected and no external agent added)",
     ],
     [
       "3  Reachable from phone",
@@ -312,12 +328,6 @@ export function summary(results) {
         : results.tailscale.accepted
           ? `offered and accepted (dry run: ${results.tailscale.plan.action})`
           : `offered, declined (${results.tailscale.plan.action})`,
-    ],
-    [
-      "4  Personal agent",
-      results.personalAgent.registered
-        ? results.personalAgent.response.threadId
-        : "declined",
     ],
   ];
   for (const [label, value] of lines) {

@@ -29,18 +29,7 @@ export const COMPANION_AGENTS = [
     command: "hermes",
     args: ["acp"],
     signInCommand: "hermes login",
-    proposed: false,
     registrySource: "plugins/provider-acp/src/known-agents.ts (shipped)",
-  },
-  {
-    id: "acp-instinct",
-    displayName: "Instinct",
-    executableName: "instinct",
-    command: "instinct",
-    args: ["acp"],
-    signInCommand: null,
-    proposed: true,
-    registrySource: "proposed by this feature request (not in bb today)",
   },
 ];
 

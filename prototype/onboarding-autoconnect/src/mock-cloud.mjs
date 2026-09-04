@@ -99,29 +99,33 @@ export function planTailscaleSetup(detection) {
   };
 }
 
-export async function registerPersonalAgent(args) {
+export function maskToken(token) {
+  const trimmed = token.trim();
+  if (trimmed.length <= 4) return "*".repeat(trimmed.length);
+  return `${"*".repeat(Math.min(trimmed.length - 4, 12))}${trimmed.slice(-4)}`;
+}
+
+export async function registerExternalAgent(args) {
   const request = {
-    projectId: args.projectId,
-    providerId: args.providerId,
-    origin: "app",
-    visibility: "visible",
-    title: args.title,
-    input: [{ type: "text", text: args.systemPrompt, mentions: [] }],
-    environment: { type: "reuse", environmentId: args.environmentId },
-    startedOnBehalfOf: null,
-    originKind: null,
+    displayName: args.displayName,
+    kind: "external",
+    endpointUrl: args.url,
+    auth: { type: "bearer", token: maskToken(args.token) },
   };
   await roundTrip(args.fast);
-  const threadId = shortId("thr");
+  const providerId = `external-${args.displayName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-|-$/gu, "")}`;
   return {
     request,
     response: {
-      threadId,
-      projectId: args.projectId,
-      providerId: args.providerId,
-      title: args.title,
-      status: "idle",
-      url: `${args.serverUrl}/threads/${threadId}`,
+      providerId,
+      displayName: args.displayName,
+      kind: "external",
+      endpointUrl: args.url,
+      status: "connected",
+      credentialRef: `secret://${shortId("cred")}`,
     },
   };
 }

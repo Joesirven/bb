@@ -6,8 +6,7 @@ import { banner, blank, note, say, style } from "./src/ui.mjs";
 import { describeHost } from "./src/detect.mjs";
 import {
   stepAccountFirstMachine,
-  stepCompanionAgents,
-  stepPersonalAgent,
+  stepConnectAgents,
   stepTailscale,
   summary,
 } from "./src/steps.mjs";
@@ -16,7 +15,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 const USAGE = `bb onboarding auto-connect prototype
 
-Walks the four proposed setup steps end to end. Scripted by default, so the
+Walks the three proposed setup steps end to end. Scripted by default, so the
 output is a transcript you can paste into an issue.
 
 Usage:
@@ -30,6 +29,10 @@ Flags:
   --tailscale=<mode>     auto (default) | missing | logged-out
                          Override step 3's real probe to demo the offer branch.
   --decline-all          Answer no to every offer (scripted mode only).
+  --agent-name=<name>    External agent name for step 2. Default Instinct
+  --agent-url=<url>      External agent URL. Default an example.com endpoint.
+                         The access token is never taken from a flag; scripted
+                         runs use a placeholder and --interactive prompts.
   --email=<address>      Account email shown in step 1. Default demo@example.com
   --handle=<handle>      Account handle. Default demo
   --fast                 Skip the simulated network latency.
@@ -47,6 +50,8 @@ function parseArgs(argv) {
     declineAll: false,
     email: "demo@example.com",
     handle: "demo",
+    agentName: "Instinct",
+    agentUrl: "https://instinct.example.com/agent",
     fast: false,
   };
   for (const arg of argv) {
@@ -66,10 +71,14 @@ function parseArgs(argv) {
       options.tailscale = mode;
     } else if (arg.startsWith("--email=")) options.email = arg.slice(8);
     else if (arg.startsWith("--handle=")) options.handle = arg.slice(9);
+    else if (arg.startsWith("--agent-name=")) options.agentName = arg.slice(13);
+    else if (arg.startsWith("--agent-url=")) options.agentUrl = arg.slice(12);
     else throw new Error(`Unknown flag "${arg}"\n\n${USAGE}`);
   }
   return { help: false, options };
 }
+
+const PLACEHOLDER_TOKEN = "demo-placeholder-token-0000";
 
 function createScriptedConfirm(answer) {
   return async (question) => {
@@ -80,17 +89,58 @@ function createScriptedConfirm(answer) {
   };
 }
 
-function createInteractiveConfirm(rl) {
-  const lines = rl[Symbol.asyncIterator]();
+function createScriptedAsk() {
+  return async (question, preset) => {
+    console.log(
+      `   ${style.dim("?")} ${question}: ${preset} ${style.dim("[scripted]")}`,
+    );
+    return preset;
+  };
+}
+
+function createScriptedAskSecret() {
   return async (question) => {
-    process.stdout.write(`   ? ${question} [Y/n] `);
+    console.log(
+      `   ${style.dim("?")} ${question}: ${style.dim("[scripted: placeholder, never a real credential]")}`,
+    );
+    return PLACEHOLDER_TOKEN;
+  };
+}
+
+function createInteractivePrompts(rl) {
+  const lines = rl[Symbol.asyncIterator]();
+  const readLine = async (echo = true) => {
     const next = await lines.next();
-    if (next.done === true) {
-      process.stdout.write("(stdin ended; taking the default)\n");
-      return true;
+    if (next.done === true) return null;
+    if (process.stdin.isTTY !== true) {
+      process.stdout.write(echo ? `${next.value}\n` : "\n");
     }
-    if (process.stdin.isTTY !== true) process.stdout.write(`${next.value}\n`);
-    return !next.value.trim().toLowerCase().startsWith("n");
+    return next.value;
+  };
+  return {
+    confirm: async (question) => {
+      process.stdout.write(`   ? ${question} [Y/n] `);
+      const value = await readLine();
+      if (value === null) {
+        process.stdout.write("(stdin ended; taking the default)\n");
+        return true;
+      }
+      return !value.trim().toLowerCase().startsWith("n");
+    },
+    ask: async (question, preset) => {
+      process.stdout.write(`   ? ${question} [${preset}] `);
+      const value = await readLine();
+      if (value === null || value.trim() === "") return preset;
+      return value.trim();
+    },
+    askSecret: async (question) => {
+      process.stdout.write(
+        `   ? ${question} (never echoed back in full; press enter for a placeholder) `,
+      );
+      const value = await readLine(false);
+      if (value === null || value.trim() === "") return PLACEHOLDER_TOKEN;
+      return value.trim();
+    },
   };
 }
 
@@ -122,18 +172,24 @@ async function main() {
     env,
     fast: options.fast,
     tailscaleOverride: options.tailscale,
-    projectId: "proj_demo_bb_src",
-    environmentId: "env_demo_default",
-    fallbackProviderId: "claude-code",
-    confirm:
-      rl === null
-        ? createScriptedConfirm(!options.declineAll)
-        : createInteractiveConfirm(rl),
+    externalAgent: {
+      name: options.agentName,
+      url: options.agentUrl,
+      token: PLACEHOLDER_TOKEN,
+    },
+    interactive: options.interactive,
+    ...(rl === null
+      ? {
+          confirm: createScriptedConfirm(!options.declineAll),
+          ask: createScriptedAsk(),
+          askSecret: createScriptedAskSecret(),
+        }
+      : createInteractivePrompts(rl)),
   };
 
   banner(
     "bb onboarding auto-connect prototype",
-    "Four proposed steps, run end to end. Prototype quality: mocked where a real service is out of scope.",
+    "Three proposed steps, run end to end. Prototype quality: mocked where a real service is out of scope.",
   );
   blank();
   say(
@@ -147,14 +203,9 @@ async function main() {
 
   try {
     const account = await stepAccountFirstMachine(ctx);
-    const companions = await stepCompanionAgents(ctx);
+    const agents = await stepConnectAgents(ctx);
     const tailscale = await stepTailscale(ctx);
-    const personalAgent = await stepPersonalAgent(ctx, {
-      account,
-      companions,
-      tailscale,
-    });
-    summary({ account, companions, tailscale, personalAgent });
+    summary({ account, agents, tailscale });
   } finally {
     rl?.close();
   }
