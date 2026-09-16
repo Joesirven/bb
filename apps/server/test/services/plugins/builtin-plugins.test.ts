@@ -201,6 +201,7 @@ describe("builtin plugin reconciliation", () => {
       ["connect", "Smartphone"],
       ["custom-instructions", "EditFile"],
       ["inline-vis", "AppWindow"],
+      ["pomodoro", "Timer"],
       ["secrets", "Lock"],
       ["side-chat", "SideChat"],
       ["workflows", "Workflow"],

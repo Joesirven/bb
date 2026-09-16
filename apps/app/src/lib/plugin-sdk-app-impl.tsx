@@ -1,5 +1,10 @@
 import { useMemo } from "react";
-import type { MarkdownProps, PluginSdkApp } from "@bb/plugin-sdk";
+import type {
+  MarkdownProps,
+  PluginDesktopFloatingWindow,
+  PluginDesktopTray,
+  PluginSdkApp,
+} from "@bb/plugin-sdk";
 import { PluginNewThreadComposer } from "@/components/plugin/PluginNewThreadComposer";
 import { PluginThreadChat } from "@/components/plugin/PluginThreadChat";
 import { MarkdownPreview } from "@/components/ui/markdown-preview";
@@ -8,7 +13,12 @@ import type {
   MarkdownLocalFileLinkRouting,
 } from "@/components/ui/markdown-link-routing";
 import { useThreadTimelineNavigation } from "@/components/thread/timeline/ThreadTimelineNavigationContext";
+import {
+  getDesktopFloatingWindowApi,
+  getDesktopTrayApi,
+} from "./bb-desktop-tray";
 import { definePluginApp } from "./plugin-app-definition";
+import { getPluginSlotSnapshot } from "./plugin-slots";
 import {
   useBbContext,
   useBbNavigate,
@@ -25,6 +35,90 @@ import {
   useSidebarThreads,
 } from "./plugin-sidebar-hooks";
 import { useSidebarThreadSplit } from "./plugin-sidebar-split";
+
+/**
+ * `experimental_desktopTray()` — a plain factory (not a hook, per the SDK
+ * contract), so plain JS content-script code can call it too. bb's tray is a
+ * single, app-wide macOS menu-bar icon: there is no per-plugin scoping, only
+ * "whoever last called setState owns it," which the desktop main process
+ * enforces (desktop-tray.ts).
+ */
+function createDesktopTray(): PluginDesktopTray {
+  const api = getDesktopTrayApi();
+  if (api === null) {
+    return {
+      available: false,
+      setState: () => {},
+      clear: () => {},
+      onActivate: () => () => {},
+    };
+  }
+  return {
+    available: true,
+    setState: (state) => {
+      api.setState(state);
+    },
+    clear: () => {
+      api.clear();
+    },
+    onActivate: (handler) => api.onActivate(handler),
+  };
+}
+
+/**
+ * `experimental_desktopFloatingWindow()` — a plain factory (not a hook), so
+ * plain JS content-script code can call it too. Resolves `windowId` against
+ * the live `experimental_floatingWindow` slot snapshot (a plain data read, no
+ * React) to find the registering plugin and its `path`/`defaultSize`, then
+ * forwards to the desktop bridge. A `windowId` shared by two different
+ * plugins is not disambiguated in this pass (see docs/api_to_audit.md).
+ */
+function createDesktopFloatingWindow(): PluginDesktopFloatingWindow {
+  const api = getDesktopFloatingWindowApi();
+  if (api === null) {
+    return {
+      available: false,
+      open: () => {},
+      close: () => {},
+    };
+  }
+  function findRegistration(windowId: string) {
+    const registration = getPluginSlotSnapshot().floatingWindows.find(
+      (candidate) => candidate.id === windowId,
+    );
+    if (registration === undefined) {
+      console.warn(
+        `experimental_desktopFloatingWindow: no experimental_floatingWindow registration with id ${JSON.stringify(
+          windowId,
+        )}`,
+      );
+    }
+    return registration;
+  }
+  return {
+    available: true,
+    open: (windowId) => {
+      const registration = findRegistration(windowId);
+      if (registration === undefined) return;
+      api.open({
+        pluginId: registration.pluginId,
+        windowId,
+        path: registration.path,
+        ...(registration.defaultSize !== undefined
+          ? {
+              width: registration.defaultSize.width,
+              height: registration.defaultSize.height,
+            }
+          : {}),
+      });
+    },
+    close: (windowId) => {
+      const registration = findRegistration(windowId);
+      if (registration === undefined) return;
+      api.close({ pluginId: registration.pluginId, windowId });
+    },
+  };
+}
 
 /**
  * The real `@bb/plugin-sdk/app` surface (plugin design §5.2), assigned to
@@ -64,6 +158,10 @@ export const pluginSdkAppImplementation = {
   experimental_useSidebarThreadActions: useSidebarThreadActions,
   experimental_useSidebarThreadPullRequest: useSidebarThreadPullRequest,
   experimental_useSidebarThreadSplit: useSidebarThreadSplit,
+  // Experimental (see docs/api_to_audit.md): bb's macOS menu-bar tray icon
+  // and always-on-top floating windows.
+  experimental_desktopTray: createDesktopTray,
+  experimental_desktopFloatingWindow: createDesktopFloatingWindow,
 } satisfies PluginSdkApp;
 
 /**

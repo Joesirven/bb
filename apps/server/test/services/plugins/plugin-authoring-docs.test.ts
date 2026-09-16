@@ -9,6 +9,7 @@ import {
   type PluginContentScriptContext,
   type PluginContentScriptRegistration,
   type PluginFileOpenerProps,
+  type PluginFloatingWindowProps,
   type PluginHomepageSectionProps,
   type PluginHttpAuthMode,
   type PluginMessageActionContext,
@@ -161,6 +162,7 @@ type SlotPropsByName = {
   fileOpener: PluginFileOpenerProps;
   messageDirective: PluginMessageDirectiveProps;
   messageAction: PluginMessageActionContext;
+  experimental_floatingWindow: PluginFloatingWindowProps;
 };
 
 type MissingSlot = Exclude<keyof PluginAppSlots, keyof SlotPropsByName>;
@@ -244,6 +246,7 @@ const FRONTEND_SLOT_PROP_FIELDS = {
     "selectedText",
     "openPanel",
   ],
+  experimental_floatingWindow: [],
 } as const satisfies {
   [S in keyof SlotPropsByName]: readonly (keyof SlotPropsByName[S])[];
 };

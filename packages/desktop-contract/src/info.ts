@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { BbDesktopBrowserApi } from "./browser.js";
+import type { BbDesktopFloatingWindowApi } from "./floating-window.js";
+import type { BbDesktopTrayApi } from "./tray.js";
 import type { AppCommandId } from "@bb/domain";
 
 const isoUtcDateTimeSchema = z.iso.datetime();
@@ -58,6 +60,18 @@ export interface BbDesktopApi extends BbDesktopInfo {
    * construction.
    */
   browser: BbDesktopBrowserApi;
+  /**
+   * Control surface for bb's single macOS menu-bar tray icon. Optional for
+   * version skew with desktop shells that predate this bridge; callers must
+   * feature-detect and treat its absence as unavailable.
+   */
+  experimental_tray?: BbDesktopTrayApi;
+  /**
+   * Control surface for opening/closing plugin floating windows. Optional for
+   * version skew with desktop shells that predate this bridge; callers must
+   * feature-detect and treat its absence as unavailable.
+   */
+  experimental_floatingWindow?: BbDesktopFloatingWindowApi;
   checkForUpdates(): Promise<BbDesktopInfo>;
   getInfo(): Promise<BbDesktopInfo>;
   /**

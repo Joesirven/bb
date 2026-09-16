@@ -937,6 +937,34 @@ the sidebar.
 menu from `experimental_useSidebarThreadActions` — it exposes everything bb's
 own menu does, including `requestDelete`, which opens bb's confirmation.
 
+### Desktop tray and floating windows
+
+`experimental_desktopTray()` and `experimental_desktopFloatingWindow()` are
+plain factory functions (not hooks — plain content-script code can call them
+too), returning `{ available, ... }`. `available` is `false` on the web
+build, non-macOS, or an older desktop build whose preload predates the
+bridge; every method no-ops in that case, so call sites never need to branch
+on platform themselves.
+
+```ts
+const tray = experimental_desktopTray();
+tray.setState({ title: "23:59", tooltip: "Pomodoro", menuItems: [{ id: "pause", label: "Pause" }] });
+tray.onActivate((itemId) => { /* itemId is the clicked menu item's id, or null for a plain icon click */ });
+tray.clear();
+
+const floating = experimental_desktopFloatingWindow();
+floating.open("timer"); // "timer" matches an experimental_floatingWindow registration's id
+floating.close("timer");
+```
+
+bb has exactly one shared macOS menu-bar `Tray` icon: whichever plugin last
+called `setState` owns its title/tooltip/menu until it calls `clear()` or
+another plugin overwrites it — there is no per-plugin arbitration yet.
+`experimental_desktopFloatingWindow().open` resolves the registering
+plugin's `experimental_floatingWindow` slot registration and asks bb's
+desktop shell to open (or focus, if already open) that route in a real,
+always-on-top `BrowserWindow`. Experimental: see docs/api_to_audit.md.
+
 **Keyboard support is a DOM contract.** bb's thread shortcuts find rows by
 query selector, not by React state. Put both attributes on each row's anchor or
 the surface-specific numbered shortcuts, `thread.next`, and `thread.previous`
@@ -1128,6 +1156,16 @@ openWorkspaceFile }` — register a leaf
   `useBbNavigate().openThreadPanel`. Errors from `run` (sync or
   async) are contained and
   logged, never breaking the timeline.
+- `experimental_floatingWindow` → a chrome-free route
+  (`/plugins/<pluginId>/floating/<path>`) rendered with NO `AppLayout`,
+  sidebar, or header — the same way the auth-callback route renders no app
+  shell. Registration: `{ id, path, component, defaultSize? }`; `path` is the
+  URL segment (letters, digits, `-`, `_`) and `defaultSize` is an optional
+  `{ width, height }` seed. bb's macOS desktop shell can load this route
+  directly into a secondary, always-on-top `BrowserWindow` when a plugin
+  calls `experimental_desktopFloatingWindow().open(id)` (see below); off
+  desktop the route still resolves, it just does not float or stay on top.
+  Experimental: see docs/api_to_audit.md.
 
 Host components:
 

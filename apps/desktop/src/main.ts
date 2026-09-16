@@ -24,7 +24,10 @@ import {
 import type { ConnectCredential } from "@bb/connect-client";
 import type { AppKeybindings } from "@bb/domain";
 import {
+  bbDesktopFloatingWindowCloseRequestSchema,
+  bbDesktopFloatingWindowOpenRequestSchema,
   bbDesktopThemeSchema,
+  bbDesktopTraySetStateRequestSchema,
   type BbDesktopInfo,
   type BbDesktopWindowState,
 } from "@bb/desktop-contract";
@@ -144,6 +147,23 @@ import {
 } from "./desktop-browser-view.js";
 import { resolveDesktopBrowserAppCommand } from "./desktop-browser-shortcuts.js";
 import { registerDesktopBrowserIpc } from "./desktop-browser-main-ipc.js";
+import {
+  createDesktopTrayManager,
+  type DesktopTrayManager,
+} from "./desktop-tray.js";
+import {
+  BB_DESKTOP_TRAY_ACTIVATED_CHANNEL,
+  BB_DESKTOP_TRAY_CLEAR_CHANNEL,
+  BB_DESKTOP_TRAY_SET_STATE_CHANNEL,
+} from "./desktop-tray-ipc.js";
+import {
+  createDesktopFloatingWindowManager,
+  type DesktopFloatingWindowManager,
+} from "./desktop-floating-window.js";
+import {
+  BB_DESKTOP_FLOATING_WINDOW_CLOSE_CHANNEL,
+  BB_DESKTOP_FLOATING_WINDOW_OPEN_CHANNEL,
+} from "./desktop-floating-window-ipc.js";
 import { ensurePackagedMacOsUserShellPath } from "./desktop-shell-path.js";
 import { clearPackagedSessionHttpCache } from "./desktop-session-cache.js";
 import { resolveDesktopReloadShortcut } from "./desktop-reload-shortcut.js";
@@ -287,6 +307,8 @@ const logViewerCopyRequestSchema = z
 
 let desktopWindowFactory: DesktopWindowFactory | null = null;
 let desktopBrowserViewManager: DesktopBrowserViewManager | null = null;
+let desktopTrayManager: DesktopTrayManager | null = null;
+let desktopFloatingWindowManager: DesktopFloatingWindowManager | null = null;
 let currentAppKeybindings: AppKeybindings = [];
 let currentApplicationMenuAccelerators = DEFAULT_APPLICATION_MENU_ACCELERATORS;
 let desktopUpdateService: DesktopUpdateService | null = null;
@@ -1518,8 +1540,63 @@ async function finishQuit(): Promise<void> {
   desktopUpdateService?.stop();
   desktopAutoUpdateService?.stop();
   desktopBrowserViewManager?.destroyAll();
+  desktopFloatingWindowManager?.disposeAll();
+  desktopTrayManager?.dispose();
   await desktopWindowFactory?.persistOpenWindows();
   await stopOwnedRuntime();
+}
+
+/**
+ * Wire bb's single macOS menu-bar tray icon and plugin floating windows
+ * (plugin design: `experimental_desktopTray` / `experimental_desktopFloatingWindow`).
+ * Registered once at startup regardless of platform — the managers
+ * themselves no-op off darwin / before a server URL is known.
+ */
+function registerDesktopTrayAndFloatingWindowIpc(
+  iconPath: string,
+  preloadPath: string,
+): void {
+  desktopTrayManager = createDesktopTrayManager({
+    iconPath,
+    onActivated(itemId) {
+      for (const browserWindow of BrowserWindow.getAllWindows()) {
+        browserWindow.webContents.send(BB_DESKTOP_TRAY_ACTIVATED_CHANNEL, {
+          itemId,
+        });
+      }
+    },
+  });
+  desktopFloatingWindowManager = createDesktopFloatingWindowManager({
+    preloadPath,
+    getServerBaseUrl: () => currentWindowUrl,
+  });
+
+  ipcMain.on(BB_DESKTOP_TRAY_SET_STATE_CHANNEL, (_event, payload: unknown) => {
+    const parsed = bbDesktopTraySetStateRequestSchema.safeParse(payload);
+    if (!parsed.success) return;
+    desktopTrayManager?.setState(parsed.data);
+  });
+  ipcMain.on(BB_DESKTOP_TRAY_CLEAR_CHANNEL, () => {
+    desktopTrayManager?.clear();
+  });
+  ipcMain.on(
+    BB_DESKTOP_FLOATING_WINDOW_OPEN_CHANNEL,
+    (_event, payload: unknown) => {
+      const parsed = bbDesktopFloatingWindowOpenRequestSchema.safeParse(payload);
+      if (!parsed.success) return;
+      desktopFloatingWindowManager?.open(parsed.data);
+    },
+  );
+  ipcMain.on(
+    BB_DESKTOP_FLOATING_WINDOW_CLOSE_CHANNEL,
+    (_event, payload: unknown) => {
+      const parsed = bbDesktopFloatingWindowCloseRequestSchema.safeParse(
+        payload,
+      );
+      if (!parsed.success) return;
+      desktopFloatingWindowManager?.close(parsed.data);
+    },
+  );
 }
 
 function registerDesktopUpdateIpc(): void {
@@ -2167,6 +2244,7 @@ async function runDesktopApp(): Promise<void> {
     },
   });
   registerDesktopBrowserIpc(desktopBrowserViewManager);
+  registerDesktopTrayAndFloatingWindowIpc(iconPath, preloadPath);
   desktopUpdateService.start();
   desktopAutoUpdateService.start();
 

@@ -8,6 +8,7 @@ import {
 } from "react-router-dom";
 import { AppLayout } from "./components/layout/AppLayout";
 import { AuthCallbackView } from "./views/AuthCallbackView";
+import { FloatingWindowView } from "./views/FloatingWindowView";
 import { QuickCreateProjectProvider } from "./hooks/useQuickCreateProject";
 import { RouteNavigationProvider } from "./components/ui/app-route-anchor";
 import { useAppTheme } from "./hooks/useAppTheme";
@@ -17,6 +18,7 @@ import { usePluginFrontendBoot } from "./hooks/usePluginFrontendBoot";
 import { useWebSocket } from "./hooks/useWebSocket";
 import {
   AUTH_CALLBACK_ROUTE_PATH,
+  FLOATING_WINDOW_ROUTE_PATH,
   LEGACY_AUTOMATION_DETAIL_ROUTE_PATH,
   LEGACY_AUTOMATIONS_ROUTE_PATH,
   LEGACY_SKILLS_ROUTE_PATH,
@@ -53,6 +55,10 @@ import { OnboardingHost } from "@/components/onboarding/OnboardingHost";
 import { ProviderCliInstallLogDialogHost } from "./components/provider-cli/provider-cli-install";
 import { ToolsExperimentGate } from "./components/tools/ToolsExperimentGate";
 import { PluginSettingsCompatibilityRoute } from "./components/settings/PluginSettingsCompatibilityRoute";
+import {
+  RouteChunkBoundary,
+  RouteChunkFallback,
+} from "./components/layout/RouteChunkBoundary";
 
 const SettingsView = lazy(() =>
   import("./views/SettingsView").then((m) => ({
@@ -136,112 +142,118 @@ export function LegacyPluginBrowseRedirect() {
 function AppRoutes() {
   return (
     <AppLayout>
-      <Suspense fallback={null}>
-        <Routes>
-          <Route path={SETTINGS_ROUTE_PATH} element={<SettingsView />} />
-          <Route
-            path={SETTINGS_SECTION_ROUTE_PATH}
-            element={<SettingsView />}
-          />
-          <Route
-            path={SETTINGS_PLUGINS_ROUTE_PATH}
-            element={
-              <PluginSettingsCompatibilityRoute>
-                <SettingsView />
-              </PluginSettingsCompatibilityRoute>
-            }
-          />
-          <Route
-            path={SETTINGS_PLUGIN_ROUTE_PATH}
-            element={
-              <PluginSettingsCompatibilityRoute>
-                <SettingsView />
-              </PluginSettingsCompatibilityRoute>
-            }
-          />
-          <Route
-            path={SETTINGS_MACHINE_ROUTE_PATH}
-            element={<MachineSettingsView />}
-          />
-          <Route
-            path={SETTINGS_PROVIDER_ROUTE_PATH}
-            element={<SettingsView />}
-          />
-          <Route
-            path={PROJECT_SETTINGS_ROUTE_PATH}
-            element={<ProjectSettingsView />}
-          />
-          <Route
-            path={PROJECT_ARCHIVED_ROUTE_PATH}
-            element={<Navigate to={getSettingsRoutePath("archived")} replace />}
-          />
-          <Route
-            path={PROJECTLESS_ARCHIVED_ROUTE_PATH}
-            element={<Navigate to={getSettingsRoutePath("archived")} replace />}
-          />
-          <Route
-            path={LEGACY_TOOLS_AUTOMATIONS_ROUTE_PATH}
-            element={<LegacyAutomationCollectionRedirect />}
-          />
-          <Route
-            path={LEGACY_TOOLS_AUTOMATION_BROWSE_ROUTE_PATH}
-            element={<LegacyAutomationCollectionRedirect />}
-          />
-          <Route
-            path={LEGACY_TOOLS_AUTOMATION_DETAIL_ROUTE_PATH}
-            element={<LegacyAutomationDetailRedirect />}
-          />
-          <Route
-            path={LEGACY_TOOLS_AUTOMATION_EDIT_ROUTE_PATH}
-            element={<LegacyAutomationDetailRedirect />}
-          />
-          <Route
-            path={LEGACY_AUTOMATIONS_ROUTE_PATH}
-            element={<LegacyAutomationCollectionRedirect />}
-          />
-          <Route
-            path={LEGACY_AUTOMATION_DETAIL_ROUTE_PATH}
-            element={<LegacyAutomationDetailRedirect />}
-          />
-          <Route element={<ToolsExperimentGate />}>
+      <RouteChunkBoundary>
+        <Suspense fallback={<RouteChunkFallback />}>
+          <Routes>
+            <Route path={SETTINGS_ROUTE_PATH} element={<SettingsView />} />
             <Route
-              path={TOOLS_ROUTE_PATH}
-              element={<ExtensionsLandingRedirect />}
-            />
-            <Route path={SKILLS_ROUTE_PATH} element={<ToolsView />} />
-            <Route
-              path={TOOLS_SKILL_DETAIL_ROUTE_PATH}
-              element={<ToolsView />}
+              path={SETTINGS_SECTION_ROUTE_PATH}
+              element={<SettingsView />}
             />
             <Route
-              path={LEGACY_TOOLS_SKILL_DETAIL_ROUTE_PATH}
-              element={<LegacySkillDetailRedirect />}
+              path={SETTINGS_PLUGINS_ROUTE_PATH}
+              element={
+                <PluginSettingsCompatibilityRoute>
+                  <SettingsView />
+                </PluginSettingsCompatibilityRoute>
+              }
             />
             <Route
-              path={TOOLS_REGISTRY_SKILLS_ROUTE_PATH}
-              element={<ToolsView />}
+              path={SETTINGS_PLUGIN_ROUTE_PATH}
+              element={
+                <PluginSettingsCompatibilityRoute>
+                  <SettingsView />
+                </PluginSettingsCompatibilityRoute>
+              }
             />
             <Route
-              path={TOOLS_REGISTRY_SKILL_DETAIL_ROUTE_PATH}
-              element={<ToolsView />}
-            />
-            <Route path={TOOLS_PLUGINS_ROUTE_PATH} element={<ToolsView />} />
-            <Route
-              path={TOOLS_PLUGIN_BROWSE_ROUTE_PATH}
-              element={<LegacyPluginBrowseRedirect />}
+              path={SETTINGS_MACHINE_ROUTE_PATH}
+              element={<MachineSettingsView />}
             />
             <Route
-              path={TOOLS_PLUGIN_DETAIL_ROUTE_PATH}
-              element={<ToolsView />}
+              path={SETTINGS_PROVIDER_ROUTE_PATH}
+              element={<SettingsView />}
             />
             <Route
-              path={LEGACY_SKILLS_ROUTE_PATH}
-              element={<Navigate to={SKILLS_ROUTE_PATH} replace />}
+              path={PROJECT_SETTINGS_ROUTE_PATH}
+              element={<ProjectSettingsView />}
             />
-          </Route>
-          <Route path="*" element={<SplitWorkspaceRoute />} />
-        </Routes>
-      </Suspense>
+            <Route
+              path={PROJECT_ARCHIVED_ROUTE_PATH}
+              element={
+                <Navigate to={getSettingsRoutePath("archived")} replace />
+              }
+            />
+            <Route
+              path={PROJECTLESS_ARCHIVED_ROUTE_PATH}
+              element={
+                <Navigate to={getSettingsRoutePath("archived")} replace />
+              }
+            />
+            <Route
+              path={LEGACY_TOOLS_AUTOMATIONS_ROUTE_PATH}
+              element={<LegacyAutomationCollectionRedirect />}
+            />
+            <Route
+              path={LEGACY_TOOLS_AUTOMATION_BROWSE_ROUTE_PATH}
+              element={<LegacyAutomationCollectionRedirect />}
+            />
+            <Route
+              path={LEGACY_TOOLS_AUTOMATION_DETAIL_ROUTE_PATH}
+              element={<LegacyAutomationDetailRedirect />}
+            />
+            <Route
+              path={LEGACY_TOOLS_AUTOMATION_EDIT_ROUTE_PATH}
+              element={<LegacyAutomationDetailRedirect />}
+            />
+            <Route
+              path={LEGACY_AUTOMATIONS_ROUTE_PATH}
+              element={<LegacyAutomationCollectionRedirect />}
+            />
+            <Route
+              path={LEGACY_AUTOMATION_DETAIL_ROUTE_PATH}
+              element={<LegacyAutomationDetailRedirect />}
+            />
+            <Route element={<ToolsExperimentGate />}>
+              <Route
+                path={TOOLS_ROUTE_PATH}
+                element={<ExtensionsLandingRedirect />}
+              />
+              <Route path={SKILLS_ROUTE_PATH} element={<ToolsView />} />
+              <Route
+                path={TOOLS_SKILL_DETAIL_ROUTE_PATH}
+                element={<ToolsView />}
+              />
+              <Route
+                path={LEGACY_TOOLS_SKILL_DETAIL_ROUTE_PATH}
+                element={<LegacySkillDetailRedirect />}
+              />
+              <Route
+                path={TOOLS_REGISTRY_SKILLS_ROUTE_PATH}
+                element={<ToolsView />}
+              />
+              <Route
+                path={TOOLS_REGISTRY_SKILL_DETAIL_ROUTE_PATH}
+                element={<ToolsView />}
+              />
+              <Route path={TOOLS_PLUGINS_ROUTE_PATH} element={<ToolsView />} />
+              <Route
+                path={TOOLS_PLUGIN_BROWSE_ROUTE_PATH}
+                element={<LegacyPluginBrowseRedirect />}
+              />
+              <Route
+                path={TOOLS_PLUGIN_DETAIL_ROUTE_PATH}
+                element={<ToolsView />}
+              />
+              <Route
+                path={LEGACY_SKILLS_ROUTE_PATH}
+                element={<Navigate to={SKILLS_ROUTE_PATH} replace />}
+              />
+            </Route>
+            <Route path="*" element={<SplitWorkspaceRoute />} />
+          </Routes>
+        </Suspense>
+      </RouteChunkBoundary>
     </AppLayout>
   );
 }
@@ -268,6 +280,14 @@ export function App() {
             <Route
               path={AUTH_CALLBACK_ROUTE_PATH}
               element={<AuthCallbackView />}
+            />
+            {/* Chrome-free, like the auth callback above: bb's own desktop
+                shell loads this route directly into a secondary always-on-top
+                BrowserWindow (see apps/desktop's desktop-floating-window.ts),
+                so it renders no app shell either. */}
+            <Route
+              path={FLOATING_WINDOW_ROUTE_PATH}
+              element={<FloatingWindowView />}
             />
             <Route path="*" element={<AppRoutes />} />
           </Routes>

@@ -834,6 +834,31 @@ interface PluginMessageActionRegistration {
      */
     run(context: PluginMessageActionContext): void | Promise<void>;
 }
+/**
+ * Props passed to an `experimental_floatingWindow` component. Deliberately
+ * empty in V1 — chrome-free, no host wrapper.
+ */
+interface PluginFloatingWindowProps {
+}
+/**
+ * Register an always-on-top, chrome-free floating window (see
+ * {@link PluginDesktopFloatingWindow}). Rendered wholesale by the plugin's
+ * `component` — no sidebar, no header, no host wrapper. A host without a
+ * floating-window backend (web, other OS, older desktop build) never mounts
+ * it.
+ */
+interface PluginFloatingWindowRegistration {
+    /** Unique within the plugin; letters, digits, `-`, `_`. */
+    id: string;
+    /** URL segment under `/plugins/<pluginId>/floating/`; letters, digits, `-`, `_`. */
+    path: string;
+    component: ComponentType<PluginFloatingWindowProps>;
+    /** Suggested native window size; a host without a floating-window backend ignores this. */
+    defaultSize?: {
+        width: number;
+        height: number;
+    };
+}
 interface PluginAppSlots {
     homepageSection(registration: PluginHomepageSectionRegistration): void;
     settingsSection(registration: PluginSettingsSectionRegistration): void;
@@ -856,6 +881,12 @@ interface PluginAppSlots {
     fileOpener(registration: PluginFileOpenerRegistration): void;
     messageDirective(registration: PluginMessageDirectiveRegistration): void;
     messageAction(registration: PluginMessageActionRegistration): void;
+    /**
+     * Register an always-on-top floating window (see
+     * {@link PluginFloatingWindowRegistration}). Experimental: see
+     * docs/api_to_audit.md.
+     */
+    experimental_floatingWindow(registration: PluginFloatingWindowRegistration): void;
 }
 interface PluginAppComposer {
     customize(registration: ComposerCustomization): void;
@@ -1351,6 +1382,42 @@ interface BbNavigate {
         params?: JsonValue;
     }): boolean;
 }
+interface PluginDesktopTrayMenuItem {
+    id: string;
+    label: string;
+}
+/** Desired state of bb's single macOS menu-bar tray icon. */
+interface PluginDesktopTrayState {
+    /** Menu-bar text next to the icon (macOS `Tray.setTitle`). */
+    title?: string;
+    tooltip?: string;
+    menuItems?: readonly PluginDesktopTrayMenuItem[];
+}
+/**
+ * Control surface for bb's single macOS menu-bar tray icon. The tray is a
+ * shared, app-wide resource: the last plugin to call `setState` owns its
+ * contents, and `onActivate` delivers clicks back regardless of which plugin
+ * is currently subscribed.
+ */
+interface PluginDesktopTray {
+    /** False outside bb's macOS desktop app (web, other OS, older desktop build). */
+    readonly available: boolean;
+    setState(state: PluginDesktopTrayState): void;
+    clear(): void;
+    /** Fires when the user clicks a menu item (its `id`) or the tray icon itself (`null`). */
+    onActivate(handler: (itemId: string | null) => void): () => void;
+}
+/**
+ * Control surface for opening/closing this plugin's `experimental_floatingWindow`
+ * registrations as native always-on-top windows.
+ */
+interface PluginDesktopFloatingWindow {
+    /** False outside bb's macOS desktop app (web, other OS, older desktop build). */
+    readonly available: boolean;
+    /** `windowId` must match an `experimental_floatingWindow` registration's `id` from the SAME plugin. */
+    open(windowId: string): void;
+    close(windowId: string): void;
+}
 /**
  * Everything `@bb/plugin-sdk/app` resolves to at runtime. The BB app builds
  * the real implementation and `satisfies` this interface; `bb plugin build`
@@ -1420,6 +1487,17 @@ interface PluginSdkApp {
      */
     experimental_NewThreadComposer: ComponentType<NewThreadComposerProps>;
     useComposerView(): ComposerView;
+    /**
+     * bb's single macOS menu-bar tray icon (see {@link PluginDesktopTray}).
+     * Experimental: see docs/api_to_audit.md.
+     */
+    experimental_desktopTray(): PluginDesktopTray;
+    /**
+     * Open/close this plugin's `experimental_floatingWindow` registrations as
+     * native always-on-top windows (see {@link PluginDesktopFloatingWindow}).
+     * Experimental: see docs/api_to_audit.md.
+     */
+    experimental_desktopFloatingWindow(): PluginDesktopFloatingWindow;
 }
 
 declare const definePluginApp: (setup: PluginAppSetup) => PluginAppDefinition;
@@ -1438,6 +1516,8 @@ declare const experimental_useSidebarThreads: () => PluginSidebarThreadsState;
 declare const experimental_useSidebarThreadActions: () => PluginSidebarThreadActions;
 declare const experimental_useSidebarThreadPullRequest: (threadId: string) => PluginSidebarThreadPullRequestState;
 declare const experimental_useSidebarThreadSplit: (threadId: string) => PluginSidebarThreadSplit;
+declare const experimental_desktopTray: () => PluginDesktopTray;
+declare const experimental_desktopFloatingWindow: () => PluginDesktopFloatingWindow;
 
-export { Markdown, ThreadChat, definePluginApp, experimental_NewThreadComposer, experimental_useSidebarThreadActions, experimental_useSidebarThreadPullRequest, experimental_useSidebarThreadSplit, experimental_useSidebarThreads, useBbContext, useBbNavigate, useComposer, useComposerView, useRealtime, useRealtimeConnectionState, useRpc, useSettings };
-export type { BbContext, BbNavigate, ComposerCustomization, ComposerPlusMenuItem, ComposerRichTextSpec, ComposerStructuredDraft, ComposerView, JsonValue, MarkdownProps, NewThreadComposerProps, NewThreadRequest, PluginAppBuilder, PluginAppComposer, PluginAppContentScripts, PluginAppDefinition, PluginAppSetup, PluginAppSlots, PluginComposerApi, PluginComposerMention, PluginComposerScope, PluginComposerTextEffect, PluginComposerThreadRowStatus, PluginContentScriptContext, PluginContentScriptDisposer, PluginContentScriptRegistration, PluginFileOpenerProps, PluginFileOpenerRegistration, PluginFileOpenerSource, PluginHomepageSectionProps, PluginHomepageSectionRegistration, PluginMessageActionContext, PluginMessageActionRegistration, PluginMessageActionThreadPanelOptions, PluginMessageDirectiveMessage, PluginMessageDirectiveOpenWorkspaceFile, PluginMessageDirectiveProps, PluginMessageDirectiveRegistration, PluginNavPanelProps, PluginNavPanelRegistration, PluginPendingInteractionProps, PluginPendingInteractionRegistration, PluginPendingInteractionView, PluginRealtimeConnectionState, PluginRpcCallArgs, PluginRpcClient, PluginRpcContract, PluginRpcError, PluginRpcErrorCode, PluginRpcHandlers, PluginRpcIssuePathSegment, PluginRpcMethodContract, PluginRpcResult, PluginRpcValidationIssue, PluginSdkApp, PluginSettingsSectionProps, PluginSettingsSectionRegistration, PluginSettingsState, PluginSidebarFooterActionContext, PluginSidebarFooterActionProps, PluginSidebarFooterActionRegistration, PluginSidebarProject, PluginSidebarPullRequest, PluginSidebarSplitPane, PluginSidebarThread, PluginSidebarThreadActions, PluginSidebarThreadActivity, PluginSidebarThreadIndicator, PluginSidebarThreadPullRequestState, PluginSidebarThreadSplit, PluginSidebarThreadsState, PluginSidebarWorkspaceKind, PluginThreadHeaderActionProps, PluginThreadHeaderActionRegistration, PluginThreadListProps, PluginThreadListRegistration, PluginThreadPanelActionContext, PluginThreadPanelActionRegistration, PluginThreadPanelProps, StandardSchemaV1, StandardSchemaV1InferInput, StandardSchemaV1InferOutput, StandardSchemaV1Issue, StandardSchemaV1Result, ThreadChatMessageAction, ThreadChatMessageReference, ThreadChatProps };
+export { Markdown, ThreadChat, definePluginApp, experimental_NewThreadComposer, experimental_desktopFloatingWindow, experimental_desktopTray, experimental_useSidebarThreadActions, experimental_useSidebarThreadPullRequest, experimental_useSidebarThreadSplit, experimental_useSidebarThreads, useBbContext, useBbNavigate, useComposer, useComposerView, useRealtime, useRealtimeConnectionState, useRpc, useSettings };
+export type { BbContext, BbNavigate, ComposerCustomization, ComposerPlusMenuItem, ComposerRichTextSpec, ComposerStructuredDraft, ComposerView, JsonValue, MarkdownProps, NewThreadComposerProps, NewThreadRequest, PluginAppBuilder, PluginAppComposer, PluginAppContentScripts, PluginAppDefinition, PluginAppSetup, PluginAppSlots, PluginComposerApi, PluginComposerMention, PluginComposerScope, PluginComposerTextEffect, PluginComposerThreadRowStatus, PluginContentScriptContext, PluginContentScriptDisposer, PluginContentScriptRegistration, PluginDesktopFloatingWindow, PluginDesktopTray, PluginDesktopTrayMenuItem, PluginDesktopTrayState, PluginFileOpenerProps, PluginFileOpenerRegistration, PluginFileOpenerSource, PluginFloatingWindowProps, PluginFloatingWindowRegistration, PluginHomepageSectionProps, PluginHomepageSectionRegistration, PluginMessageActionContext, PluginMessageActionRegistration, PluginMessageActionThreadPanelOptions, PluginMessageDirectiveMessage, PluginMessageDirectiveOpenWorkspaceFile, PluginMessageDirectiveProps, PluginMessageDirectiveRegistration, PluginNavPanelProps, PluginNavPanelRegistration, PluginPendingInteractionProps, PluginPendingInteractionRegistration, PluginPendingInteractionView, PluginRealtimeConnectionState, PluginRpcCallArgs, PluginRpcClient, PluginRpcContract, PluginRpcError, PluginRpcErrorCode, PluginRpcHandlers, PluginRpcIssuePathSegment, PluginRpcMethodContract, PluginRpcResult, PluginRpcValidationIssue, PluginSdkApp, PluginSettingsSectionProps, PluginSettingsSectionRegistration, PluginSettingsState, PluginSidebarFooterActionContext, PluginSidebarFooterActionProps, PluginSidebarFooterActionRegistration, PluginSidebarProject, PluginSidebarPullRequest, PluginSidebarSplitPane, PluginSidebarThread, PluginSidebarThreadActions, PluginSidebarThreadActivity, PluginSidebarThreadIndicator, PluginSidebarThreadPullRequestState, PluginSidebarThreadSplit, PluginSidebarThreadsState, PluginSidebarWorkspaceKind, PluginThreadHeaderActionProps, PluginThreadHeaderActionRegistration, PluginThreadListProps, PluginThreadListRegistration, PluginThreadPanelActionContext, PluginThreadPanelActionRegistration, PluginThreadPanelProps, StandardSchemaV1, StandardSchemaV1InferInput, StandardSchemaV1InferOutput, StandardSchemaV1Issue, StandardSchemaV1Result, ThreadChatMessageAction, ThreadChatMessageReference, ThreadChatProps };

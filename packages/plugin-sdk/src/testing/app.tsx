@@ -25,7 +25,10 @@ import {
   type PluginComposerScope,
   type PluginComposerTextEffect,
   type PluginComposerThreadRowStatus,
+  type PluginDesktopFloatingWindow,
+  type PluginDesktopTray,
   type PluginFileOpenerRegistration,
+  type PluginFloatingWindowRegistration,
   type PluginHomepageSectionRegistration,
   type PluginMessageActionRegistration,
   type PluginMessageDirectiveRegistration,
@@ -488,6 +491,24 @@ const testPluginSdkApp = {
       };
     }, [composer, version]);
   },
+  // Plain factories (not hooks), matching the real contract. There is no
+  // desktop shell in a test environment, so both are always unavailable —
+  // the same degradation a plugin sees on the web build.
+  experimental_desktopTray(): PluginDesktopTray {
+    return {
+      available: false,
+      setState: () => {},
+      clear: () => {},
+      onActivate: () => () => {},
+    };
+  },
+  experimental_desktopFloatingWindow(): PluginDesktopFloatingWindow {
+    return {
+      available: false,
+      open: () => {},
+      close: () => {},
+    };
+  },
 } satisfies PluginSdkApp;
 
 interface PluginRuntimeHost {
@@ -525,6 +546,7 @@ export interface CapturedPluginApp {
   messageDirectives: PluginMessageDirectiveRegistration[];
   messageActions: PluginMessageActionRegistration[];
   contentScripts: PluginContentScriptRegistration[];
+  floatingWindows: PluginFloatingWindowRegistration[];
 }
 
 type PluginAppModule = { default: unknown };
@@ -555,6 +577,7 @@ function collectRegistrations(
     messageDirectives: [],
     messageActions: [],
     contentScripts: [],
+    floatingWindows: [],
   };
   const seenIds = {
     homepageSection: new Set<string>(),
@@ -570,6 +593,7 @@ function collectRegistrations(
     messageDirective: new Set<string>(),
     messageAction: new Set<string>(),
     contentScript: new Set<string>(),
+    floatingWindow: new Set<string>(),
   };
 
   definition.setup({
@@ -757,6 +781,40 @@ function collectRegistrations(
             ? { icon: requireNonEmptyString(kind, "icon", registration.icon) }
             : {}),
           run: registration.run,
+        });
+      },
+      experimental_floatingWindow(registration) {
+        const kind = "slots.experimental_floatingWindow";
+        const id = requireSlotId(kind, registration?.id);
+        requireUniqueId(kind, seenIds.floatingWindow, id);
+        const path = requireNonEmptyString(kind, "path", registration.path);
+        if (!PLUGIN_SLOT_ID_PATTERN.test(path)) {
+          throw new Error(
+            `${kind}: "path" must match ${String(PLUGIN_SLOT_ID_PATTERN)} (it becomes a URL segment), got ${JSON.stringify(path)}`,
+          );
+        }
+        let defaultSize: { width: number; height: number } | undefined;
+        if (registration.defaultSize !== undefined) {
+          const { width, height } = registration.defaultSize;
+          if (
+            typeof width !== "number" ||
+            !Number.isFinite(width) ||
+            width <= 0 ||
+            typeof height !== "number" ||
+            !Number.isFinite(height) ||
+            height <= 0
+          ) {
+            throw new Error(
+              `${kind}: "defaultSize" must have positive finite "width" and "height" when set`,
+            );
+          }
+          defaultSize = { width, height };
+        }
+        captured.floatingWindows.push({
+          id,
+          path,
+          component: requireComponent(kind, registration.component),
+          ...(defaultSize !== undefined ? { defaultSize } : {}),
         });
       },
     },

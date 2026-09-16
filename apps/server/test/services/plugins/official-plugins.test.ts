@@ -94,6 +94,7 @@ describe("official plugin registry invariants", () => {
       github: "Developer tools",
       "inline-vis": "Interface",
       memory: "Context & knowledge",
+      pomodoro: "Workflow management",
       secrets: "Developer tools",
       "side-chat": "Agent interaction",
       t3sidebar: "Interface",

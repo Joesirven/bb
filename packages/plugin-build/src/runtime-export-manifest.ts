@@ -13,6 +13,8 @@ export const RUNTIME_EXPORT_MANIFEST: Record<string, readonly string[]> = {
     "ThreadChat",
     "definePluginApp",
     "experimental_NewThreadComposer",
+    "experimental_desktopFloatingWindow",
+    "experimental_desktopTray",
     "experimental_useSidebarThreadActions",
     "experimental_useSidebarThreadPullRequest",
     "experimental_useSidebarThreadSplit",

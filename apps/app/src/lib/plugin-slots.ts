@@ -3,6 +3,7 @@ import type {
   ComposerCustomization,
   PluginPendingInteractionRegistration,
   PluginFileOpenerRegistration,
+  PluginFloatingWindowRegistration,
   PluginHomepageSectionRegistration,
   PluginMessageActionRegistration,
   PluginMessageDirectiveRegistration,
@@ -40,6 +41,8 @@ export interface PluginRegistrationSet {
   fileOpeners: readonly PluginFileOpenerRegistration[];
   messageDirectives: readonly PluginMessageDirectiveRegistration[];
   messageActions?: readonly PluginMessageActionRegistration[];
+  /** Optional for the same reason as `threadLists`: bundles built earlier. */
+  floatingWindows?: readonly PluginFloatingWindowRegistration[];
 }
 
 interface PluginSlotBase {
@@ -77,6 +80,8 @@ export interface PluginMessageDirectiveSlot
   extends PluginMessageDirectiveRegistration, PluginSlotBase {}
 export interface PluginMessageActionSlot
   extends PluginMessageActionRegistration, PluginSlotBase {}
+export interface PluginFloatingWindowSlot
+  extends PluginFloatingWindowRegistration, PluginSlotBase {}
 
 /** Flattened view across plugins, ordered by plugin id (deterministic). */
 export interface PluginSlotSnapshot {
@@ -92,6 +97,7 @@ export interface PluginSlotSnapshot {
   fileOpeners: readonly PluginFileOpenerSlot[];
   messageDirectives: readonly PluginMessageDirectiveSlot[];
   messageActions: readonly PluginMessageActionSlot[];
+  floatingWindows: readonly PluginFloatingWindowSlot[];
 }
 
 export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
@@ -107,6 +113,7 @@ export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
   fileOpeners: [],
   messageDirectives: [],
   messageActions: [],
+  floatingWindows: [],
 };
 
 const registrationsByPluginId = new Map<string, PluginRegistrationSet>();
@@ -129,6 +136,7 @@ function buildSnapshot(): PluginSlotSnapshot {
     fileOpeners: PluginFileOpenerSlot[];
     messageDirectives: PluginMessageDirectiveSlot[];
     messageActions: PluginMessageActionSlot[];
+    floatingWindows: PluginFloatingWindowSlot[];
   } = {
     homepageSections: [],
     settingsSections: [],
@@ -142,6 +150,7 @@ function buildSnapshot(): PluginSlotSnapshot {
     fileOpeners: [],
     messageDirectives: [],
     messageActions: [],
+    floatingWindows: [],
   };
   for (const pluginId of pluginIds) {
     const set = registrationsByPluginId.get(pluginId);
@@ -190,6 +199,9 @@ function buildSnapshot(): PluginSlotSnapshot {
     }
     for (const registration of set.messageActions ?? []) {
       next.messageActions.push({ ...registration, pluginId, generation });
+    }
+    for (const registration of set.floatingWindows ?? []) {
+      next.floatingWindows.push({ ...registration, pluginId, generation });
     }
   }
   return next;

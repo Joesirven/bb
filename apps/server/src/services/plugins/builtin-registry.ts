@@ -73,6 +73,12 @@ export const BUILTIN_PLUGINS = [
     category: "Interface",
   },
   {
+    name: "pomodoro",
+    pluginId: "pomodoro",
+    defaultEnabled: true,
+    category: "Workflow management",
+  },
+  {
     name: "secrets",
     pluginId: "secrets",
     defaultEnabled: true,

@@ -56,6 +56,13 @@ export const THREAD_DETAIL_ROUTE_PATH =
   "/projects/:projectId/threads/:threadId";
 // Trailing splat: the remainder is the panel's `subPath` (empty at the root).
 export const PLUGIN_PANEL_ROUTE_PATH = "/plugins/:pluginId/:panelPath/*";
+// Rendered chrome-free (no AppLayout) by a dedicated top-level <Routes> entry
+// in App.tsx, the same way AUTH_CALLBACK_ROUTE_PATH is — this route is only
+// ever loaded directly by bb's own desktop shell into a secondary
+// always-on-top BrowserWindow, never a user-facing in-app navigation target.
+// `:windowId` matches an `experimental_floatingWindow` registration's `path`.
+export const FLOATING_WINDOW_ROUTE_PATH =
+  "/plugins/:pluginId/floating/:windowId";
 
 export interface ThreadRoutePathArgs {
   projectId: string;
@@ -274,6 +281,7 @@ const baseRoutePatterns: readonly string[] = [
   PROJECTLESS_THREAD_DETAIL_ROUTE_PATH,
   THREAD_DETAIL_ROUTE_PATH,
   PLUGIN_PANEL_ROUTE_PATH,
+  FLOATING_WINDOW_ROUTE_PATH,
 ];
 
 export const ROUTE_PATTERNS = baseRoutePatterns;

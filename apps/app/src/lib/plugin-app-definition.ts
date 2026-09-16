@@ -4,6 +4,7 @@ import {
   type PluginAppSetup,
   type PluginContentScriptRegistration,
   type PluginFileOpenerRegistration,
+  type PluginFloatingWindowRegistration,
   type PluginHomepageSectionRegistration,
   type PluginMessageActionRegistration,
   type PluginMessageDirectiveRegistration,
@@ -83,6 +84,7 @@ export function collectPluginAppRegistrations(
   const messageDirectives: PluginMessageDirectiveRegistration[] = [];
   const messageActions: PluginMessageActionRegistration[] = [];
   const contentScripts: PluginContentScriptRegistration[] = [];
+  const floatingWindows: PluginFloatingWindowRegistration[] = [];
   const seenIds = {
     homepageSection: new Set<string>(),
     settingsSection: new Set<string>(),
@@ -97,6 +99,7 @@ export function collectPluginAppRegistrations(
     messageDirective: new Set<string>(),
     messageAction: new Set<string>(),
     contentScript: new Set<string>(),
+    floatingWindow: new Set<string>(),
   };
 
   definition.setup({
@@ -290,6 +293,40 @@ export function collectPluginAppRegistrations(
           run: registration.run,
         });
       },
+      experimental_floatingWindow(registration) {
+        const kind = "slots.experimental_floatingWindow";
+        const id = requireSlotId(kind, registration?.id);
+        requireUniqueId(kind, seenIds.floatingWindow, id);
+        const path = requireNonEmptyString(kind, "path", registration.path);
+        if (!PLUGIN_SLOT_ID_PATTERN.test(path)) {
+          throw new Error(
+            `${kind}: "path" must match ${String(PLUGIN_SLOT_ID_PATTERN)} (it becomes a URL segment), got ${JSON.stringify(path)}`,
+          );
+        }
+        let defaultSize: { width: number; height: number } | undefined;
+        if (registration.defaultSize !== undefined) {
+          const { width, height } = registration.defaultSize;
+          if (
+            typeof width !== "number" ||
+            !Number.isFinite(width) ||
+            width <= 0 ||
+            typeof height !== "number" ||
+            !Number.isFinite(height) ||
+            height <= 0
+          ) {
+            throw new Error(
+              `${kind}: "defaultSize" must have positive finite "width" and "height" when set`,
+            );
+          }
+          defaultSize = { width, height };
+        }
+        floatingWindows.push({
+          id,
+          path,
+          component: requireComponent(kind, registration.component),
+          ...(defaultSize !== undefined ? { defaultSize } : {}),
+        });
+      },
     },
     composer: {
       customize(registration) {
@@ -330,6 +367,7 @@ export function collectPluginAppRegistrations(
     messageDirectives,
     messageActions,
     contentScripts,
+    floatingWindows,
   };
 }
 

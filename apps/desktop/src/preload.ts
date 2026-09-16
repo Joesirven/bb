@@ -6,6 +6,7 @@ import {
   bbDesktopBrowserSnapshotSchema,
   bbDesktopBrowserStateSchema,
   bbDesktopInfoSchema,
+  bbDesktopTrayActivatedEventSchema,
   bbDesktopWindowStateSchema,
   type BbDesktopApi,
   type BbDesktopAppCommandHandler,
@@ -16,14 +17,27 @@ import {
   type BbDesktopBrowserStateHandler,
   type BbDesktopBrowserUnsubscribe,
   type BbDesktopCloseWindowRequestHandler,
+  type BbDesktopFloatingWindowApi,
   type BbDesktopInfo,
   type BbDesktopInfoChangeHandler,
   type BbDesktopInfoUnsubscribe,
   type BbDesktopOpenNewTabHandler,
   type BbDesktopTheme,
+  type BbDesktopTrayActivateHandler,
+  type BbDesktopTrayApi,
+  type BbDesktopTrayUnsubscribe,
   type BbDesktopWindowState,
   type BbDesktopWindowStateChangeHandler,
 } from "@bb/desktop-contract";
+import {
+  BB_DESKTOP_TRAY_ACTIVATED_CHANNEL,
+  BB_DESKTOP_TRAY_CLEAR_CHANNEL,
+  BB_DESKTOP_TRAY_SET_STATE_CHANNEL,
+} from "./desktop-tray-ipc.js";
+import {
+  BB_DESKTOP_FLOATING_WINDOW_CLOSE_CHANNEL,
+  BB_DESKTOP_FLOATING_WINDOW_OPEN_CHANNEL,
+} from "./desktop-floating-window-ipc.js";
 import {
   BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
   BB_DESKTOP_GET_INFO_CHANNEL,
@@ -242,8 +256,36 @@ const bbBrowserApi: BbDesktopBrowserApi = {
   },
 };
 
+const trayActivateListeners = new Set<BbDesktopTrayActivateHandler>();
+
+const bbTrayApi: BbDesktopTrayApi = {
+  setState(request): void {
+    ipcRenderer.send(BB_DESKTOP_TRAY_SET_STATE_CHANNEL, request);
+  },
+  clear(): void {
+    ipcRenderer.send(BB_DESKTOP_TRAY_CLEAR_CHANNEL);
+  },
+  onActivate(listener): BbDesktopTrayUnsubscribe {
+    trayActivateListeners.add(listener);
+    return () => {
+      trayActivateListeners.delete(listener);
+    };
+  },
+};
+
+const bbFloatingWindowApi: BbDesktopFloatingWindowApi = {
+  open(request): void {
+    ipcRenderer.send(BB_DESKTOP_FLOATING_WINDOW_OPEN_CHANNEL, request);
+  },
+  close(request): void {
+    ipcRenderer.send(BB_DESKTOP_FLOATING_WINDOW_CLOSE_CHANNEL, request);
+  },
+};
+
 const bbDesktopApi: BbDesktopApi = {
   browser: bbBrowserApi,
+  experimental_tray: bbTrayApi,
+  experimental_floatingWindow: bbFloatingWindowApi,
   get lastCheckedAt() {
     return currentInfo.lastCheckedAt;
   },
@@ -397,6 +439,14 @@ ipcRenderer.on(
     }
   },
 );
+
+ipcRenderer.on(BB_DESKTOP_TRAY_ACTIVATED_CHANNEL, (_event, payload: unknown) => {
+  const parsed = bbDesktopTrayActivatedEventSchema.safeParse(payload);
+  if (!parsed.success) return;
+  for (const listener of trayActivateListeners) {
+    listener(parsed.data.itemId);
+  }
+});
 
 void invokeDesktopInfo(BB_DESKTOP_GET_INFO_CHANNEL);
 void invokeDesktopWindowState();
