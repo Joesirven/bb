@@ -13,6 +13,7 @@ import {
   type PluginContentScriptRegistration,
   type PluginDiffRendererProps,
   type PluginFileOpenerProps,
+  type PluginFloatingWindowProps,
   type PluginHomepageSectionProps,
   type PluginHttpAuthMode,
   type PluginCommandContext,
@@ -276,6 +277,7 @@ type SlotPropsByName = {
   experimental_timelineRenderer: PluginTimelineRendererProps;
   experimental_environmentProviderInputs: PluginEnvironmentProviderInputsProps;
   experimental_machineProviderInputs: PluginMachineProviderInputsProps;
+  experimental_floatingWindow: PluginFloatingWindowProps;
 };
 
 type MissingSlot = Exclude<keyof PluginAppSlots, keyof SlotPropsByName>;
@@ -410,6 +412,7 @@ const FRONTEND_SLOT_PROP_FIELDS = {
     "onChange",
   ],
   experimental_machineProviderInputs: ["value", "onChange"],
+  experimental_floatingWindow: [],
 } as const satisfies {
   [S in keyof SlotPropsByName]: readonly (keyof SlotPropsByName[S])[];
 };

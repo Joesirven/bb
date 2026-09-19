@@ -316,6 +316,7 @@ describe("builtin plugin reconciliation", () => {
       ["side-chat", "SideChat"],
       ["workflows", "Workflow"],
       ["environment-git-worktree", "FolderGit"],
+      ["pomodoro", "Timer"],
     ]);
 
     expect(BUILTIN_PLUGINS).toHaveLength(expectedIcons.size);
