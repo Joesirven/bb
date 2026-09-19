@@ -3202,3 +3202,96 @@ remain forbidden. New-machine selections continue through creation.
 
 Stabilization requires lifecycle coverage for reuse, missing paths, cleanup in
 progress, cross-project ownership, and concurrent creation before binding.
+
+## `app.slots.experimental_floatingWindow` (`@get-bb/plugin-sdk/app`)
+
+**What it does.** Registers a chrome-free route (`/plugins/<pluginId>/floating/<path>`)
+that renders a plugin component with no `AppLayout`, sidebar, or header —
+modeled on how `AuthCallbackView` already renders outside the app shell
+(`apps/app/src/App.tsx`'s top-level `<Routes>`, a sibling of
+`AUTH_CALLBACK_ROUTE_PATH`). bb's macOS desktop shell loads this route
+directly into a secondary, always-on-top `BrowserWindow`
+(`apps/desktop/src/desktop-floating-window.ts`) when a plugin calls
+`experimental_desktopFloatingWindow().open(windowId)`. On the web build or a
+desktop build old enough to predate the bridge, the route still resolves (a
+plugin could open it as an ordinary popup or tab), but nothing makes it
+float or stay on top.
+
+**Audit before stabilizing.**
+
+1. **Windowless fallback.** Nothing today opens this route on non-desktop
+   clients. Decide whether `experimental_desktopFloatingWindow` (or a
+   generic caller) should fall back to `window.open()` so the same
+   registration is useful outside bb's desktop shell, or whether floating
+   windows should stay desktop-only by design.
+2. **Lifecycle on plugin reload/disable.** The floating `BrowserWindow` is
+   owned entirely by the Electron main process and is not told when the
+   plugin that registered its route is reloaded, disabled, or uninstalled —
+   it keeps loading a route that may 404 or serve stale content. Decide
+   whether the server should proactively signal the desktop shell to close
+   orphaned floating windows.
+3. **`windowId` collisions.** `experimental_desktopFloatingWindow().open` /
+   `.close` resolve `windowId` against the live floating-window slot
+   snapshot by `id` alone, with no `pluginId` disambiguation from the
+   caller's side beyond "first match" (see
+   `apps/app/src/lib/plugin-sdk-app-impl.tsx`'s `createDesktopFloatingWindow`).
+   Confirm whether two plugins registering the same `id` should be rejected
+   at registration time rather than silently resolving to whichever
+   registered first.
+4. **Sizing and multi-window.** `defaultSize` only seeds the window's
+   initial dimensions; there is no API to resize, reposition, or query an
+   already-open floating window, and only one window per `(pluginId,
+windowId)` pair can exist. Decide whether that is enough before
+   stabilizing.
+
+## `experimental_desktopTray` / `experimental_desktopFloatingWindow` (`@get-bb/plugin-sdk/app`)
+
+**What it does.** Two plain (non-hook) factory functions a plugin's frontend
+code — including plain content-script code with no React tree — can call to
+drive bb's desktop shell: `experimental_desktopTray()` returns a control
+surface (`setState({ title?, tooltip?, menuItems? })`, `clear()`,
+`onActivate(handler)`) for bb's single, app-wide macOS menu-bar `Tray` icon;
+`experimental_desktopFloatingWindow()` returns `{ open(windowId),
+close(windowId) }` for the floating-window capability above. Both report
+`available: false` with no-op methods outside bb's macOS desktop app or
+against an older desktop build whose preload predates the bridge
+(`apps/app/src/lib/bb-desktop-tray.ts` feature-detects `window.bbDesktop
+.experimental_tray` / `.experimental_floatingWindow`, both optional on
+`BbDesktopApi` for exactly this version-skew reason).
+
+Implementation: contract + schemas in `packages/desktop-contract/src/tray.ts`
+and `floating-window.ts`; Electron-side management in
+`apps/desktop/src/desktop-tray.ts` and `desktop-floating-window.ts`, wired in
+`apps/desktop/src/main.ts`'s `registerDesktopTrayAndFloatingWindowIpc`; SDK
+surface in `packages/plugin-sdk/src/app-contract.ts` and
+`apps/app/src/lib/plugin-sdk-app-impl.tsx`.
+
+**Audit before stabilizing.**
+
+1. **Single shared Tray, no ownership arbitration.** bb has exactly one
+   macOS menu-bar icon; whichever plugin last called `setState` owns its
+   title/tooltip/menu until it calls `clear()` or another plugin overwrites
+   it. Two plugins both wanting a live Tray presence will visibly fight over
+   it. Decide whether Tray ownership needs an explicit claim/release
+   protocol, or a per-plugin queue/priority, before more than one plugin
+   uses this.
+2. **No cleanup on plugin disable/reload.** Nothing in this pass clears a
+   plugin's Tray state or closes its floating windows when the plugin that
+   set them is reloaded, disabled, or uninstalled — a stale title or
+   still-open window can outlive its plugin generation until another
+   `setState`/`clear` call overwrites it. Decide where that cleanup belongs
+   (the server, on plugin lifecycle transitions, forwarding a
+   clear-all-for-plugin signal to the desktop shell).
+3. **Menu-bar icon asset.** `desktop-tray.ts` resizes bb's regular app icon
+   down to 16×16 as a stand-in `Tray` image rather than a purpose-built
+   monochrome template asset. Replace it before this ships broadly.
+4. **Bounds enforcement is contract-only.** `BB_DESKTOP_TRAY_MAX_*` constants
+   cap title/tooltip/menu-item length and menu-item count in the zod schema
+   validated at the IPC boundary, but nothing throttles how often a plugin
+   calls `setState` (e.g. a content script ticking every second). Confirm
+   that update rate is fine for a real `Tray.setTitle` call cadence.
+5. **Multi-window desktop assumption.** `desktop-tray.ts` broadcasts
+   activation events to every open `BrowserWindow`
+   (`BrowserWindow.getAllWindows()`), which is correct for today's
+   single-main-window desktop shell but would need real targeting if bb's
+   desktop app ever supports multiple independent main windows.

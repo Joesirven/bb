@@ -23,6 +23,7 @@ import SourceCodeIcon from "@hugeicons/core-free-icons/SourceCodeIcon";
 import SparklesIcon from "@hugeicons/core-free-icons/SparklesIcon";
 import TerminalIcon from "@hugeicons/core-free-icons/TerminalIcon";
 import TestTubeIcon from "@hugeicons/core-free-icons/TestTubeIcon";
+import Timer01Icon from "@hugeicons/core-free-icons/Timer01Icon";
 import WorkflowCircle03Icon from "@hugeicons/core-free-icons/WorkflowCircle03Icon";
 import Activity03Icon from "@hugeicons/core-free-icons/Activity03Icon";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -56,6 +57,7 @@ const FIRST_PARTY_PLUGINS: Record<string, FirstPartyPlugin> = {
   "Claude Code provider": { id: "provider-claude-code", icon: SparklesIcon },
   "Codex provider": { id: "provider-codex", icon: SparklesIcon },
   "Pi provider": { id: "provider-pi", icon: SparklesIcon },
+  Pomodoro: { id: "pomodoro", icon: Timer01Icon },
 };
 
 export function pluginIcon(displayName: string): IconSvgElement | null {

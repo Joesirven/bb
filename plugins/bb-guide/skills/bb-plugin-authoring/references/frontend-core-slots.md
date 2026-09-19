@@ -264,3 +264,50 @@ projectId, experimental_hostId? }` (nullable fields). The optional host ID
   always use the built-in preview, and a removed/disabled opener degrades
   back to it. Pair with `bb.sdk.files` (rpc from your server) to load and
   CAS-save the content.
+- `experimental_floatingWindow` → `PluginFloatingWindowProps` (deliberately
+  empty in V1 — chrome-free, no host wrapper). Registers an always-on-top,
+  chrome-free floating window at `/plugins/<pluginId>/floating/<path>`, the
+  same way `AuthCallbackView` renders outside the app shell. Registration is
+  `PluginFloatingWindowRegistration`: `{ id, path, component, defaultSize? }`.
+  `path` becomes the URL segment (letters, digits, `-`, `_`); `defaultSize`
+  is an optional `{ width, height }` seed the host uses only when it opens a
+  real native window. bb's macOS desktop shell opens this route in a
+  secondary, always-on-top `BrowserWindow` when a plugin calls
+  `experimental_desktopTray()` / `experimental_desktopFloatingWindow()`
+  (below) — `experimental_desktopFloatingWindow().open(id)` — off desktop,
+  or against an older desktop build, the route still resolves but nothing
+  makes it float. Experimental: see `docs/api_to_audit.md`.
+
+### Desktop tray and floating windows
+
+`experimental_desktopTray()` and `experimental_desktopFloatingWindow()` are
+plain factory functions (not hooks — plain content-script code can call them
+too), returning `{ available, ... }`. `available` is `false` on the web
+build, non-macOS, or an older desktop build whose preload predates the
+bridge, so every method no-ops in that case and call sites never need to
+branch on platform themselves.
+
+```ts
+const tray: PluginDesktopTray = experimental_desktopTray();
+tray.setState({
+  title: "23:59",
+  tooltip: "Pomodoro",
+  menuItems: [{ id: "pause", label: "Pause" } satisfies PluginDesktopTrayMenuItem],
+} satisfies PluginDesktopTrayState);
+tray.onActivate((itemId) => {
+  /* itemId is the clicked menu item's id, or null for a plain icon click */
+});
+tray.clear();
+
+const floating: PluginDesktopFloatingWindow = experimental_desktopFloatingWindow();
+floating.open("timer"); // "timer" matches an experimental_floatingWindow registration's id
+floating.close("timer");
+```
+
+bb has exactly one shared macOS menu-bar `Tray` icon: whichever plugin last
+called `setState` owns its title/tooltip/menu until it calls `clear()` or
+another plugin overwrites it — there is no per-plugin arbitration yet.
+`experimental_desktopFloatingWindow().open` resolves the registering
+plugin's `experimental_floatingWindow` slot registration and asks bb's
+desktop shell to open (or focus, if already open) that route in a real,
+always-on-top `BrowserWindow`. Experimental: see `docs/api_to_audit.md`.
