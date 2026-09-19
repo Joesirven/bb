@@ -57,6 +57,8 @@ export const LEGACY_PROJECT_SETTINGS_ROUTE_PATH =
 export const PROJECT_ARCHIVED_ROUTE_PATH = "/projects/:projectId/archived";
 const THREAD_DETAIL_ROUTE_PATH = "/projects/:projectId/threads/:threadId";
 export const PLUGIN_PANEL_ROUTE_PATH = "/plugins/:pluginId/:panelPath/*";
+export const FLOATING_WINDOW_ROUTE_PATH =
+  "/plugins/:pluginId/floating/:windowId";
 
 export interface ThreadRoutePathArgs {
   projectId: string;
@@ -245,6 +247,7 @@ export const ROUTE_PATTERNS: readonly string[] = [
   PROJECTLESS_THREAD_DETAIL_ROUTE_PATH,
   THREAD_DETAIL_ROUTE_PATH,
   PLUGIN_PANEL_ROUTE_PATH,
+  FLOATING_WINDOW_ROUTE_PATH,
 ];
 
 export function stripRoutePathSuffix(path: string): string {

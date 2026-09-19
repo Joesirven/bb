@@ -55,6 +55,7 @@ export {
   LEGACY_PROJECT_SETTINGS_ROUTE_PATH,
   PROJECT_ARCHIVED_ROUTE_PATH,
   PLUGIN_PANEL_ROUTE_PATH,
+  FLOATING_WINDOW_ROUTE_PATH,
   isProjectlessProjectId,
   getRootComposeRoutePath,
   getLegacyProjectComposeRoutePath,

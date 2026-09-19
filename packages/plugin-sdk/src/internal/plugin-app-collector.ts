@@ -14,6 +14,7 @@ import type {
   PluginEnvironmentProviderInputsRegistration,
   PluginMachineProviderInputsRegistration,
   PluginFileOpenerRegistration,
+  PluginFloatingWindowRegistration,
   PluginHomepageSectionRegistration,
   PluginCommandRegistration,
   PluginMessageActionRegistration,
@@ -362,6 +363,7 @@ export interface CollectedPluginAppRegistrations {
   environmentProviderInputs: PluginEnvironmentProviderInputsRegistration[];
   machineProviderInputs: PluginMachineProviderInputsRegistration[];
   contentScripts: PluginContentScriptRegistration[];
+  floatingWindows: PluginFloatingWindowRegistration[];
 }
 
 const sidebarFooterItemsByRegistrationSet = new WeakMap<
@@ -487,6 +489,7 @@ export function collectPluginAppRegistrations(
     environmentProviderInputs: [],
     machineProviderInputs: [],
     contentScripts: [],
+    floatingWindows: [],
   };
   sidebarFooterItemsByRegistrationSet.set(collected, sidebarFooterItems);
   const seenIds = {
@@ -514,6 +517,7 @@ export function collectPluginAppRegistrations(
     environmentProviderInputs: new Set<string>(),
     machineProviderInputs: new Set<string>(),
     contentScript: new Set<string>(),
+    floatingWindow: new Set<string>(),
   };
 
   function registerCommand(registration: PluginCommandRegistration): void {
@@ -906,6 +910,40 @@ export function collectPluginAppRegistrations(
         collected.machineProviderInputs.push({
           machineProviderId,
           component: requireComponent(kind, registration.component),
+        });
+      },
+      experimental_floatingWindow(registration) {
+        const kind = "slots.experimental_floatingWindow";
+        const id = requireSlotId(kind, registration?.id);
+        requireUniqueId(kind, seenIds.floatingWindow, id);
+        const path = requireNonEmptyString(kind, "path", registration.path);
+        if (!PLUGIN_SLOT_ID_PATTERN.test(path)) {
+          throw new Error(
+            `${kind}: "path" must match ${String(PLUGIN_SLOT_ID_PATTERN)} (it becomes a URL segment), got ${JSON.stringify(path)}`,
+          );
+        }
+        let defaultSize: { width: number; height: number } | undefined;
+        if (registration.defaultSize !== undefined) {
+          const { width, height } = registration.defaultSize;
+          if (
+            typeof width !== "number" ||
+            !Number.isFinite(width) ||
+            width <= 0 ||
+            typeof height !== "number" ||
+            !Number.isFinite(height) ||
+            height <= 0
+          ) {
+            throw new Error(
+              `${kind}: "defaultSize" must have positive finite "width" and "height" when set`,
+            );
+          }
+          defaultSize = { width, height };
+        }
+        collected.floatingWindows.push({
+          id,
+          path,
+          component: requireComponent(kind, registration.component),
+          ...(defaultSize !== undefined ? { defaultSize } : {}),
         });
       },
     },

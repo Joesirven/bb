@@ -1,7 +1,12 @@
 import { ProviderIcon } from "@/components/plugin/ProviderIcon";
 import { Icon } from "@bb/shared-ui/icon";
 import { useCallback, useMemo } from "react";
-import type { MarkdownProps, PluginSdkApp } from "@get-bb/plugin-sdk";
+import type {
+  MarkdownProps,
+  PluginDesktopFloatingWindow,
+  PluginDesktopTray,
+  PluginSdkApp,
+} from "@get-bb/plugin-sdk";
 import { PluginDiff } from "@/components/plugin/PluginDiff";
 import { PluginBranchPicker } from "@/components/plugin/PluginBranchPicker";
 import {
@@ -21,8 +26,13 @@ import { buildMarkdownDocumentLinkRouting } from "@/components/ui/markdown-docum
 import { buildMarkdownMessageLinkRouting } from "@/components/ui/markdown-message-link-routing";
 import type { MarkdownPreviewLinkHandler } from "@/components/ui/markdown-link";
 import { useThreadTimelineNavigation } from "@/components/thread/timeline/ThreadTimelineNavigationContext";
+import {
+  getDesktopFloatingWindowApi,
+  getDesktopTrayApi,
+} from "./bb-desktop-tray";
 import { definePluginApp } from "./plugin-app-definition";
 import { installDeprecatedAliases } from "./plugin-sdk-deprecated-aliases";
+import { getPluginSlotSnapshot } from "./plugin-slots";
 import {
   useBbContext,
   useBbNavigate,
@@ -44,6 +54,75 @@ import {
 import { useSidebarThreadSplit } from "./plugin-sidebar-split";
 import { useAppNavigationHost } from "./app-navigation-host";
 import { useCodeTheme } from "./plugin-code-theme";
+
+function createDesktopTray(): PluginDesktopTray {
+  const api = getDesktopTrayApi();
+  if (api === null) {
+    return {
+      available: false,
+      setState: () => {},
+      clear: () => {},
+      onActivate: () => () => {},
+    };
+  }
+  return {
+    available: true,
+    setState: (state) => {
+      api.setState(state);
+    },
+    clear: () => {
+      api.clear();
+    },
+    onActivate: (handler) => api.onActivate(handler),
+  };
+}
+
+function createDesktopFloatingWindow(): PluginDesktopFloatingWindow {
+  const api = getDesktopFloatingWindowApi();
+  if (api === null) {
+    return {
+      available: false,
+      open: () => {},
+      close: () => {},
+    };
+  }
+  function findRegistration(windowId: string) {
+    const registration = getPluginSlotSnapshot().floatingWindows.find(
+      (candidate) => candidate.id === windowId,
+    );
+    if (registration === undefined) {
+      console.warn(
+        `experimental_desktopFloatingWindow: no experimental_floatingWindow registration with id ${JSON.stringify(
+          windowId,
+        )}`,
+      );
+    }
+    return registration;
+  }
+  return {
+    available: true,
+    open: (windowId) => {
+      const registration = findRegistration(windowId);
+      if (registration === undefined) return;
+      api.open({
+        pluginId: registration.pluginId,
+        windowId,
+        path: registration.path,
+        ...(registration.defaultSize !== undefined
+          ? {
+              width: registration.defaultSize.width,
+              height: registration.defaultSize.height,
+            }
+          : {}),
+      });
+    },
+    close: (windowId) => {
+      const registration = findRegistration(windowId);
+      if (registration === undefined) return;
+      api.close({ pluginId: registration.pluginId, windowId });
+    },
+  };
+}
 
 export const pluginSdkAppImplementation = installDeprecatedAliases(
   {
@@ -78,6 +157,8 @@ export const pluginSdkAppImplementation = installDeprecatedAliases(
     experimental_useSidebarThreadSplit: useSidebarThreadSplit,
     experimental_useProviders: useProviders,
     experimental_useCodeTheme: useCodeTheme,
+    experimental_desktopTray: createDesktopTray,
+    experimental_desktopFloatingWindow: createDesktopFloatingWindow,
   } satisfies PluginSdkApp,
   { experimental_UrlLink: "UrlLink" },
 );

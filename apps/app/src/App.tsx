@@ -9,6 +9,7 @@ import {
 } from "react-router-dom";
 import { AppLayout } from "./components/layout/AppLayout";
 import { AuthCallbackView } from "./views/AuthCallbackView";
+import { FloatingWindowView } from "./views/FloatingWindowView";
 import { QuickCreateProjectProvider } from "./hooks/useQuickCreateProject";
 import { RouteNavigationProvider } from "./components/ui/app-route-anchor";
 import { RouteNavigationIndicator } from "./components/ui/route-navigation-indicator";
@@ -25,6 +26,7 @@ import { useRememberPluginNavPanelChrome } from "@/lib/plugin-nav-panel-chrome";
 import { useWebSocket } from "./hooks/useWebSocket";
 import {
   AUTH_CALLBACK_ROUTE_PATH,
+  FLOATING_WINDOW_ROUTE_PATH,
   LEGACY_AUTOMATION_DETAIL_ROUTE_PATH,
   LEGACY_AUTOMATIONS_ROUTE_PATH,
   LEGACY_TOOLS_AUTOMATION_BROWSE_ROUTE_PATH,
@@ -437,6 +439,10 @@ export function App() {
                 <Route
                   path={AUTH_CALLBACK_ROUTE_PATH}
                   element={<AuthCallbackView />}
+                />
+                <Route
+                  path={FLOATING_WINDOW_ROUTE_PATH}
+                  element={<FloatingWindowView />}
                 />
                 <Route path="*" element={<AppRoutes />} />
               </Routes>

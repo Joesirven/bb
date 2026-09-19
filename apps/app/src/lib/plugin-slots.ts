@@ -8,6 +8,7 @@ import type {
   PluginMachineProviderInputsRegistration,
   PluginPendingInteractionRegistration,
   PluginFileOpenerRegistration,
+  PluginFloatingWindowRegistration,
   PluginHomepageSectionRegistration,
   PluginMessageActionRegistration,
   PluginMessageDirectiveRegistration,
@@ -60,6 +61,7 @@ export interface PluginRegistrationSet {
   timelineRenderers?: readonly PluginTimelineRendererRegistration[];
   environmentProviderInputs?: readonly PluginEnvironmentProviderInputsRegistration[];
   machineProviderInputs?: readonly PluginMachineProviderInputsRegistration[];
+  floatingWindows?: readonly PluginFloatingWindowRegistration[];
 }
 
 interface PluginSlotBase {
@@ -114,6 +116,8 @@ export interface PluginEnvironmentProviderInputsSlot
   extends PluginEnvironmentProviderInputsRegistration, PluginSlotBase {}
 export interface PluginMachineProviderInputsSlot
   extends PluginMachineProviderInputsRegistration, PluginSlotBase {}
+export interface PluginFloatingWindowSlot
+  extends PluginFloatingWindowRegistration, PluginSlotBase {}
 
 export interface PluginSlotSnapshot {
   homepageSections: readonly PluginHomepageSectionSlot[];
@@ -140,6 +144,7 @@ export interface PluginSlotSnapshot {
   timelineRenderers: readonly PluginTimelineRendererSlot[];
   environmentProviderInputs: readonly PluginEnvironmentProviderInputsSlot[];
   machineProviderInputs: readonly PluginMachineProviderInputsSlot[];
+  floatingWindows: readonly PluginFloatingWindowSlot[];
 }
 
 export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
@@ -167,6 +172,7 @@ export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
   timelineRenderers: [],
   environmentProviderInputs: [],
   machineProviderInputs: [],
+  floatingWindows: [],
 };
 
 const registrationsByPluginId = new Map<string, PluginRegistrationSet>();
@@ -201,6 +207,7 @@ const SLOT_KINDS: readonly SlotKind[] = [
   "timelineRenderers",
   "environmentProviderInputs",
   "machineProviderInputs",
+  "floatingWindows",
 ];
 
 type FlattenedPluginSlots = {
@@ -259,6 +266,7 @@ function flattenRegistrations(
     timelineRenderers: stamp(set.timelineRenderers),
     environmentProviderInputs: stamp(set.environmentProviderInputs),
     machineProviderInputs: stamp(set.machineProviderInputs),
+    floatingWindows: stamp(set.floatingWindows),
   };
 }
 

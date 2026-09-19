@@ -230,6 +230,100 @@ describe("collectPluginAppRegistrations — experimental_threadList", () => {
   });
 });
 
+describe("collectPluginAppRegistrations — experimental_floatingWindow", () => {
+  it("collects a floating window with its default size", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+        defaultSize: { width: 240, height: 120 },
+      });
+    });
+    const registrations = collectPluginAppRegistrations(definition);
+    expect(registrations.floatingWindows).toEqual([
+      {
+        id: "timer",
+        path: "timer",
+        component: Component,
+        defaultSize: { width: 240, height: 120 },
+      },
+    ]);
+  });
+
+  it("omits an absent defaultSize rather than storing undefined", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+      });
+    });
+    const [registration] = collectPluginAppRegistrations(
+      definition,
+    ).floatingWindows;
+    expect(registration).toEqual({
+      id: "timer",
+      path: "timer",
+      component: Component,
+    });
+    expect(Object.hasOwn(registration, "defaultSize")).toBe(false);
+  });
+
+  it("rejects two floating windows with the same id", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+      });
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer-two",
+        component: Component,
+      });
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow(/timer/);
+  });
+
+  it("rejects a path that would not be a valid URL segment", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer/nested",
+        component: Component,
+      });
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow(
+      /"path" must match/,
+    );
+  });
+
+  it("rejects a non-positive defaultSize", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+        defaultSize: { width: 0, height: 120 },
+      });
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow(
+      /"defaultSize"/,
+    );
+  });
+
+  it("rejects a missing component", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+      } as never);
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow();
+  });
+});
+
 describe("collectPluginAppRegistrations — experimental_sidebarFooter", () => {
   it("collects actions and disclosures with live disclosure controls", () => {
     let disclosure: ExperimentalSidebarFooterDisclosureController | null = null;
@@ -440,6 +534,12 @@ describe("collectPluginAppRegistrations", () => {
         icon: "Bolt",
         run,
       });
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+        defaultSize: { width: 240, height: 120 },
+      });
       app.composer.customize({
         id: "composer",
         scopes: ["thread", "new-thread"],
@@ -527,6 +627,11 @@ describe("collectPluginAppRegistrations", () => {
         icon: "Zap",
         run,
       });
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+      });
       app.composer.customize({
         id: "improve-prompt",
         scopes: ["thread", "new-thread"],
@@ -611,6 +716,9 @@ describe("collectPluginAppRegistrations", () => {
     ]);
     expect(registrations.contentScripts).toEqual([
       { id: "editor-enhancement", mount },
+    ]);
+    expect(registrations.floatingWindows).toEqual([
+      { id: "timer", path: "timer", component: Component },
     ]);
   });
 

@@ -87,6 +87,11 @@ export const experimental_useSidebarThreadPullRequest =
   runtime.experimental_useSidebarThreadPullRequest;
 export const experimental_useSidebarThreadSplit =
   runtime.experimental_useSidebarThreadSplit;
+// Desktop surfaces for plugins that use bb's macOS menu-bar tray icon or open
+// always-on-top floating windows (experimental — see docs/api_to_audit.md).
+export const experimental_desktopTray = runtime.experimental_desktopTray;
+export const experimental_desktopFloatingWindow =
+  runtime.experimental_desktopFloatingWindow;
 // The provider directory (experimental — see docs/api_to_audit.md).
 export const experimental_useProviders = runtime.experimental_useProviders;
 // The live code theme, for plugins that render code with their own engine

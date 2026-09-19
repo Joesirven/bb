@@ -1337,6 +1337,29 @@ export interface PluginMessageActionRegistration {
   run(context: PluginMessageActionContext): void | Promise<void>;
 }
 
+/**
+ * Props passed to an `experimental_floatingWindow` component. Deliberately
+ * empty in V1 — chrome-free, no host wrapper.
+ */
+export interface PluginFloatingWindowProps {}
+
+/**
+ * Register an always-on-top, chrome-free floating window (see
+ * {@link PluginDesktopFloatingWindow}). Rendered wholesale by the plugin's
+ * `component` — no sidebar, no header, no host wrapper. A host without a
+ * floating-window backend (web, other OS, older desktop build) never mounts
+ * it.
+ */
+export interface PluginFloatingWindowRegistration {
+  /** Unique within the plugin; letters, digits, `-`, `_`. */
+  id: string;
+  /** URL segment under `/plugins/<pluginId>/floating/`; letters, digits, `-`, `_`. */
+  path: string;
+  component: ComponentType<PluginFloatingWindowProps>;
+  /** Suggested native window size; a host without a floating-window backend ignores this. */
+  defaultSize?: { width: number; height: number };
+}
+
 /** Current context for palette and keyboard command invocations. */
 export interface PluginCommandContext {
   /** The thread in view, or null on a surface without one. */
@@ -1652,6 +1675,14 @@ export interface PluginAppSlots {
   experimental_diffRenderer(registration: PluginDiffRendererRegistration): void;
   messageDirective(registration: PluginMessageDirectiveRegistration): void;
   messageAction(registration: PluginMessageActionRegistration): void;
+  /**
+   * Register an always-on-top floating window (see
+   * {@link PluginFloatingWindowRegistration}). Experimental: see
+   * docs/api_to_audit.md.
+   */
+  experimental_floatingWindow(
+    registration: PluginFloatingWindowRegistration,
+  ): void;
   /**
    * @deprecated Use `app.commands.register` with the same registration.
    * Both entry points share the same command registry and ID namespace.
@@ -2654,6 +2685,52 @@ export interface BbNavigate {
 }
 
 // ---------------------------------------------------------------------------
+// Desktop tray and floating window (the `experimental_desktopTray` /
+// `experimental_desktopFloatingWindow` contract) — plain factory functions,
+// not hooks, so plain JS content-script code can call them too.
+// ---------------------------------------------------------------------------
+
+export interface PluginDesktopTrayMenuItem {
+  id: string;
+  label: string;
+}
+
+/** Desired state of bb's single macOS menu-bar tray icon. */
+export interface PluginDesktopTrayState {
+  /** Menu-bar text next to the icon (macOS `Tray.setTitle`). */
+  title?: string;
+  tooltip?: string;
+  menuItems?: readonly PluginDesktopTrayMenuItem[];
+}
+
+/**
+ * Control surface for bb's single macOS menu-bar tray icon. The tray is a
+ * shared, app-wide resource: the last plugin to call `setState` owns its
+ * contents, and `onActivate` delivers clicks back regardless of which plugin
+ * is currently subscribed.
+ */
+export interface PluginDesktopTray {
+  /** False outside bb's macOS desktop app (web, other OS, older desktop build). */
+  readonly available: boolean;
+  setState(state: PluginDesktopTrayState): void;
+  clear(): void;
+  /** Fires when the user clicks a menu item (its `id`) or the tray icon itself (`null`). */
+  onActivate(handler: (itemId: string | null) => void): () => void;
+}
+
+/**
+ * Control surface for opening/closing this plugin's `experimental_floatingWindow`
+ * registrations as native always-on-top windows.
+ */
+export interface PluginDesktopFloatingWindow {
+  /** False outside bb's macOS desktop app (web, other OS, older desktop build). */
+  readonly available: boolean;
+  /** `windowId` must match an `experimental_floatingWindow` registration's `id` from the SAME plugin. */
+  open(windowId: string): void;
+  close(windowId: string): void;
+}
+
+// ---------------------------------------------------------------------------
 // The whole runtime surface. Declaration-versus-runtime parity is tested
 // against the actual `@get-bb/plugin-sdk/app` module namespace.
 //
@@ -2832,4 +2909,15 @@ export interface PluginSdkApp {
    */
   experimental_Diff: ComponentType<DiffProps>;
   useComposerView(): ComposerView;
+  /**
+   * bb's single macOS menu-bar tray icon (see {@link PluginDesktopTray}).
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_desktopTray(): PluginDesktopTray;
+  /**
+   * Open/close this plugin's `experimental_floatingWindow` registrations as
+   * native always-on-top windows (see {@link PluginDesktopFloatingWindow}).
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_desktopFloatingWindow(): PluginDesktopFloatingWindow;
 }

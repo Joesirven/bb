@@ -222,6 +222,32 @@ describe("plugin slot store", () => {
     snapshot = getPluginSlotSnapshot();
     expect(snapshot.messageDirectives).toHaveLength(0);
   });
+
+  it("flattens floatingWindows with generation metadata", () => {
+    setPluginSlotRegistrations(
+      "pomodoro",
+      registrationSet({
+        floatingWindows: [
+          { id: "timer", path: "timer", component: PanelComponent },
+        ],
+      }),
+    );
+
+    const snapshot = getPluginSlotSnapshot();
+    expect(
+      snapshot.floatingWindows.map((registration) => ({
+        pluginId: registration.pluginId,
+        id: registration.id,
+        path: registration.path,
+        generation: registration.generation,
+      })),
+    ).toEqual([
+      { pluginId: "pomodoro", id: "timer", path: "timer", generation: 1 },
+    ]);
+
+    removePluginSlotRegistrations("pomodoro");
+    expect(getPluginSlotSnapshot().floatingWindows).toHaveLength(0);
+  });
 });
 
 describe("plugin slot store structural sharing", () => {

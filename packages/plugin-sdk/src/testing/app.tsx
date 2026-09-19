@@ -29,7 +29,10 @@ import {
   type PluginComposerScope,
   type PluginComposerTextEffect,
   type PluginComposerThreadRowStatus,
+  type PluginDesktopFloatingWindow,
+  type PluginDesktopTray,
   type PluginFileOpenerRegistration,
+  type PluginFloatingWindowRegistration,
   type PluginHomepageSectionRegistration,
   type PluginMessageActionRegistration,
   type PluginMessageDirectiveRegistration,
@@ -961,6 +964,21 @@ const testPluginSdkApp = {
       };
     }, [composer, version]);
   },
+  experimental_desktopTray(): PluginDesktopTray {
+    return {
+      available: false,
+      setState: () => {},
+      clear: () => {},
+      onActivate: () => () => {},
+    };
+  },
+  experimental_desktopFloatingWindow(): PluginDesktopFloatingWindow {
+    return {
+      available: false,
+      open: () => {},
+      close: () => {},
+    };
+  },
 } satisfies PluginSdkApp;
 
 interface PluginRuntimeHost {
@@ -1010,6 +1028,7 @@ export interface CapturedPluginApp {
   environmentProviderInputs: PluginEnvironmentProviderInputsRegistration[];
   machineProviderInputs: PluginMachineProviderInputsRegistration[];
   contentScripts: PluginContentScriptRegistration[];
+  floatingWindows: PluginFloatingWindowRegistration[];
 }
 
 type PluginAppModule = { default: unknown };
