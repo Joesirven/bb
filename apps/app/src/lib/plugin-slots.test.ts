@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  PluginFloatingWindowProps,
   PluginHomepageSectionProps,
   PluginMessageDirectiveProps,
   PluginNavPanelProps,
@@ -21,6 +22,9 @@ function PanelComponent(_props: PluginNavPanelProps) {
   return null;
 }
 function DirectiveComponent(_props: PluginMessageDirectiveProps) {
+  return null;
+}
+function FloatingWindowComponent(_props: PluginFloatingWindowProps) {
   return null;
 }
 
@@ -228,7 +232,7 @@ describe("plugin slot store", () => {
       "pomodoro",
       registrationSet({
         floatingWindows: [
-          { id: "timer", path: "timer", component: PanelComponent },
+          { id: "timer", path: "timer", component: FloatingWindowComponent },
         ],
       }),
     );

@@ -68,7 +68,10 @@ function createDesktopTray(): PluginDesktopTray {
   return {
     available: true,
     setState: (state) => {
-      api.setState(state);
+      api.setState({
+        ...state,
+        menuItems: state.menuItems ? [...state.menuItems] : undefined,
+      });
     },
     clear: () => {
       api.clear();
