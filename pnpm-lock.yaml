@@ -1517,6 +1517,9 @@ importers:
       bb-plugin-plugin-api-tester:
         specifier: workspace:*
         version: link:../../plugins/plugin-api-tester
+      bb-plugin-pomodoro:
+        specifier: workspace:*
+        version: link:../../plugins/pomodoro
       bb-plugin-provider-acp:
         specifier: workspace:*
         version: link:../../plugins/provider-acp

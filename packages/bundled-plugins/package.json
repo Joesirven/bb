@@ -29,6 +29,7 @@
     "bb-plugin-pdf-preview": "workspace:*",
     "bb-plugin-plugin-api-docs": "workspace:*",
     "bb-plugin-plugin-api-tester": "workspace:*",
+    "bb-plugin-pomodoro": "workspace:*",
     "bb-plugin-provider-acp": "workspace:*",
     "bb-plugin-provider-claude-code": "workspace:*",
     "bb-plugin-provider-codex": "workspace:*",
