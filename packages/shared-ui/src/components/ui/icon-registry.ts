@@ -105,6 +105,7 @@ export const EXTENDED_ICON_NAMES = [
   "Star",
   "TextWrap",
   "TimeSchedule",
+  "Timer",
   "UserRound",
   "ZoomIn",
   "ZoomOut",

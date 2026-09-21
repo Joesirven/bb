@@ -95,6 +95,7 @@ import StarIcon from "@hugeicons/core-free-icons/StarIcon";
 import TestTube01Icon from "@hugeicons/core-free-icons/TestTube01Icon";
 import TextWrapIcon from "@hugeicons/core-free-icons/TextWrapIcon";
 import TimeScheduleIcon from "@hugeicons/core-free-icons/TimeScheduleIcon";
+import Timer01Icon from "@hugeicons/core-free-icons/Timer01Icon";
 import Unarchive03Icon from "@hugeicons/core-free-icons/Unarchive03Icon";
 import UserIcon from "@hugeicons/core-free-icons/UserIcon";
 import ViewIcon from "@hugeicons/core-free-icons/ViewIcon";
@@ -311,6 +312,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   Star: StarIcon,
   TextWrap: TextWrapIcon,
   TimeSchedule: TimeScheduleIcon,
+  Timer: Timer01Icon,
   UserRound: UserIcon,
   ZoomIn: ZoomInAreaIcon,
   ZoomOut: ZoomOutAreaIcon,
