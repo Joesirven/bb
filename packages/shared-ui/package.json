@@ -29,6 +29,11 @@
       "types": "./src/components/ui/button.tsx",
       "default": "./src/components/ui/button.tsx"
     },
+    "./card": {
+      "source": "./src/components/ui/card.tsx",
+      "types": "./src/components/ui/card.tsx",
+      "default": "./src/components/ui/card.tsx"
+    },
     "./carousel": {
       "source": "./src/components/ui/carousel.tsx",
       "types": "./src/components/ui/carousel.tsx",
