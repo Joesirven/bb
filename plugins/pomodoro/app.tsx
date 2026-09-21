@@ -1,11 +1,3 @@
-// bb-plugin-pomodoro — the frontend bundle.
-//
-// One navPanel ("Pomodoro") for the full page, one experimental_floatingWindow
-// for the compact always-on-top view bb's desktop shell can pop out, a
-// sidebarFooterAction as a quick entry point, and a content script that keeps
-// bb's macOS menu-bar Tray showing a live countdown regardless of which page
-// is open. All four read the same `StatusView` shape the `bb pomodoro` CLI
-// returns (see shared/contract.ts) so the UI, the CLI, and Iroh never drift.
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
@@ -54,10 +46,6 @@ function phaseLabel(phase: StatusView["phase"]): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Shared status hook: RPC + realtime for authoritative updates, a local 1s
-// ticker for a smooth countdown between them (no per-second server traffic).
-// ---------------------------------------------------------------------------
 
 function useLiveStatus(): {
   status: StatusView | null;
@@ -86,13 +74,12 @@ function useLiveStatus(): {
     setError(null);
   });
 
-  // Local ticker: while running, recompute remainingSeconds every second
-  // from phaseEndAt rather than waiting on the next realtime signal.
+  const running = status?.running ?? false;
+  const phaseEndAt = status?.phaseEndAt ?? null;
   useEffect(() => {
-    if (status === null || !status.running || status.phaseEndAt === null) {
+    if (!running || phaseEndAt === null) {
       return;
     }
-    const phaseEndAt = status.phaseEndAt;
     const interval = setInterval(() => {
       setStatus((current) => {
         if (current === null || !current.running) return current;
@@ -105,14 +92,11 @@ function useLiveStatus(): {
       });
     }, 1_000);
     return () => clearInterval(interval);
-  }, [status?.running, status?.phaseEndAt]);
+  }, [running, phaseEndAt]);
 
   return { status, error, refetch };
 }
 
-// ---------------------------------------------------------------------------
-// Controls shared by the panel and the floating view.
-// ---------------------------------------------------------------------------
 
 function TimerControls({
   status,
@@ -126,33 +110,36 @@ function TimerControls({
   const rpc = useRpc<typeof pomodoroRpcContract>();
   const [pending, setPending] = useState(false);
 
-  function settle(promise: Promise<StatusView>, label: string): void {
-    setPending(true);
-    promise
-      .then(onChanged, (rpcError: unknown) =>
-        toast.error(`Failed to ${label}: ${errorText(rpcError)}`),
-      )
-      .finally(() => setPending(false));
-  }
+  const settle = useCallback(
+    (promise: Promise<StatusView>, label: string): void => {
+      setPending(true);
+      promise
+        .then(onChanged, (rpcError: unknown) =>
+          toast.error(`Failed to ${label}: ${errorText(rpcError)}`),
+        )
+        .finally(() => setPending(false));
+    },
+    [onChanged],
+  );
   const onStart = useCallback(
     () => settle(rpc.call("start", {}), "start"),
-    [rpc],
+    [rpc, settle],
   );
   const onPause = useCallback(
     () => settle(rpc.call("pause", null), "pause"),
-    [rpc],
+    [rpc, settle],
   );
   const onResume = useCallback(
     () => settle(rpc.call("resume", null), "resume"),
-    [rpc],
+    [rpc, settle],
   );
   const onSkip = useCallback(
     () => settle(rpc.call("skip", null), "skip to the next phase"),
-    [rpc],
+    [rpc, settle],
   );
   const onReset = useCallback(
     () => settle(rpc.call("reset", null), "reset"),
-    [rpc],
+    [rpc, settle],
   );
 
   const size = compact ? "sm" : "default";
@@ -183,9 +170,6 @@ function TimerControls({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Floating window: compact, chrome-free, always-on-top on bb desktop.
-// ---------------------------------------------------------------------------
 
 function PomodoroFloatingView() {
   const { status, error } = useLiveStatus();
@@ -219,9 +203,6 @@ function PomodoroFloatingView() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Task picker: search-as-you-type over listCandidateTasks.
-// ---------------------------------------------------------------------------
 
 function TaskPicker({
   status,
@@ -331,9 +312,6 @@ function TaskPicker({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Session history.
-// ---------------------------------------------------------------------------
 
 function SessionHistory({ refreshKey }: { refreshKey: number }) {
   const rpc = useRpc<typeof pomodoroRpcContract>();
@@ -368,9 +346,6 @@ function SessionHistory({ refreshKey }: { refreshKey: number }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Full page.
-// ---------------------------------------------------------------------------
 
 function PomodoroPage() {
   const { status, error, refetch } = useLiveStatus();
@@ -467,9 +442,6 @@ export default definePluginApp((app) => {
       }
     },
   });
-  // The always-mounted driver that keeps bb's macOS menu-bar Tray showing a
-  // live countdown regardless of which page is open — there is no app-wide
-  // overlay slot to lean on for this, so a content script is the right tool.
   app.contentScripts.register({
     id: "pomodoro-tray-driver",
     mount({ signal }) {
@@ -517,7 +489,6 @@ export default definePluginApp((app) => {
             render();
           }
         } catch {
-          // Transient network/plugin-not-ready hiccup — try again next tick.
         }
       }
 
