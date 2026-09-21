@@ -140,7 +140,7 @@ describe("pomodoro domain", () => {
     await domain.start(ctx, { taskKeyOrId: "abc-1" });
     const view = await domain.skip(ctx);
     expect(view.phase).toBe("short-break");
-    expect(view.running).toBe(false); // autoStartNextPhase defaults to false
+    expect(view.running).toBe(false);
     expect(view.remainingSeconds).toBe(DEFAULT_SETTINGS.shortBreakMinutes * 60);
     expect(tasksClient.comment).not.toHaveBeenCalled();
 
@@ -181,9 +181,9 @@ describe("pomodoro domain", () => {
       settings: { autoStartNextPhase: true },
     });
     await domain.start(ctx, { taskKeyOrId: "abc-1" });
-    await domain.advanceOnElapse(ctx, "elapsed"); // work -> short-break
+    await domain.advanceOnElapse(ctx, "elapsed");
     (tasksClient.comment as ReturnType<typeof vi.fn>).mockClear();
-    await domain.advanceOnElapse(ctx, "elapsed"); // short-break -> work
+    await domain.advanceOnElapse(ctx, "elapsed");
     expect(tasksClient.comment).not.toHaveBeenCalled();
   });
 
@@ -196,7 +196,7 @@ describe("pomodoro domain", () => {
     expect(afterFirstWork.phase).toBe("short-break");
     expect(afterFirstWork.cyclesCompleted).toBe(1);
 
-    await domain.advanceOnElapse(ctx, "elapsed"); // short-break -> work
+    await domain.advanceOnElapse(ctx, "elapsed");
     const afterSecondWork = await domain.advanceOnElapse(ctx, "elapsed");
     expect(afterSecondWork.phase).toBe("long-break");
     expect(afterSecondWork.cyclesCompleted).toBe(0);

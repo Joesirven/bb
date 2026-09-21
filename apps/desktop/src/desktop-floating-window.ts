@@ -13,12 +13,7 @@ export interface DesktopFloatingWindowManager {
 }
 
 export interface CreateDesktopFloatingWindowManagerArgs {
-  /** The main window's own preload script — reused so the floating window's
-   * page (the same web app, a chrome-free route) gets the identical
-   * `window.bbDesktop` bridge and the plugin's normal RPC/realtime just
-   * work, unmodified. */
   preloadPath: string;
-  /** The active server's own base URL (origin), or null before one loads. */
   getServerBaseUrl(): string | null;
 }
 
@@ -29,14 +24,6 @@ function registryKey(pluginId: string, windowId: string): string {
   return `${pluginId}:${windowId}`;
 }
 
-/**
- * Registry of secondary, always-on-top `BrowserWindow`s hosting one plugin's
- * `experimental_floatingWindow` component each, keyed by
- * `${pluginId}:${windowId}`. Modeled on `existing-server-dialog.ts`'s
- * secondary-window pattern, minus the modal/parent behavior — a floating
- * window is independent and stays on top of every other window, including
- * bb's own main window.
- */
 export function createDesktopFloatingWindowManager(
   args: CreateDesktopFloatingWindowManagerArgs,
 ): DesktopFloatingWindowManager {

@@ -17,8 +17,6 @@ export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
   bb.storage.migrate(db, migrations);
 
-  // Built once per factory invocation (never module-top-level) so a plugin
-  // reload gets a fresh emitter instead of stale closures from a prior load.
   const wake = new EventTarget();
   const tasksClient = createTasksClient();
 
@@ -53,10 +51,6 @@ export default async function plugin(bb: BbPluginApi) {
 
   registerPomodoroCli(bb, ctx);
 
-  // The phase clock: the only writer of a NATURAL phase transition. Every
-  // RPC/CLI mutation writes its own state change immediately (see
-  // src/domain.ts's `persist`) and wakes this loop so it re-evaluates
-  // promptly instead of waiting out a stale timer.
   bb.background.service("pomodoro-clock", {
     async start(signal) {
       while (!signal.aborted) {

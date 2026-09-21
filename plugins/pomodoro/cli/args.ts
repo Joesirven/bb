@@ -11,9 +11,6 @@ export interface ParsedArgs {
   readonly flags: ReadonlySet<string>;
 }
 
-// Every valueless (boolean) flag this CLI accepts. `--auto-start-next-phase`
-// takes an explicit true|false VALUE (an option, not a flag) so its parsed
-// string can be validated and echoed back like any other setting.
 const VALUELESS_FLAGS = new Set(["help", "json"]);
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -87,7 +84,6 @@ export function requirePositionals(
   return args.positionals;
 }
 
-/** For a single optional positional (e.g. `start [TASK-KEY]`): 0 or 1. */
 export function optionalPositional(
   args: ParsedArgs,
   usage: string,

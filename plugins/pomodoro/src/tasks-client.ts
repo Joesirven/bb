@@ -5,12 +5,6 @@ import type { CandidateTask, ResolvedTaskRef } from "../shared/contract.js";
 
 const execFileAsync = promisify(execFileCallback);
 
-/**
- * Runs one `bb` subcommand and returns its stdout. Never a shell string —
- * always an argv array — and never `node:fs`/shell interpolation. This talks
- * to the Tasks plugin over the same `bb` CLI surface any agent or human uses,
- * so behavior can never drift from what `bb tasks` actually does.
- */
 export type ExecFile = (args: readonly string[]) => Promise<string>;
 
 interface ExecFileErrorLike {
@@ -73,13 +67,9 @@ const taskListResponseSchema = z
   .passthrough();
 
 export interface TasksClient {
-  /** `bb tasks show <ref> --json`. Throws when the ref does not resolve. */
   show(taskKeyOrId: string): Promise<ResolvedTaskRef>;
-  /** `bb tasks comment <ref> --body <text> --json`. */
   comment(taskKeyOrId: string, body: string): Promise<void>;
-  /** `bb tasks update <ref> --status done --json`. */
   complete(taskKeyOrId: string): Promise<void>;
-  /** `bb tasks list --active [--search <query>] --json`. */
   listCandidates(query: string | undefined): Promise<CandidateTask[]>;
 }
 

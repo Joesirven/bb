@@ -12,22 +12,10 @@ export interface DesktopTrayManager {
 }
 
 export interface CreateDesktopTrayManagerArgs {
-  /** Path to an image bb resizes down to menu-bar size on first use. */
   iconPath: string;
-  /** Fires on a plain icon click (`itemId: null`) or a menu item click. */
   onActivated(itemId: string | null): void;
 }
 
-/**
- * Manages bb's single macOS menu-bar tray icon on behalf of whichever plugin
- * last called `experimental_desktopTray().setState(...)`. No-op off darwin —
- * callers should still construct it (simplifies main.ts), it just never
- * creates a real `Tray`.
- *
- * TODO(desktop): the resized app icon is a stand-in for a proper monochrome
- * template image; a real menu-bar asset should replace it before this ships
- * broadly (see docs/api_to_audit.md).
- */
 export function createDesktopTrayManager(
   args: CreateDesktopTrayManagerArgs,
 ): DesktopTrayManager {

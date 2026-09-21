@@ -1,11 +1,8 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { PomodoroPhase, SessionRow, SessionStatus } from "../shared/contract.js";
 
-/** Avoids a direct `better-sqlite3` type dependency — see plugins/memory. */
 export type PluginDatabase = ReturnType<BbPluginApi["storage"]["database"]>;
 
-// bb.storage.migrate is append-only by statement index: never reorder or
-// edit a shipped statement, only push new ones.
 export const migrations: string[] = [
   `CREATE TABLE IF NOT EXISTS sessions (
      id TEXT PRIMARY KEY,
@@ -103,8 +100,6 @@ export function listSessions(
   db: PluginDatabase,
   input: { taskRef?: string; since?: string },
 ): SessionRow[] {
-  // Targeted WHERE clause (task_id/task_key are indexed alongside
-  // started_at) rather than loading every row and filtering in JS.
   const rows = db
     .prepare(
       `SELECT id, phase, task_id, task_key, task_title, started_at, ended_at, status, created_at

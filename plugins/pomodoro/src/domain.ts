@@ -28,7 +28,6 @@ export interface PomodoroCtx {
     get(): Promise<PomodoroSettings>;
     set(patch: Partial<PomodoroSettings>): Promise<PomodoroSettings>;
   };
-  /** Built once per factory invocation; see src/wake.ts. */
   wake: EventTarget;
   tasksClient: TasksClient;
 }
@@ -92,11 +91,6 @@ function sessionIsOpenForPhase(
   return row !== null && row.status === "running" && row.phase === phase;
 }
 
-/**
- * Where a work phase (`work`) leads to `short-break` (or `long-break` every
- * `cyclesBeforeLongBreak`th completion) and any break leads back to `work`.
- * `cyclesCompleted` counts finished work phases since the last long break.
- */
 function computeNextPhase(
   currentPhase: PomodoroPhase,
   cyclesCompleted: number,
@@ -128,19 +122,6 @@ function buildWorkCompletionComment(durationMinutes: number): string {
   return `Completed a ${durationMinutes}-minute Pomodoro work interval.`;
 }
 
-/**
- * Advances from the current phase to the next one, whether it naturally
- * elapsed (background service) or was explicitly skipped. Closes the open
- * session (if any) with the matching terminal status, logs the completed
- * work-interval comment ONLY on a natural `"elapsed"` completion of a `work`
- * phase (a skip abandons the interval rather than completing it — it is
- * record-keeping, not the user's explicit `task complete` action), then
- * writes the next phase. `autoStartNextPhase` gates whether the next phase
- * starts counting down immediately (`running: true`, fresh `phaseEndAt`,
- * plus its own session row since a phase's session begins when it starts
- * counting down) or lands "ready but not running" (full duration in
- * `remainingSeconds`, `phaseEndAt: null`, no session row yet).
- */
 export async function advanceOnElapse(
   ctx: PomodoroCtx,
   reason: "elapsed" | "skipped",
@@ -214,8 +195,6 @@ async function beginCountdown(
   let taskKey = state.taskKey;
   let taskTitle = state.taskTitle;
   if (overrides.taskRef !== undefined) {
-    // Explicit user/agent action: a resolution failure must surface, never
-    // be swallowed.
     const task = await ctx.tasksClient.show(overrides.taskRef);
     taskId = task.id;
     taskKey = task.key;
@@ -223,11 +202,6 @@ async function beginCountdown(
   }
 
   const phase: PomodoroPhase = state.phase === "idle" ? "work" : state.phase;
-  // --work-minutes only applies to a brand-new work phase starting fresh
-  // from idle: a paused or "ready" phase already has a concrete
-  // remainingSeconds (the actual remaining duration, possibly partial), and
-  // overriding it there would silently discard progress or misrepresent the
-  // ready phase's real length.
   const durationSeconds =
     state.phase === "idle"
       ? (overrides.workMinutesOverride ?? settings.workMinutes) * 60
@@ -301,7 +275,6 @@ export async function pause(ctx: PomodoroCtx): Promise<StatusView> {
 export async function resume(ctx: PomodoroCtx): Promise<StatusView> {
   const state = await readState(ctx);
   if (state.running) return toStatusView(state, Date.now());
-  // Nothing to resume from idle; a fresh countdown is `start`'s job.
   if (state.phase === "idle") return toStatusView(state, Date.now());
   return beginCountdown(ctx, state, {});
 }
@@ -330,8 +303,6 @@ export async function reset(ctx: PomodoroCtx): Promise<StatusView> {
     running: false,
     phaseEndAt: null,
     remainingSeconds: settings.workMinutes * 60,
-    // Reset abandons the timer, not the task selection: the same task is
-    // almost always what comes next.
     taskId: state.taskId,
     taskKey: state.taskKey,
     taskTitle: state.taskTitle,
@@ -391,7 +362,6 @@ export async function completeTask(
       "no task selected; pass a task key/id or run `bb pomodoro task set` first",
     );
   }
-  // Explicit action: a failure must surface, never be swallowed.
   await ctx.tasksClient.complete(ref);
   return toStatusView(state, Date.now());
 }
@@ -422,9 +392,5 @@ export async function updateSettings(
   patch: Partial<PomodoroSettings>,
 ): Promise<PomodoroSettings> {
   const next = await ctx.settings.set(patch);
-  // A live work-minutes change while a work phase is already ticking down
-  // does not retroactively resize the in-flight countdown — only settings
-  // fetched by the NEXT phase transition use the new value. Nothing else
-  // about state needs to change here.
   return next;
 }

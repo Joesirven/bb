@@ -1,11 +1,6 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
-// ---------------------------------------------------------------------------
-// Domain types. This is the ONE shared shape used by RPC handlers, CLI
-// handlers, storage, and the frontend — keeping the UI and the agent-facing
-// CLI from ever drifting apart (see domain.ts).
-// ---------------------------------------------------------------------------
 
 export const POMODORO_PHASES = [
   "idle",
@@ -23,12 +18,6 @@ export const SESSION_STATUSES = [
 ] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
 
-/**
- * The single JSON blob persisted at kv key `"pomodoro:state"`. `phaseEndAt`
- * is the ground truth while running; `remainingSeconds` is the ground truth
- * while paused, idle, or "ready but not started" (ready state produced by an
- * elapsed/skipped phase when `autoStartNextPhase` is false).
- */
 export interface PomodoroState {
   phase: PomodoroPhase;
   running: boolean;
@@ -75,11 +64,6 @@ export interface CandidateTask {
   status: string;
 }
 
-// ---------------------------------------------------------------------------
-// Zod schemas — the RPC wire contract. `--json` CLI output uses the exact
-// same shapes (see cli/format.ts callers), so the stable status view never
-// drifts between the UI, the CLI, and Iroh (the agent consuming the CLI).
-// ---------------------------------------------------------------------------
 
 const phaseSchema = z.enum(POMODORO_PHASES);
 const sessionStatusSchema = z.enum(SESSION_STATUSES);

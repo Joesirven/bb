@@ -1,13 +1,4 @@
-/**
- * Timer primitives for the pomodoro-clock background service. `wake` is a
- * plain `EventTarget` built once per plugin factory invocation (never
- * module-top-level, so a reload gets a fresh one) and shared with the RPC/CLI
- * mutation handlers: every mutation dispatches `"change"` on it after writing
- * new state, so a service blocked in `sleepUntil` re-evaluates immediately
- * instead of waiting out a stale timer.
- */
 
-/** Resolves after `ms`, or immediately if `signal` is already aborted. */
 export function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) {
@@ -26,7 +17,6 @@ export function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** Resolves on the next `wake` "change" event, or immediately on abort. */
 export function waitForWakeOrAbort(
   wake: EventTarget,
   signal: AbortSignal,
@@ -53,7 +43,6 @@ export function waitForWakeOrAbort(
   });
 }
 
-/** Resolves on whichever comes first: `ms` elapsing, a wake signal, or abort. */
 export function sleepUntil(
   ms: number,
   signal: AbortSignal,
