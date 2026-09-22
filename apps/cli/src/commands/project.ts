@@ -6,11 +6,10 @@ import type {
   ProjectResponse,
   UpdateProjectSourceRequest,
 } from "@bb/server-contract";
-import mimeTypes from "mime-types";
 import { action } from "../action.js";
 import { createCliBbSdk } from "../client.js";
 import { resolveLocalHostId } from "../daemon.js";
-import { renderBorderlessTable } from "../table.js";
+import { columnWidths, printBorderlessTable } from "../table.js";
 import { confirmDestructiveAction, outputJson } from "./helpers.js";
 import {
   resolveMachineEnvironmentRouting,
@@ -205,12 +204,6 @@ function buildProjectSourceUpdateRequest(
   };
 }
 
-function buildDefaultProjectSourceUpdateRequest(
-  _source: ProjectSource,
-): UpdateProjectSourceRequest {
-  return { isDefault: true, type: "local_path" };
-}
-
 function getProjectDisplaySource(
   project: ProjectResponse,
 ): ProjectSource | undefined {
@@ -224,11 +217,11 @@ function printProjectSource(source: ProjectSource): void {
   console.log(`${source.id}  ${source.type}  ${source.path}${defaultMarker}`);
 }
 
-function attachmentMimeType(
+async function attachmentMimeType(
   clientPath: string,
   filename: string,
   explicitMimeType: string | undefined,
-): string {
+): Promise<string> {
   if (explicitMimeType !== undefined) {
     const normalized = explicitMimeType.trim();
     if (normalized.length === 0) {
@@ -236,6 +229,7 @@ function attachmentMimeType(
     }
     return normalized;
   }
+  const { default: mimeTypes } = await import("mime-types");
   const inferred = mimeTypes.lookup(filename) || mimeTypes.lookup(clientPath);
   return typeof inferred === "string" ? inferred : "application/octet-stream";
 }
@@ -280,7 +274,7 @@ export function registerProjectCommands(
           ).projects.attachments.upload({
             clientFile: bytes,
             filename,
-            mimeType: attachmentMimeType(
+            mimeType: await attachmentMimeType(
               opts.clientFile,
               filename,
               opts.mimeType,
@@ -604,7 +598,8 @@ export function registerProjectCommands(
             ? await sdk.projects.sources.update({
                 projectId,
                 sourceId: created.id,
-                ...buildDefaultProjectSourceUpdateRequest(created),
+                isDefault: true,
+                type: "local_path",
               })
             : created;
 
@@ -701,19 +696,12 @@ function printProjectTable(projects: ProjectResponse[]): void {
     const source = getProjectDisplaySource(project);
     return [project.id, project.name, source?.path ?? "-"];
   });
-  const idWidth = Math.max(4, ...rows.map((row) => row[0].length));
-  const nameWidth = Math.max(4, ...rows.map((row) => row[1].length));
-  const pathWidth = Math.max(4, ...rows.map((row) => row[2].length));
-  const table = renderBorderlessTable(
+  printBorderlessTable(
     {
       head: ["ID", "Name", "Path"],
-      colWidths: [idWidth, nameWidth, pathWidth],
+      colWidths: columnWidths(rows, [4, 4, 4]),
       trimTrailingWhitespace: true,
     },
     rows,
   );
-
-  console.log("");
-  console.log(table);
-  console.log("");
 }

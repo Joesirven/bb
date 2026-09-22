@@ -10,18 +10,13 @@ import type { Node as ProseMirrorNode, Schema, Slice } from "@tiptap/pm/model";
 import type {
   PromptMentionSuggestion,
   ProviderCommandSuggestion,
-} from "@/components/promptbox/mentions/types";
+} from "@bb/client-core";
 
 export interface PromptEditorValue {
   text: string;
   mentions: PromptTextMention[];
 }
 
-/**
- * One contiguous piece of serialized prompt text that maps back to editable
- * ProseMirror content. Markdown delimiters and block/list prefixes deliberately
- * have no segment because they do not occupy document positions.
- */
 export interface PromptEditorOffsetSegment {
   textFrom: number;
   textTo: number;
@@ -30,15 +25,11 @@ export interface PromptEditorOffsetSegment {
   kind: "text" | "mention";
 }
 
-export interface PromptEditorSerialization extends PromptEditorValue {
+interface PromptEditorSerialization extends PromptEditorValue {
   offsetMapping: PromptEditorOffsetSegment[];
 }
 
-export interface PromptEditorContentOptions {
-  /**
-   * Parse the Markdown surface forms emitted by promptEditorValueFromDoc back
-   * into rich editor nodes. Blockquotes stay enabled regardless of this option.
-   */
+interface PromptEditorContentOptions {
   richTextMarkdown?: boolean;
 }
 
@@ -47,7 +38,7 @@ interface PromptEditorContentValue {
   mentions: readonly PromptTextMention[];
 }
 
-export interface PromptEditorMentionAttrs {
+interface PromptEditorMentionAttrs {
   resource: PromptMentionResource;
   serializedText: string;
 }
@@ -135,25 +126,60 @@ interface MarkdownLine {
   text: string;
 }
 
-function isPositionInRanges(
-  position: number,
+interface SortedRangeIndex {
+  starts: number[];
+  ends: number[];
+}
+
+function buildSortedRangeIndex(
   ranges: readonly MarkdownMarkerRange[],
-): boolean {
-  return ranges.some(
-    (range) => position >= range.start && position < range.end,
+): SortedRangeIndex {
+  const sorted = [...ranges].sort(
+    (left, right) => left.start - right.start || left.end - right.end,
   );
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (const range of sorted) {
+    const lastIndex = ends.length - 1;
+    if (lastIndex >= 0 && range.start <= ends[lastIndex]!) {
+      ends[lastIndex] = Math.max(ends[lastIndex]!, range.end);
+    } else {
+      starts.push(range.start);
+      ends.push(range.end);
+    }
+  }
+  return { starts, ends };
+}
+
+function sortedRangesContain(
+  index: SortedRangeIndex,
+  position: number,
+): boolean {
+  let low = 0;
+  let high = index.starts.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (index.starts[mid]! <= position) {
+      found = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return found !== -1 && position < index.ends[found]!;
 }
 
 function findClosingMarkdownMarker({
   canUseMarker,
   marker,
-  ranges,
+  blocked,
   start,
   text,
 }: {
   canUseMarker: (position: number) => boolean;
   marker: string;
-  ranges: readonly MarkdownMarkerRange[];
+  blocked: SortedRangeIndex;
   start: number;
   text: string;
 }): number {
@@ -161,7 +187,7 @@ function findClosingMarkdownMarker({
   while (index < text.length) {
     const next = text.indexOf(marker, index);
     if (next === -1) return -1;
-    if (!isPositionInRanges(next, ranges) && canUseMarker(next)) {
+    if (!sortedRangesContain(blocked, next) && canUseMarker(next)) {
       return next;
     }
     index = next + marker.length;
@@ -185,29 +211,31 @@ function collectMarkdownMarkRanges(text: string): MarkdownParseRanges {
   const marks: MarkdownMarkRange[] = [];
   const protectedRanges: MarkdownMarkerRange[] = [];
 
-  const blockedRanges = () => [...markers, ...protectedRanges];
-
   const collectPairs = (
     marker: string,
     type: MarkdownMarkRange["type"],
     canUseMarker: (position: number) => boolean = () => true,
   ) => {
+    const blocked = buildSortedRangeIndex([...markers, ...protectedRanges]);
     let index = 0;
     while (index < text.length) {
       const open = text.indexOf(marker, index);
       if (open === -1) break;
-      if (isPositionInRanges(open, blockedRanges()) || !canUseMarker(open)) {
+      if (sortedRangesContain(blocked, open) || !canUseMarker(open)) {
         index = open + marker.length;
         continue;
       }
       const close = findClosingMarkdownMarker({
         canUseMarker,
         marker,
-        ranges: blockedRanges(),
+        blocked,
         start: open + marker.length,
         text,
       });
-      if (close === -1 || close === open + marker.length) {
+      if (close === -1) {
+        break;
+      }
+      if (close === open + marker.length) {
         index = open + marker.length;
         continue;
       }
@@ -242,57 +270,69 @@ function collectMarkdownMarkRanges(text: string): MarkdownParseRanges {
   return { marks, markers };
 }
 
-function markdownMarksAt(
-  position: number,
-  ranges: readonly MarkdownMarkRange[],
-): JSONContent["marks"] {
-  const markNames = ranges
-    .filter((range) => position >= range.start && position < range.end)
-    .map((range) => range.type);
-
-  if (markNames.length === 0) {
-    return undefined;
-  }
-
-  return markNames.map((type) => ({ type }));
+function createMarkdownMarkSweep(
+  marks: readonly MarkdownMarkRange[],
+): (position: number) => JSONContent["marks"] {
+  let nextMarkIndex = 0;
+  let activeMarks: MarkdownMarkRange[] = [];
+  return (position) => {
+    while (
+      nextMarkIndex < marks.length &&
+      marks[nextMarkIndex]!.start <= position
+    ) {
+      activeMarks.push(marks[nextMarkIndex]!);
+      nextMarkIndex += 1;
+    }
+    if (activeMarks.some((mark) => mark.end <= position)) {
+      activeMarks = activeMarks.filter((mark) => mark.end > position);
+    }
+    if (activeMarks.length === 0) {
+      return undefined;
+    }
+    return activeMarks.map((mark) => ({ type: mark.type }));
+  };
 }
 
-function areMarkdownMarksEqual(
-  left: JSONContent["marks"],
-  right: JSONContent["marks"],
-): boolean {
-  const leftNames = left?.map((mark) => mark.type).join("|") ?? "";
-  const rightNames = right?.map((mark) => mark.type).join("|") ?? "";
-  return leftNames === rightNames;
-}
-
-function nextMarkdownBoundary({
+function createMarkdownBoundarySweep({
   mentions,
   markers,
-  position,
   text,
 }: {
   mentions: readonly PromptTextMention[];
   markers: readonly MarkdownMarkerRange[];
-  position: number;
   text: string;
-}): number {
-  let boundary = text.length;
-  for (const marker of markers) {
-    if (marker.start > position) {
-      boundary = Math.min(boundary, marker.start);
+}): (position: number) => number {
+  let markerIndex = 0;
+  let mentionIndex = 0;
+  let nextNewline = text.indexOf("\n");
+  return (position) => {
+    let boundary = text.length;
+    while (
+      markerIndex < markers.length &&
+      markers[markerIndex]!.start <= position
+    ) {
+      markerIndex += 1;
     }
-  }
-  for (const mention of mentions) {
-    if (mention.start > position) {
-      boundary = Math.min(boundary, mention.start);
+    if (markerIndex < markers.length) {
+      boundary = Math.min(boundary, markers[markerIndex]!.start);
     }
-  }
-  const newline = text.indexOf("\n", position);
-  if (newline !== -1 && newline > position) {
-    boundary = Math.min(boundary, newline);
-  }
-  return boundary;
+    while (
+      mentionIndex < mentions.length &&
+      mentions[mentionIndex]!.start <= position
+    ) {
+      mentionIndex += 1;
+    }
+    if (mentionIndex < mentions.length) {
+      boundary = Math.min(boundary, mentions[mentionIndex]!.start);
+    }
+    while (nextNewline !== -1 && nextNewline <= position) {
+      nextNewline = text.indexOf("\n", nextNewline + 1);
+    }
+    if (nextNewline !== -1) {
+      boundary = Math.min(boundary, nextNewline);
+    }
+    return boundary;
+  };
 }
 
 function appendMarkedTextContent({
@@ -326,8 +366,19 @@ function promptEditorInlineMarkdownContentFromValue(
   let cursor = 0;
   let mentionIndex = 0;
 
+  const markerByStart = new Map<number, MarkdownMarkerRange>();
+  for (const marker of ranges.markers) {
+    markerByStart.set(marker.start, marker);
+  }
+  const marksAt = createMarkdownMarkSweep(ranges.marks);
+  const boundaryAfter = createMarkdownBoundarySweep({
+    mentions,
+    markers: ranges.markers,
+    text: value.text,
+  });
+
   while (cursor < value.text.length) {
-    const marker = ranges.markers.find((range) => range.start === cursor);
+    const marker = markerByStart.get(cursor);
     if (marker) {
       cursor = marker.end;
       continue;
@@ -343,6 +394,7 @@ function promptEditorInlineMarkdownContentFromValue(
       mentionIndex < mentions.length && mentions[mentionIndex]!.start === cursor
         ? mentions[mentionIndex]
         : null;
+    const marks = marksAt(cursor);
     if (mention) {
       content.push({
         type: "mention",
@@ -350,31 +402,14 @@ function promptEditorInlineMarkdownContentFromValue(
           resource: mention.resource,
           serializedText: value.text.slice(mention.start, mention.end),
         } satisfies PromptEditorMentionAttrs,
-        ...(markdownMarksAt(cursor, ranges.marks)
-          ? { marks: markdownMarksAt(cursor, ranges.marks) }
-          : {}),
+        ...(marks ? { marks } : {}),
       });
       cursor = mention.end;
       mentionIndex += 1;
       continue;
     }
 
-    const marks = markdownMarksAt(cursor, ranges.marks);
-    let end = nextMarkdownBoundary({
-      mentions,
-      markers: ranges.markers,
-      position: cursor,
-      text: value.text,
-    });
-    while (
-      end < value.text.length &&
-      !ranges.markers.some((range) => range.start === end) &&
-      !mentions.some((nextMention) => nextMention.start === end) &&
-      value.text[end] !== "\n" &&
-      areMarkdownMarksEqual(marks, markdownMarksAt(end, ranges.marks))
-    ) {
-      end += 1;
-    }
+    let end = boundaryAfter(cursor);
     if (end <= cursor) {
       end = cursor + 1;
     }
@@ -389,20 +424,9 @@ function promptEditorInlineMarkdownContentFromValue(
   return content;
 }
 
-/**
- * Shift mentions that fall within a global text span into a sub-value relative
- * to `spanStart`, optionally accounting for characters stripped from the front
- * of each line (the `> `/`>` quote prefix). `lineSpans` lists each source
- * line's global [start,end) plus the cumulative number of characters removed
- * before it in the stripped sub-text, so a mention's offset can be rebased onto
- * the stripped inner text.
- */
 interface StrippedLineSpan {
-  /** Global offset of the first content character of this line (after prefix). */
   contentStart: number;
-  /** Global offset just past this line's content. */
   contentEnd: number;
-  /** Offset of this line's content within the stripped sub-text. */
   innerStart: number;
 }
 
@@ -450,7 +474,7 @@ function blockquoteFromLines(
       contentEnd,
       innerStart: innerCursor,
     });
-    innerCursor += strippedLines[index]!.length + 1; // +1 for joining "\n"
+    innerCursor += strippedLines[index]!.length + 1;
   }
 
   const innerMentions = rebaseMentionsToSpan(value, lineSpans);
@@ -684,12 +708,11 @@ export function promptEditorContentFromValue(
   }
 
   const lines = value.text.split("\n");
-  // Global start offset of each line within value.text.
   const lineGlobalStarts: number[] = [];
   let offset = 0;
   for (const line of lines) {
     lineGlobalStarts.push(offset);
-    offset += line.length + 1; // +1 for the "\n" delimiter
+    offset += line.length + 1;
   }
 
   const blocks: JSONContent[] = [];
@@ -800,17 +823,6 @@ export function promptEditorInlineContentFromValue(
   return content;
 }
 
-function mentionAttrsFromNode(
-  node: ProseMirrorNode,
-): PromptEditorMentionAttrs | null {
-  return parsePromptEditorMentionAttrs(node.attrs);
-}
-
-/**
- * Markdown delimiters that wrap a text run carrying inline marks. `code` is
- * literal, so it never combines with emphasis. Bold wraps outside italic, e.g.
- * a run with both marks becomes `**_text_**`.
- */
 function markdownDelimitersForMarks(
   marks: readonly ProseMirrorNode["marks"][number][],
 ): { open: string; close: string } {
@@ -909,7 +921,7 @@ function serializePromptEditorNode(
       return;
     }
     if (node.type.name === "mention") {
-      const attrs = mentionAttrsFromNode(node);
+      const attrs = parsePromptEditorMentionAttrs(node.attrs);
       if (attrs) {
         const span = appendMarkedInlineText(
           attrs.serializedText,
@@ -929,9 +941,6 @@ function serializePromptEditorNode(
     appendChildren(node, nodePosition);
   };
 
-  // Serialize a blockquote: build its inner value via a fresh walk, then emit
-  // each inner line with a "> "/">" prefix. The prefix characters count toward
-  // text.length, so inner mention offsets are shifted to reflect the prefixes.
   const appendBlockquote = (node: ProseMirrorNode, nodePosition: number) => {
     const inner = serializePromptEditorNode(node, nodePosition);
     const lines = inner.text.split("\n");
@@ -983,10 +992,6 @@ function serializePromptEditorNode(
     }
   };
 
-  // Serialize a bullet/ordered list. Each item gets an indent + marker on its
-  // own line; the marker is appended to the running text before the item's
-  // inline content, so mention offsets recorded during that walk are correct.
-  // Nested lists recurse with deeper indentation.
   const appendListItems = (
     listNode: ProseMirrorNode,
     listPosition: number,
@@ -1023,7 +1028,6 @@ function serializePromptEditorNode(
             depth + 1,
           );
         } else {
-          // Paragraph (or other inline block) shares the marker line.
           appendChildren(block, blockPosition);
         }
         blockPosition += block.nodeSize;
@@ -1087,11 +1091,6 @@ function serializePromptEditorNode(
   return { text, mentions, offsetMapping };
 }
 
-/**
- * Serialize the editor document and retain the exact plain-text-to-document
- * mapping used by decoration rules. Mention pills map their complete text
- * representation to the single atomic mention node.
- */
 export function promptEditorSerializationFromDoc(
   doc: ProseMirrorNode,
 ): PromptEditorSerialization {

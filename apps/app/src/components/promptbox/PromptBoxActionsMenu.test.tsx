@@ -16,7 +16,7 @@ import {
   type PluginComposerHost,
 } from "@/components/plugin/plugin-composer-host";
 import type { PluginComposerPlusMenuContribution } from "@/components/plugin/PluginComposerActions";
-import { emptyPromptDraftState } from "@/lib/prompt-draft";
+import { emptyPromptDraftState } from "@bb/client-core";
 import {
   resetPluginLogoStoreForTest,
   setPluginLogoUrls,
@@ -43,10 +43,9 @@ describe("PromptBoxActionsMenu", () => {
     const onAttach = vi.fn();
     render(<PromptBoxActionsMenu onAction={() => {}} onAttach={onAttach} />);
 
-    fireEvent.pointerDown(
-      screen.getByRole("button", { name: "Prompt actions" }),
-      { button: 0 },
-    );
+    const trigger = screen.getByRole("button", { name: "Prompt actions" });
+    expect(trigger.classList).toContain("text-subtle-foreground/75");
+    fireEvent.pointerDown(trigger, { button: 0 });
     fireEvent.click(
       await screen.findByRole("menuitem", { name: "Attach files" }),
     );
@@ -54,7 +53,7 @@ describe("PromptBoxActionsMenu", () => {
     expect(onAttach).toHaveBeenCalledOnce();
   });
 
-  it("keeps attachment upload progress visible on the menu trigger", () => {
+  it("keeps the plus menu trigger stable during attachment uploads", () => {
     render(
       <PromptBoxActionsMenu
         isAttaching
@@ -64,14 +63,18 @@ describe("PromptBoxActionsMenu", () => {
     );
 
     const trigger = screen.getByRole("button", { name: "Prompt actions" });
-    expect(trigger.querySelector('[data-icon="Spinner"]')).not.toBeNull();
+    expect(trigger.querySelector('[data-icon="Plus"]')).not.toBeNull();
+    expect(trigger.querySelector('[data-icon="Spinner"]')).toBeNull();
   });
 
   it("seeds the composer with the plugin prompt after the provider actions", async () => {
     const onAction = vi.fn();
     render(
       <PromptBoxActionsMenu
-        actions={withAppPromptActions([{ kind: "plan", text: "/plan " }])}
+        actions={withAppPromptActions([
+          { kind: "skills", text: "/skills " },
+          { kind: "plan", text: "/plan " },
+        ])}
         onAction={onAction}
       />,
     );
@@ -82,10 +85,16 @@ describe("PromptBoxActionsMenu", () => {
     );
     const menuItems = await screen.findAllByRole("menuitem");
     expect(menuItems.map((item) => item.textContent)).toEqual([
+      "Skills",
       "Plan",
       "Automation",
       "Plugin",
     ]);
+    expect(
+      menuItems.map((item) =>
+        item.querySelector("[data-icon]")?.getAttribute("data-icon"),
+      ),
+    ).toEqual(["Zap", "ListTodo", "Repeat", "Plug02"]);
 
     fireEvent.click(screen.getByRole("menuitem", { name: "Plugin" }));
 
@@ -116,9 +125,9 @@ describe("PromptBoxActionsMenu", () => {
     const setDraft = vi.fn();
     const host: PluginComposerHost = {
       scope: view.scope,
-      draft,
       textEffectKey: "plus-menu-update-test",
       getCurrent: () => draft,
+      subscribeDraft: () => () => {},
       setDraft,
       focus: () => document.getElementById("composer-focus-target")?.focus(),
     };
@@ -166,7 +175,7 @@ describe("PromptBoxActionsMenu", () => {
     });
   });
 
-  it("renders display-name groups and preserves focus deliberately moved by a plugin", async () => {
+  it("renders plugin rows without a header and preserves focus deliberately moved by a plugin", async () => {
     const focusedByPlugin = vi.fn();
     const view: ComposerView = {
       scope: { kind: "new-thread", projectId: null },
@@ -177,9 +186,9 @@ describe("PromptBoxActionsMenu", () => {
     const draft = emptyPromptDraftState();
     const host: PluginComposerHost = {
       scope: view.scope,
-      draft,
       textEffectKey: "plus-menu-test",
       getCurrent: () => draft,
+      subscribeDraft: () => () => {},
       setDraft: vi.fn(),
       focus: vi.fn(),
     };
@@ -221,6 +230,7 @@ describe("PromptBoxActionsMenu", () => {
             compactIconUrl: null,
             logoUrl: null,
             logoDarkUrl: null,
+            icons: new Map(),
           },
         ],
         [
@@ -231,6 +241,7 @@ describe("PromptBoxActionsMenu", () => {
             compactIconUrl: null,
             logoUrl: null,
             logoDarkUrl: null,
+            icons: new Map(),
           },
         ],
       ]),
@@ -260,8 +271,9 @@ describe("PromptBoxActionsMenu", () => {
       "Improve prompt",
       "Rewrite prompt",
     ]);
-    expect(screen.getByText("Alpha Assistant")).toBeTruthy();
-    expect(screen.getByText("Zeta Writer")).toBeTruthy();
+    expect(screen.queryByText("Plugin")).toBeNull();
+    expect(screen.queryByText("Alpha Assistant")).toBeNull();
+    expect(screen.queryByText("Zeta Writer")).toBeNull();
 
     fireEvent.click(screen.getByRole("menuitem", { name: "Improve prompt" }));
     await waitFor(() => {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ThreadQueuedMessage } from "@bb/domain";
 import {
   runCommand,
   setupCommandOutputTestEnvironment,
@@ -6,6 +7,33 @@ import {
 } from "../helpers/command-output-harness.js";
 import type { CommandRegistrar } from "../helpers/command-output-harness.js";
 import { registerThreadCommands } from "../../commands/thread/index.js";
+
+function queuedMessage(
+  overrides: Partial<ThreadQueuedMessage>,
+): ThreadQueuedMessage {
+  return {
+    id: "queued-1",
+    origin: null,
+    originPluginId: null,
+    initiator: "user",
+    senderThreadId: null,
+    threadId: "thread-1",
+    content: [{ type: "text", text: "Follow up", mentions: [] }],
+    model: "gpt-5",
+    reasoningLevel: "medium",
+    permissionMode: "auto",
+    serviceTier: "default",
+    groupWithNext: false,
+    sendAt: null,
+    waitingOn: null,
+    failureReason: null,
+    payload: { kind: "inline" },
+    editable: true,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
 
 describe("bb thread organization commands", () => {
   setupCommandOutputTestEnvironment();
@@ -54,6 +82,29 @@ describe("bb thread organization commands", () => {
     });
   });
 
+  it("shows agent and system senders in queued message rows", async () => {
+    const list = vi.fn(async () => [
+      queuedMessage({ id: "queued-user" }),
+      queuedMessage({
+        id: "queued-agent",
+        initiator: "agent",
+        senderThreadId: "thr_sender",
+      }),
+      queuedMessage({ id: "queued-system", initiator: "system" }),
+    ]);
+    stubServerApi({ "v1.queued-messages.$get": list });
+
+    await runCommand(["thread", "queue", "list"], register);
+
+    const output = vi
+      .mocked(console.log)
+      .mock.calls.map((args) => args.join(" "))
+      .join("\n");
+    expect(output).toContain("Sender");
+    expect(output).toContain("thr_sender");
+    expect(output).toContain("System");
+  });
+
   it("updates a queued message in place", async () => {
     const list = vi.fn(async () => [
       { id: "queued-1", updatedAt: 42 },
@@ -74,13 +125,13 @@ describe("bb thread organization commands", () => {
         "queued-1",
         "revised task",
         "--file",
-        "/tmp/spec.md",
+        "uploaded-spec.md",
         "--file",
-        "/tmp/data.json",
+        "uploaded-data.json",
         "--image",
-        "/tmp/mock.png",
+        "mock-uploaded.png",
         "--image",
-        "/tmp/detail.png",
+        "detail-uploaded.png",
       ],
       register,
     );
@@ -92,10 +143,10 @@ describe("bb thread organization commands", () => {
         expectedUpdatedAt: 42,
         input: [
           { type: "text", text: "revised task", mentions: [] },
-          { type: "localFile", path: "/tmp/spec.md" },
-          { type: "localFile", path: "/tmp/data.json" },
-          { type: "localImage", path: "/tmp/mock.png" },
-          { type: "localImage", path: "/tmp/detail.png" },
+          { type: "localFile", path: "uploaded-spec.md" },
+          { type: "localFile", path: "uploaded-data.json" },
+          { type: "localImage", path: "mock-uploaded.png" },
+          { type: "localImage", path: "detail-uploaded.png" },
         ],
       },
     });
@@ -123,6 +174,33 @@ describe("bb thread organization commands", () => {
       "Error: Queued message queued-1 not found on thread thread-1.",
     );
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it("reports when sending a queued message leaves it waiting", async () => {
+    const send = vi.fn(async () => ({
+      ok: true,
+      delivery: "queued",
+      queuedMessage: {
+        waitingOn: { kind: "provisioning" },
+        sendAt: null,
+      },
+    }));
+    stubServerApi({
+      "v1.threads.:id.queued-messages.:queuedMessageId.send.$post": send,
+    });
+
+    await runCommand(
+      ["thread", "queue", "send", "thread-1", "queued-1", "--mode", "steer"],
+      register,
+    );
+
+    expect(send).toHaveBeenCalledWith({
+      param: { id: "thread-1", queuedMessageId: "queued-1" },
+      json: { mode: "steer" },
+    });
+    expect(console.log).toHaveBeenCalledWith(
+      "Queued message queued-1 is still queued (waiting for the workspace)",
+    );
   });
 
   it("reorders pinned threads with explicit neighbors", async () => {

@@ -97,12 +97,6 @@ export interface MigrationWarningLogger {
 }
 
 export interface MigrateOptions {
-  /**
-   * Apply logical backfills for legacy lifecycle cleanup migrations while
-   * leaving large retired tables/columns in place. This keeps startup fast for
-   * already-created databases; strict migrations still physically remove those
-   * artifacts when this option is omitted.
-   */
   deferDestructiveLegacyCleanup?: boolean;
   logger?: MigrationWarningLogger;
 }
@@ -131,6 +125,10 @@ interface LatestAppliedMigrationRow {
 
 interface ExistingTableRow {
   name: string;
+}
+
+interface AppliedMigrationCountRow {
+  count: number;
 }
 
 interface PendingInteractionProviderRequestDuplicateRow {
@@ -505,6 +503,23 @@ function readAppliedMigrationCreatedAts(db: DbConnection): Set<number> {
   return new Set(rows.map((row) => row.createdAt));
 }
 
+export function countAppliedMigrations(db: DbConnection): number {
+  if (!tableExists(db, "__drizzle_migrations")) {
+    return 0;
+  }
+
+  const row = db.$client
+    .prepare<[], AppliedMigrationCountRow>(
+      `
+        SELECT COUNT(*) AS count
+        FROM __drizzle_migrations
+      `,
+    )
+    .get();
+
+  return row?.count ?? 0;
+}
+
 function readLatestAppliedMigrationCreatedAt(db: DbConnection): number | null {
   if (!tableExists(db, "__drizzle_migrations")) {
     return null;
@@ -584,9 +599,6 @@ function hasPublishedTimestampFallback(
     return false;
   }
 
-  // Published squash-era migrations can already exist with historical hashes.
-  // Drizzle uses created_at as its high-water mark, so those released rows must
-  // be accepted by their pinned tag/timestamp when the current file hash differs.
   return appliedCreatedAts.has(expectedMigration.createdAt);
 }
 
@@ -1102,9 +1114,6 @@ function applyReorderedCleanupMigrations(
   }
 }
 
-// 0031 externalized large event JSON and 0032 restored it inline, leaving no
-// persistent schema change. If neither migration started, current event rows
-// already match the final state, so only the migration ledger needs repair.
 function skipEventLargeValuesRoundTripForInlineEvents(
   db: DbConnection,
   migrationsFolder: string,
@@ -1251,6 +1260,8 @@ function repairBranchLocalQueuedGroupingBeforeInitialThreadSections(
 }
 
 const STAGED_CONNECT_MACHINE_ID_COLUMN = "_bb_connect_machine_id_pending";
+const STAGED_THREAD_STORAGE_DELETED_AT_COLUMN =
+  "_bb_thread_storage_deleted_at_pending";
 
 function stageExistingConnectMachineIdColumn(
   db: DbConnection,
@@ -1294,6 +1305,46 @@ function restoreStagedConnectMachineIdColumn(db: DbConnection): void {
   );
 }
 
+function stageExistingThreadStorageDeletedAtColumn(
+  db: DbConnection,
+  migrationsFolder: string,
+): boolean {
+  if (
+    !tableExists(db, "__drizzle_migrations") ||
+    !tableExists(db, "threads") ||
+    !columnExists(db, "threads", "storage_deleted_at")
+  ) {
+    return false;
+  }
+  const migration = requireExpectedAppliedMigration(
+    readExpectedAppliedMigrations(migrationsFolder),
+    "0120_perfect_clint_barton",
+  );
+  if (readAppliedMigrationCreatedAts(db).has(migration.createdAt)) {
+    return false;
+  }
+  db.$client.exec(
+    `ALTER TABLE threads RENAME COLUMN storage_deleted_at TO ${STAGED_THREAD_STORAGE_DELETED_AT_COLUMN}`,
+  );
+  return true;
+}
+
+function restoreStagedThreadStorageDeletedAtColumn(db: DbConnection): void {
+  if (!columnExists(db, "threads", STAGED_THREAD_STORAGE_DELETED_AT_COLUMN)) {
+    return;
+  }
+  if (!columnExists(db, "threads", "storage_deleted_at")) {
+    db.$client.exec(
+      `ALTER TABLE threads RENAME COLUMN ${STAGED_THREAD_STORAGE_DELETED_AT_COLUMN} TO storage_deleted_at`,
+    );
+    return;
+  }
+  db.$client.exec(
+    `UPDATE threads SET storage_deleted_at = ${STAGED_THREAD_STORAGE_DELETED_AT_COLUMN};
+     ALTER TABLE threads DROP COLUMN ${STAGED_THREAD_STORAGE_DELETED_AT_COLUMN};`,
+  );
+}
+
 function seedKeepAwakePluginConfiguration(db: DbConnection): void {
   if (
     !tableExists(db, "app_settings") ||
@@ -1302,8 +1353,6 @@ function seedKeepAwakePluginConfiguration(db: DbConnection): void {
   ) {
     return;
   }
-  // Idempotently preserve the retired core preference in the plugin's one
-  // configuration record. Once plugin-owned state exists, never overwrite it.
   db.$client.exec(`
     INSERT INTO plugin_kv (plugin_id, key, value, updated_at)
     SELECT
@@ -1361,10 +1410,6 @@ function repairBranchLocalThreadSearchMigrations(db: DbConnection): void {
     .run(...branchLocalThreadSearchMigrationCreatedAts);
 }
 
-// A branch-local tab migration briefly occupied the 0059 journal slot before
-// the published pending-interactions migration landed. Those databases have a
-// newer migration row, so Drizzle would otherwise skip the published 0059
-// migration and leave pending_interactions on its old shape.
 function repairBranchLocalThreadTabsBeforePendingInteractionsMigration(
   db: DbConnection,
   migrationsFolder: string,
@@ -1503,6 +1548,20 @@ export function migrate(db: DbConnection, options: MigrateOptions = {}): void {
   const migrationsFolder = resolveMigrationsFolder();
   const sqlite = db.$client;
 
+  sqlite.exec(
+    "CREATE TEMP TABLE IF NOT EXISTS bb_migration_local_host (id TEXT PRIMARY KEY)",
+  );
+  sqlite.exec("DELETE FROM bb_migration_local_host");
+  if (sqlite.name !== ":memory:") {
+    const identityPath = join(dirname(sqlite.name), "host-id");
+    if (existsSync(identityPath)) {
+      const hostId = readFileSync(identityPath, "utf8").trim();
+      if (hostId)
+        sqlite
+          .prepare("INSERT INTO bb_migration_local_host (id) VALUES (?)")
+          .run(hostId);
+    }
+  }
   sqlite.pragma("foreign_keys = OFF");
   try {
     assertNoDuplicatePendingInteractionProviderRequests(db);
@@ -1523,10 +1582,14 @@ export function migrate(db: DbConnection, options: MigrateOptions = {}): void {
       db,
       migrationsFolder,
     );
+    const stagedThreadStorageDeletedAt =
+      stageExistingThreadStorageDeletedAtColumn(db, migrationsFolder);
     try {
       drizzleMigrate(db, { migrationsFolder });
     } finally {
       if (stagedConnectMachineId) restoreStagedConnectMachineIdColumn(db);
+      if (stagedThreadStorageDeletedAt)
+        restoreStagedThreadStorageDeletedAtColumn(db);
     }
     applyReorderedCleanupMigrations(db, migrationsFolder);
     applyQueuedMessageGroupingSchema(db);

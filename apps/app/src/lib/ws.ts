@@ -2,6 +2,7 @@ import ReconnectingWebSocket from "partysocket/ws";
 import {
   changedMessageLenientSchema,
   pluginSignalLenientSchema,
+  pongMessageLenientSchema,
   realtimeSubscriptionTargetKey,
   threadOpenSignalLenientSchema,
   threadPaneActionSignalLenientSchema,
@@ -15,18 +16,53 @@ import type {
   ThreadOpenSignal,
   ThreadPaneActionSignal,
 } from "@bb/server-contract";
-import { buildDevWebSocketUrl } from "./dev-websocket-url";
+import { buildBrowserWebSocketUrl } from "./dev-websocket-url";
+import {
+  isDocumentVisible,
+  subscribeToDocumentVisibility,
+} from "./document-visibility";
 
 type ChangeCallback = (message: ChangedMessage) => void;
 type ThreadOpenCallback = (signal: ThreadOpenSignal) => void;
 type ThreadPaneActionCallback = (signal: ThreadPaneActionSignal) => void;
 type PluginSignalCallback = (signal: PluginSignal) => void;
-type ConnectedCallback = (event: { reconnected: boolean }) => void;
+export type WebSocketConnectedEvent =
+  | { reconnected: false }
+  | {
+      reconnected: true;
+      disconnectedAt: number;
+    };
+type ConnectedCallback = (event: WebSocketConnectedEvent) => void;
 type ConnectionStateCallback = () => void;
 export type WebSocketConnectionState =
   | "connecting"
   | "connected"
   | "reconnecting";
+
+export const REALTIME_PING_INTERVAL_MS = 25_000;
+export const REALTIME_PONG_TIMEOUT_MS = 5_000;
+
+export interface WebSocketManagerBrowserEvents {
+  subscribeToVisibility: (listener: () => void) => () => void;
+  isDocumentVisible: () => boolean;
+  subscribeToOnline: (listener: () => void) => () => void;
+}
+
+function createDefaultBrowserEvents(): WebSocketManagerBrowserEvents {
+  return {
+    subscribeToVisibility: subscribeToDocumentVisibility,
+    isDocumentVisible,
+    subscribeToOnline: (listener) => {
+      if (typeof window === "undefined") {
+        return () => {};
+      }
+      window.addEventListener("online", listener);
+      return () => {
+        window.removeEventListener("online", listener);
+      };
+    },
+  };
+}
 
 interface ActiveSubscription {
   count: number;
@@ -40,74 +76,209 @@ export class WebSocketManager {
   private threadOpenCallbacks = new Set<ThreadOpenCallback>();
   private threadPaneActionCallbacks = new Set<ThreadPaneActionCallback>();
   private pluginSignalCallbacks = new Set<PluginSignalCallback>();
-  // Ephemeral "open this file in the secondary panel" intents, keyed by thread.
-  // Held in memory only (cleared on reload) so a thread that is not currently
-  // viewed opens the file when it is next viewed. Last write wins per thread.
   private pendingOpenFileByThreadId = new Map<string, ThreadOpenFile>();
   private connectedCallbacks = new Set<ConnectedCallback>();
   private connectionStateCallbacks = new Set<ConnectionStateCallback>();
   private hasConnected = false;
   private connectionState: WebSocketConnectionState = "connecting";
+  private readonly browserEvents: WebSocketManagerBrowserEvents;
+  private unsubscribeBrowserEvents: (() => void) | null = null;
+  private lastServerActivityAt = 0;
+  private disconnectedAt: number | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(browserEvents?: WebSocketManagerBrowserEvents) {
+    this.browserEvents = browserEvents ?? createDefaultBrowserEvents();
+  }
 
   connect(): void {
     if (this.socket) return;
 
-    // In dev mode, connect directly to the server to bypass Vite's WS proxy
-    // which does not handle reconnection after backend restarts.
-    // In production, use the same origin (server serves the app).
-    const url =
-      buildDevWebSocketUrl({ path: "/ws" }) ??
-      `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
+    const url = buildBrowserWebSocketUrl("/ws");
 
-    this.socket = new ReconnectingWebSocket(url, undefined, {
+    const socket = new ReconnectingWebSocket(url, undefined, {
       minReconnectionDelay: 1000,
       maxReconnectionDelay: 30000,
       reconnectionDelayGrowFactor: 1.5,
       connectionTimeout: 10000,
       maxRetries: Infinity,
     });
+    this.socket = socket;
 
-    this.socket.onopen = () => {
+    socket.onopen = () => {
+      const disconnectedAt = this.disconnectedAt;
+      this.disconnectedAt = null;
+      this.lastServerActivityAt = Date.now();
       const reconnected = this.hasConnected;
       this.hasConnected = true;
       this.setConnectionState("connected");
-      // Re-subscribe to all active subscriptions
+      this.startPingLoop();
       for (const subscription of this.subscriptions.values()) {
         this.sendMessage({ type: "subscribe", target: subscription.target });
       }
+      const event: WebSocketConnectedEvent = reconnected
+        ? { reconnected, disconnectedAt: disconnectedAt ?? Date.now() }
+        : { reconnected };
       for (const callback of this.connectedCallbacks) {
-        callback({ reconnected });
+        callback(event);
       }
     };
 
-    this.socket.onmessage = (event: MessageEvent) => {
+    socket.onmessage = (event: MessageEvent) => {
       if (typeof event.data !== "string") return;
+      this.noteServerActivity();
       this.handleIncomingMessage(event.data);
     };
 
-    this.socket.onclose = () => {
-      this.setConnectionState(
-        this.hasConnected ? "reconnecting" : "connecting",
-      );
+    socket.onclose = () => {
+      if (this.pongTimer !== null) {
+        this.replaceSocket(this.lastServerActivityAt);
+        return;
+      }
+      this.markSocketLost(Date.now());
+    };
+
+    this.installBrowserEvents();
+  }
+
+  reconnectNow(): void {
+    const socket = this.socket;
+    if (!socket) {
+      return;
+    }
+    this.replaceSocket(
+      socket.readyState === WebSocket.OPEN
+        ? this.lastServerActivityAt
+        : Date.now(),
+    );
+  }
+
+  private replaceSocket(disconnectedAt: number): void {
+    const socket = this.socket;
+    if (!socket) {
+      return;
+    }
+    this.markSocketLost(disconnectedAt);
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onclose = null;
+    socket.close();
+    this.socket = null;
+    this.connect();
+  }
+
+  private installBrowserEvents(): void {
+    if (this.unsubscribeBrowserEvents) {
+      return;
+    }
+    const unsubscribeVisibility = this.browserEvents.subscribeToVisibility(
+      () => {
+        this.handleVisibilityChange();
+      },
+    );
+    const unsubscribeOnline = this.browserEvents.subscribeToOnline(() => {
+      this.probeOrReconnect();
+    });
+    this.unsubscribeBrowserEvents = () => {
+      unsubscribeVisibility();
+      unsubscribeOnline();
     };
   }
 
-  /**
-   * Parse and dispatch one raw server message. Public only so tests can
-   * exercise the routing without a live socket.
-   */
+  private handleVisibilityChange(): void {
+    if (!this.browserEvents.isDocumentVisible()) {
+      this.stopPingLoop();
+      return;
+    }
+    this.probeOrReconnect();
+    this.startPingLoop();
+  }
+
+  private probeOrReconnect(): void {
+    if (!this.socket || !this.browserEvents.isDocumentVisible()) {
+      return;
+    }
+    switch (this.socket.readyState) {
+      case WebSocket.OPEN:
+        this.sendPing();
+        return;
+      case WebSocket.CONNECTING:
+        return;
+      default:
+        this.reconnectNow();
+    }
+  }
+
+  private startPingLoop(): void {
+    if (this.pingTimer !== null || !this.browserEvents.isDocumentVisible()) {
+      return;
+    }
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    this.pingTimer = setInterval(() => {
+      this.sendPing();
+    }, REALTIME_PING_INTERVAL_MS);
+  }
+
+  private stopPingLoop(): void {
+    if (this.pingTimer !== null) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    this.clearPongTimer();
+  }
+
+  private sendPing(): void {
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    if (Date.now() - this.lastServerActivityAt < REALTIME_PONG_TIMEOUT_MS) {
+      return;
+    }
+    this.sendMessage({ type: "ping" });
+    if (this.pongTimer !== null) {
+      return;
+    }
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      this.reconnectNow();
+    }, REALTIME_PONG_TIMEOUT_MS);
+  }
+
+  private clearPongTimer(): void {
+    if (this.pongTimer !== null) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
+  }
+
+  private noteServerActivity(): void {
+    this.lastServerActivityAt = Date.now();
+    this.clearPongTimer();
+  }
+
+  private markSocketLost(at: number): void {
+    this.stopPingLoop();
+    if (this.hasConnected && this.disconnectedAt === null) {
+      this.disconnectedAt = at;
+    }
+    this.setConnectionState(this.hasConnected ? "reconnecting" : "connecting");
+  }
+
   handleIncomingMessage(data: string): void {
     let parsed: unknown;
     try {
       parsed = JSON.parse(data);
     } catch {
-      // Ignore malformed messages
       return;
     }
 
-    // Ephemeral thread-open broadcast. Notify layout listeners immediately;
-    // when it includes a file, buffer that file per thread until the target
-    // pane's secondary panel is ready to consume it.
+    if (pongMessageLenientSchema.safeParse(parsed).success) {
+      return;
+    }
+
     const threadOpen = threadOpenSignalLenientSchema.safeParse(parsed);
     if (threadOpen.success) {
       if (threadOpen.data.file !== null) {
@@ -131,8 +302,6 @@ export class WebSocketManager {
       return;
     }
 
-    // Ephemeral plugin realtime signal (bb.realtime.publish). Not buffered:
-    // only live useRealtime subscribers care, and V1 has no replay.
     const pluginSignal = pluginSignalLenientSchema.safeParse(parsed);
     if (pluginSignal.success) {
       for (const cb of this.pluginSignalCallbacks) {
@@ -141,9 +310,6 @@ export class WebSocketManager {
       return;
     }
 
-    // Lenient parse: tolerate a newer server (unknown fields stripped,
-    // unknown change kinds filtered) instead of dropping whole messages
-    // on additive contract changes.
     const msg = changedMessageLenientSchema.safeParse(parsed);
     if (msg.success) {
       for (const cb of this.callbacks) {
@@ -155,6 +321,14 @@ export class WebSocketManager {
   }
 
   disconnect(): void {
+    this.stopPingLoop();
+    if (this.hasConnected && this.disconnectedAt === null) {
+      this.disconnectedAt = Date.now();
+    }
+    if (this.unsubscribeBrowserEvents) {
+      this.unsubscribeBrowserEvents();
+      this.unsubscribeBrowserEvents = null;
+    }
     if (this.socket) {
       this.socket.close();
       this.socket = null;
@@ -221,11 +395,6 @@ export class WebSocketManager {
     };
   }
 
-  /**
-   * Return and clear the buffered "open file" intent for a thread, if any. The
-   * secondary panel calls this when the thread becomes visible so the file
-   * opens exactly once and is not re-opened on a later visit.
-   */
   consumePendingOpenFile(threadId: string): ThreadOpenFile | null {
     const pending = this.pendingOpenFileByThreadId.get(threadId);
     if (!pending) {
@@ -270,8 +439,6 @@ export class WebSocketManager {
   }
 }
 
-// Singleton instance — preserved across Vite HMR so the WebSocket connection
-// and its state survive module re-evaluation during dev rebuilds.
 function createOrReuse(): WebSocketManager {
   if (import.meta.hot?.data) {
     const existing = import.meta.hot.data.wsManager as

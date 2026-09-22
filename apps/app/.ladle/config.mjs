@@ -41,7 +41,9 @@ function formatNetworkUrls(serverUrl) {
 export default {
   stories: [
     "src/**/*.stories.tsx",
-    "../../plugins/provider-retry/**/*.stories.tsx",
+    "../../plugins/workflows/**/*.stories.tsx",
+    "../../plugins/ask-user-question/*.stories.tsx",
+    "../../plugins/provider-usage/*.stories.tsx",
   ],
   defaultStory: "",
   viteConfig: "./.ladle/vite.config.ts",

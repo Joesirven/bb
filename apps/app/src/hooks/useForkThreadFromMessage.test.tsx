@@ -1,19 +1,38 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, renderHook } from "@testing-library/react";
+import type { ReactNode } from "react";
 import type { Thread } from "@bb/domain";
+import { makeThread as makeThreadFixture } from "@bb/test-helpers/domain-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY,
   type ForkThreadCreateSeed,
-} from "@/lib/fork-thread-request";
+} from "@bb/client-core";
 import { getRootComposeRoutePath } from "@/lib/route-paths";
+import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import { useForkThreadFromMessage } from "./useForkThreadFromMessage";
 
 const mocks = vi.hoisted(() => ({
   fetchQuery: vi.fn(),
   navigate: vi.fn(),
   setRootComposeProjectId: vi.fn(),
+  queryClient: {
+    fetchQuery: (...args: unknown[]) => mocks.fetchQuery(...args),
+    getQueriesData: () => [
+      [
+        ["systemExecutionOptions"],
+        {
+          providers: [
+            {
+              id: "codex",
+              capabilities: { supportsFork: true },
+            },
+          ],
+        },
+      ],
+    ],
+  },
 }));
 
 vi.mock("react-router-dom", async (importOriginal) => {
@@ -28,24 +47,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-query")>();
   return {
     ...actual,
-    useQueryClient: () => ({
-      fetchQuery: mocks.fetchQuery,
-      // findCachedProviderInfo scans cached execution-options responses for
-      // the source provider's fork capability.
-      getQueriesData: () => [
-        [
-          ["systemExecutionOptions"],
-          {
-            providers: [
-              {
-                id: "codex",
-                capabilities: { supportsFork: true },
-              },
-            ],
-          },
-        ],
-      ],
-    }),
+    useQueryClient: () => mocks.queryClient,
   };
 });
 
@@ -54,35 +56,28 @@ vi.mock("@/lib/root-compose-selection", () => ({
 }));
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
-  const base: Thread = {
-    archivedAt: null,
+  return makeThreadFixture({
     createdAt: 1,
-    deletedAt: null,
     environmentId: "env_source",
     id: "thr_source",
     lastReadAt: null,
     latestAttentionAt: 1,
-    originKind: null,
-    originPluginId: null,
-    visibility: "visible",
-    parentThreadId: null,
-    pinnedAt: null,
     projectId: "proj_source",
-    providerId: "codex",
-    sourceThreadId: null,
-    status: "idle",
     title: null,
     titleFallback: "Fallback fork title",
-    sectionId: null,
     updatedAt: 1,
-  };
-  return { ...base, ...overrides };
+    ...overrides,
+  });
 }
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
+
+function Wrapper({ children }: { children: ReactNode }) {
+  return <RouteNavigationProvider>{children}</RouteNavigationProvider>;
+}
 
 describe("useForkThreadFromMessage", () => {
   it("opens the root composer with the source thread display title in the fork seed", async () => {
@@ -93,10 +88,12 @@ describe("useForkThreadFromMessage", () => {
       serviceTier: "fast",
     });
 
-    const { result } = renderHook(() =>
-      useForkThreadFromMessage({
-        sourceThread: makeThread(),
-      }),
+    const { result } = renderHook(
+      () =>
+        useForkThreadFromMessage({
+          sourceThread: makeThread(),
+        }),
+      { wrapper: Wrapper },
     );
 
     await act(async () => {
@@ -129,5 +126,33 @@ describe("useForkThreadFromMessage", () => {
       sourceThreadId: "thr_source",
       sourceThreadTitle: "Fallback fork title",
     });
+  });
+  it("keeps one handler identity across thread refetches and reads the latest thread", async () => {
+    mocks.fetchQuery.mockResolvedValue({
+      model: "gpt-5",
+      permissionMode: "accept-edits",
+      reasoningLevel: "high",
+      serviceTier: "fast",
+    });
+    const { result, rerender } = renderHook(
+      ({ sourceThread }: { sourceThread: Thread | null }) =>
+        useForkThreadFromMessage({ sourceThread }),
+      { initialProps: { sourceThread: makeThread() }, wrapper: Wrapper },
+    );
+    const first = result.current;
+
+    rerender({ sourceThread: makeThread({ title: "Renamed source" }) });
+    expect(result.current).toBe(first);
+
+    await act(async () => {
+      await first({ sourceSeqEnd: 3 });
+    });
+    const navigateState = mocks.navigate.mock.calls[0]?.[1]?.state as
+      | Record<string, unknown>
+      | undefined;
+    const seed = navigateState?.[FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY] as
+      | ForkThreadCreateSeed
+      | undefined;
+    expect(seed?.sourceThreadTitle).toBe("Renamed source");
   });
 });

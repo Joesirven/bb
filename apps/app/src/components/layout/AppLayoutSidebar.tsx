@@ -1,10 +1,11 @@
 import { useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useSidebarThreadReveal } from "@/components/sidebar/useSidebarThreadReveal";
 import { AppSidebar } from "@/components/sidebar/AppSidebar";
 import { SettingsSidebar } from "@/components/settings/SettingsSidebar";
-import { ToolsSidebar } from "@/components/tools/ToolsSidebar";
-import { useSidebar } from "@/components/ui/sidebar.js";
+import { ResourceSidebar } from "@/components/tools/ResourceSidebar";
+import { Sidebar, useSidebar } from "@/components/ui/sidebar.js";
 
-export type AppLayoutSidebarMode = "app" | "settings" | "tools";
+export type AppLayoutSidebarMode = "app" | "settings" | "plugins" | "skills";
 
 interface AppLayoutSidebarProps {
   mode: AppLayoutSidebarMode;
@@ -13,17 +14,8 @@ interface AppLayoutSidebarProps {
   appRoutePath: string;
   settingsRoutePath: string;
   toolsBackRoutePath: string;
-  toolsRoutePath?: string;
 }
 
-/**
- * Keeps the current mobile drawer mounted until its close animation finishes.
- *
- * Routes such as Settings replace the entire sidebar. Mobile closes are
- * intentionally deferred so the compositor can finish the slide before the
- * expensive React state commit. Swapping sidebar modes during that window
- * would mount a fresh, still-open panel and replay the close animation.
- */
 export function AppLayoutSidebar({
   mode,
   onResizeMouseDown,
@@ -31,35 +23,64 @@ export function AppLayoutSidebar({
   appRoutePath,
   settingsRoutePath,
   toolsBackRoutePath,
-  toolsRoutePath,
 }: AppLayoutSidebarProps) {
+  useSidebarThreadReveal();
   const { isCompactViewport, isMobileSidebarClosing } = useSidebar();
   const holdCurrentMode = isCompactViewport && isMobileSidebarClosing;
   const [lastVisibleMode, setLastVisibleMode] = useState(mode);
   if (!holdCurrentMode && lastVisibleMode !== mode) {
-    // React restarts this render before committing, so the next deferred close
-    // can retain the current mode without an effect and its follow-up commit.
     setLastVisibleMode(mode);
   }
   const renderedMode = holdCurrentMode ? lastVisibleMode : mode;
+
+  if (isCompactViewport) {
+    return (
+      <Sidebar>
+        <AppSidebar
+          onResizeMouseDown={onResizeMouseDown}
+          isResizing={isResizing}
+          settingsRoutePath={settingsRoutePath}
+          mobileHosted={{ hidden: renderedMode !== "app" }}
+        />
+        {renderedMode === "settings" ? (
+          <SettingsSidebar
+            onResizeMouseDown={onResizeMouseDown}
+            isResizing={isResizing}
+            appRoutePath={appRoutePath}
+            mobileHosted
+          />
+        ) : null}
+        {renderedMode === "plugins" || renderedMode === "skills" ? (
+          <ResourceSidebar
+            key={renderedMode}
+            workspace={renderedMode}
+            onResizeMouseDown={onResizeMouseDown}
+            isResizing={isResizing}
+            appRoutePath={toolsBackRoutePath}
+            mobileHosted
+          />
+        ) : null}
+      </Sidebar>
+    );
+  }
 
   if (renderedMode === "settings") {
     return (
       <SettingsSidebar
         onResizeMouseDown={onResizeMouseDown}
         isResizing={isResizing}
-        showTopReserve={true}
         appRoutePath={appRoutePath}
       />
     );
   }
 
-  if (renderedMode === "tools") {
+  if (renderedMode === "plugins" || renderedMode === "skills") {
     return (
-      <ToolsSidebar
+      <ResourceSidebar
+        key={renderedMode}
+        workspace={renderedMode}
         onResizeMouseDown={onResizeMouseDown}
         isResizing={isResizing}
-        showTopReserve={true}
         appRoutePath={toolsBackRoutePath}
       />
     );
@@ -69,9 +90,7 @@ export function AppLayoutSidebar({
     <AppSidebar
       onResizeMouseDown={onResizeMouseDown}
       isResizing={isResizing}
-      showTopReserve={true}
       settingsRoutePath={settingsRoutePath}
-      toolsRoutePath={toolsRoutePath}
     />
   );
 }

@@ -1,18 +1,24 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, desc, eq, lt, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import {
   deleteThreadEventSuffixInTransaction,
   events,
   getActivePendingInteractionForThread,
-  getExperiments,
   getHighWaterMarks,
   getThread,
   hasQueuedThreadMessages,
   hasRootStoredTurnStarted,
+  classifyStoredProviderThreadClaim,
+  wouldRemoveSharedProviderSessionClaim,
   listActiveBackgroundTaskCountsByThreadIds,
   type DbQueryConnection,
 } from "@bb/db";
-import { threadScope, type Thread, type ThreadEvent } from "@bb/domain";
+import {
+  threadScope,
+  type PromptInput,
+  type Thread,
+  type ThreadEvent,
+} from "@bb/domain";
 import type {
   EditMessageRequest,
   EditMessageResponse,
@@ -33,6 +39,7 @@ import {
   buildExecutionOptions,
   buildThreadStartCommand,
 } from "./thread-commands.js";
+import { resolveDispatchAuthor } from "./dispatch-author.js";
 import { resolvePermissionEscalation } from "./thread-runtime-config.js";
 import { requireReadyThreadEnvironment } from "./thread-turn-dispatch.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
@@ -45,6 +52,7 @@ import {
   sendThreadMessage,
 } from "./thread-send.js";
 import { requestThreadStopForCurrentState } from "./thread-lifecycle.js";
+import { getLeadingAgentOnlyInput } from "./deferred-first-turn-context.js";
 
 type ThreadRewindPrepareCommand = Extract<
   HostDaemonCommand,
@@ -52,12 +60,20 @@ type ThreadRewindPrepareCommand = Extract<
 >;
 
 interface EditableTurn {
+  leadingAgentOnlyInput: PromptInput[];
   currentTurnId: string;
   oldMaxSequence: number;
   precedingProviderCheckpoint: string | null;
   requestSequence: number;
   sourceProviderThreadId: string | null;
 }
+
+const TURN_REQUEST_ROW_COLUMNS = {
+  data: events.data,
+  sequence: events.sequence,
+  threadId: events.threadId,
+  type: events.type,
+};
 
 function conflict(message: string): never {
   throw new ApiError(409, "invalid_request", message);
@@ -174,6 +190,23 @@ function getTurnCompletion(
   return event.type === "turn/completed" ? event : null;
 }
 
+const CODEX_NATIVE_TURN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function resolveTurnProviderCheckpointId(args: {
+  providerCheckpointId: string | null | undefined;
+  providerId: string;
+  turnId: string;
+}): string | null {
+  if (args.providerCheckpointId) {
+    return args.providerCheckpointId;
+  }
+  return args.providerId === "codex" &&
+    CODEX_NATIVE_TURN_ID_PATTERN.test(args.turnId)
+    ? args.turnId
+    : null;
+}
+
 function resolveEditableTurnCandidate(
   db: DbQueryConnection,
   thread: Thread,
@@ -218,22 +251,6 @@ function resolveEditableTurnCandidate(
   ) {
     conflict("The selected message does not belong to a root turn");
   }
-  const turnAcceptedCount = db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(events)
-    .where(
-      and(
-        eq(events.threadId, thread.id),
-        eq(events.type, "turn/input/accepted"),
-        eq(events.turnId, accepted.turnId),
-      ),
-    )
-    .get()?.count;
-  if (turnAcceptedCount !== 1) {
-    conflict(
-      "A turn containing steers or multiple accepted messages cannot be edited",
-    );
-  }
   const precedingTurn = db
     .select({ turnId: events.turnId })
     .from(events)
@@ -242,7 +259,7 @@ function resolveEditableTurnCandidate(
         eq(events.threadId, thread.id),
         eq(events.type, "turn/started"),
         lt(events.sequence, requestRow.sequence),
-        sql`COALESCE(json_extract(${events.data}, '$.parentToolCallId'), '') = ''`,
+        isNull(events.parentToolCallId),
       ),
     )
     .orderBy(desc(events.sequence))
@@ -260,18 +277,50 @@ function resolveEditableTurnCandidate(
   ) {
     conflict("This earlier turn has no provider history");
   }
+  const precedingSessionClaim =
+    precedingCompletion?.providerThreadId == null
+      ? null
+      : classifyStoredProviderThreadClaim(db, {
+          providerThreadId: precedingCompletion.providerThreadId,
+          threadId: thread.id,
+        });
+  if (precedingSessionClaim === "foreign") {
+    conflict(
+      "This earlier turn is recorded under another thread's provider session",
+    );
+  }
+  if (precedingSessionClaim === "ambiguous") {
+    conflict(
+      "This earlier turn is recorded under a provider session another thread announced at the same moment",
+    );
+  }
   const precedingProviderCheckpoint =
     precedingTurnId === null
       ? null
-      : thread.providerId === "codex"
-        ? precedingTurnId
-        : (precedingCompletion?.providerCheckpointId ?? null);
+      : resolveTurnProviderCheckpointId({
+          providerCheckpointId: precedingCompletion?.providerCheckpointId,
+          providerId: thread.providerId,
+          turnId: precedingTurnId,
+        });
   if (precedingTurnId !== null && precedingProviderCheckpoint === null) {
     conflict("This earlier provider turn has no editable history checkpoint");
   }
+  const oldMaxSequence = getHighWaterMarks(db, [thread.id])[thread.id] ?? 0;
+  if (
+    wouldRemoveSharedProviderSessionClaim(db, {
+      cutoffSequence: requestRow.sequence,
+      oldMaxSequence,
+      threadId: thread.id,
+    })
+  ) {
+    conflict(
+      "Editing this message would erase provider session ownership shared with another thread. Clear context (/clear or bb thread clear) for a new session; history is kept.",
+    );
+  }
   return {
+    leadingAgentOnlyInput: getLeadingAgentOnlyInput(request.input),
     currentTurnId: accepted.turnId,
-    oldMaxSequence: getHighWaterMarks(db, [thread.id])[thread.id] ?? 0,
+    oldMaxSequence,
     precedingProviderCheckpoint,
     requestSequence: requestRow.sequence,
     sourceProviderThreadId:
@@ -303,12 +352,7 @@ function resolveEditableTurn(
 
   if (requestSequence !== undefined) {
     const requestRow = db
-      .select({
-        data: events.data,
-        sequence: events.sequence,
-        threadId: events.threadId,
-        type: events.type,
-      })
+      .select(TURN_REQUEST_ROW_COLUMNS)
       .from(events)
       .where(
         and(
@@ -326,12 +370,7 @@ function resolveEditableTurn(
   }
 
   const requestRows = db
-    .select({
-      data: events.data,
-      sequence: events.sequence,
-      threadId: events.threadId,
-      type: events.type,
-    })
+    .select(TURN_REQUEST_ROW_COLUMNS)
     .from(events)
     .where(
       and(
@@ -368,8 +407,6 @@ function rewindPrepareCommandFromStart(
     sourceProviderThreadId: string;
   },
 ): ThreadRewindPrepareCommand {
-  // The daemon parses commands strictly, so every start-only field must stay
-  // in this destructure — the rest is exactly the shared runtime context.
   const {
     type: _type,
     requestId: _requestId,
@@ -390,12 +427,6 @@ export async function editThreadMessage(
     thread: Thread;
   },
 ): Promise<EditMessageResponse> {
-  if (!getExperiments(deps.db).editMessages) {
-    conflict("Enable the Edit messages experiment before editing a message");
-  }
-  // Rewinding to an earlier point in the provider session is what an edit
-  // is, so the provider's declared rewind support gates it. Fork alone is
-  // not enough — ACP clones whole sessions tip-only.
   if (!deps.providerRegistry.supportsSessionRewind(args.thread.providerId)) {
     conflict(`Editing messages is not supported for ${args.thread.providerId}`);
   }
@@ -414,7 +445,7 @@ export async function editThreadMessage(
       requestSequence: committed.requestSequence,
     };
   }
-  if (deps.pendingInteractions.hasPendingThreadInteraction(args.thread.id)) {
+  if (deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(args.thread.id)) {
     conflict("Resolve the pending interaction before editing the message");
   }
   if (hasQueuedThreadMessages(deps.db, args.thread.id)) {
@@ -426,7 +457,11 @@ export async function editThreadMessage(
     senderThreadId: args.payload.senderThreadId,
     targetThread: initialThread,
   });
-  const initiator = senderThreadId === null ? "user" : "agent";
+  const { initiator } = resolveDispatchAuthor({
+    retrying: false,
+    senderThreadId,
+    startedOnBehalfOf: null,
+  });
 
   const initialTarget = resolveEditableTurn(
     deps.db,
@@ -446,12 +481,9 @@ export async function editThreadMessage(
   await ensureHostSessionReadyForWork(deps, {
     hostId: readyEnvironment.hostId,
   });
-  const execution = await buildExecutionOptions(
-    deps,
-    args.payload,
-    { threadId: editableThread.id },
-    "client/turn/requested",
-  );
+  const execution = await buildExecutionOptions(deps, args.payload, {
+    threadId: editableThread.id,
+  });
 
   let stagedProviderThreadId: string | null = null;
   let rewindLeaseId: string | null = null;
@@ -467,7 +499,6 @@ export async function editThreadMessage(
       requestId: createClientTurnRequestId(),
       execution,
       permissionEscalation: resolvePermissionEscalation({
-        thread: editableThread,
         initiator,
       }),
       environment: readyEnvironment,
@@ -576,7 +607,11 @@ export async function editThreadMessage(
           ? { onCommandSettled: discardStagedRewind }
           : {}),
       },
-      payload: { ...sendPayload, mode: "start" },
+      payload: {
+        ...sendPayload,
+        input: [...target.leadingAgentOnlyInput, ...sendPayload.input],
+        mode: "start",
+      },
       thread: editableThread,
       trigger: "user",
     });

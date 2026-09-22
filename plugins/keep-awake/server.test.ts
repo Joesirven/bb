@@ -1,5 +1,8 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import {
+  createFakePluginHost,
+  makeHostResponse,
+} from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
 import plugin from "./server.js";
 
@@ -13,9 +16,7 @@ type RealtimeConnectionSubscription = Extract<
   { event: "realtime:connection" }
 >;
 type SdkSubscription = Parameters<BbPluginApi["sdk"]["subscribe"]>[0];
-type HostRecord = Awaited<
-  ReturnType<BbPluginApi["sdk"]["hosts"]["list"]>
->[number];
+type HostResponse = ReturnType<typeof makeHostResponse>;
 
 function isHostChangedSubscription(
   subscription: SdkSubscription,
@@ -31,19 +32,9 @@ function isRealtimeConnectionSubscription(
 
 function hostRecord(
   id: string,
-  status: HostRecord["status"] = "connected",
-): HostRecord {
-  return {
-    id,
-    name: id,
-    type: "persistent",
-    status,
-    maxPermissionMode: "full",
-    lastSeenAt: null,
-    lastRejectedProtocolVersion: null,
-    createdAt: 1,
-    updatedAt: 1,
-  };
+  status: "connected" | "disconnected" = "connected",
+): HostResponse {
+  return makeHostResponse({ id, name: id, status });
 }
 
 function enabledInput(input: unknown): boolean {
@@ -179,7 +170,7 @@ describe("builtin Keep Awake server entry", () => {
 
   it("reconciles when a host connects after startup", async () => {
     const subscriptions = lifecycleSubscriptions();
-    let status: HostRecord["status"] = "disconnected";
+    let status: HostResponse["status"] = "disconnected";
     const host = createFakePluginHost({
       pluginId: "keep-awake",
       sdk: {
@@ -210,40 +201,101 @@ describe("builtin Keep Awake server entry", () => {
     await host.harness.dispose();
   });
 
-  it("reconciles immediately after its host worker exits unexpectedly", async () => {
-    const subscriptions = lifecycleSubscriptions();
-    const host = createFakePluginHost({
-      pluginId: "keep-awake",
-      sdk: {
-        subscribe: subscriptions.subscribe,
-        hosts: { list: async () => [hostRecord("host-1")] },
-      },
-      experimental_callHostRpc: () => ({ enabled: true, supported: true }),
-    });
-    await host.bb.storage.kv.set("configuration", {
-      enabled: true,
-      selection: { mode: "all" },
-    });
-    await plugin(host.bb);
-    const running = host.harness.runService("desired-state-reconciler");
-    await vi.waitFor(() => {
+  it("retries after a backoff delay when its host worker exits unexpectedly", async () => {
+    vi.useFakeTimers();
+    try {
+      const subscriptions = lifecycleSubscriptions();
+      const host = createFakePluginHost({
+        pluginId: "keep-awake",
+        sdk: {
+          subscribe: subscriptions.subscribe,
+          hosts: { list: async () => [hostRecord("host-1")] },
+        },
+        experimental_callHostRpc: () => ({ enabled: true, supported: true }),
+      });
+      await host.bb.storage.kv.set("configuration", {
+        enabled: true,
+        selection: { mode: "all" },
+      });
+      await plugin(host.bb);
+      const running = host.harness.runService("desired-state-reconciler");
+      await vi.advanceTimersByTimeAsync(0);
       expect(host.harness.experimental_hostRpcCalls).toHaveLength(1);
-    });
 
-    await host.harness.experimental_emitHostWorkerExit("host-1");
+      await host.harness.experimental_emitHostWorkerExit("host-1");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.harness.experimental_hostRpcCalls).toHaveLength(1);
+      expect(host.harness.logEntries).toContainEqual({
+        level: "warn",
+        message:
+          "Keep Awake host worker exited unexpectedly on host host-1; retrying",
+      });
 
-    await vi.waitFor(() => {
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(host.harness.experimental_hostRpcCalls).toHaveLength(2);
-    });
-    expect(host.harness.logEntries).toContainEqual({
-      level: "warn",
-      message:
-        "Keep Awake host worker exited unexpectedly on host host-1; retrying",
-    });
 
-    running.controller.abort();
-    await running.done;
-    await host.harness.dispose();
+      running.controller.abort();
+      await running.done;
+      await host.harness.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("backs off exponentially while its host worker crash-loops", async () => {
+    vi.useFakeTimers();
+    try {
+      const subscriptions = lifecycleSubscriptions();
+      let harness: ReturnType<typeof createFakePluginHost>["harness"] | null =
+        null;
+      const host = createFakePluginHost({
+        pluginId: "keep-awake",
+        sdk: {
+          subscribe: subscriptions.subscribe,
+          hosts: { list: async () => [hostRecord("host-1")] },
+        },
+        experimental_callHostRpc: async () => {
+          await harness?.experimental_emitHostWorkerExit("host-1");
+          throw new Error("host plugin worker exited (1)");
+        },
+      });
+      harness = host.harness;
+      await host.bb.storage.kv.set("configuration", {
+        enabled: true,
+        selection: { mode: "all" },
+      });
+      await plugin(host.bb);
+      const running = host.harness.runService("desired-state-reconciler");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.harness.experimental_hostRpcCalls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(host.harness.experimental_hostRpcCalls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(host.harness.experimental_hostRpcCalls).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(host.harness.experimental_hostRpcCalls).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(host.harness.experimental_hostRpcCalls).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(host.harness.experimental_hostRpcCalls).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(host.harness.experimental_hostRpcCalls.length).toBeLessThanOrEqual(
+        7,
+      );
+
+      const before = host.harness.experimental_hostRpcCalls.length;
+      const result = await host.harness.runCli(["disable"]);
+      expect(result.exitCode).toBe(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.harness.experimental_hostRpcCalls).toHaveLength(before + 1);
+
+      running.controller.abort();
+      await running.done;
+      await host.harness.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("loads its host selection from plugin KV and exposes CLI parity", async () => {
@@ -306,6 +358,58 @@ describe("builtin Keep Awake server entry", () => {
       exitCode: 0,
       stdout: "host-1\nhost-2",
     });
+
+    await host.harness.dispose();
+  });
+
+  it("renders help, refuses unknown flags, and reports errors as JSON", async () => {
+    const host = createFakePluginHost({
+      pluginId: "keep-awake",
+      sdk: { hosts: { list: async () => [] } },
+    });
+    await plugin(host.bb);
+
+    for (const argv of [["--help"], ["-h"], ["hosts", "--help"]]) {
+      const help = await host.harness.runCli(argv);
+      expect(help.exitCode, argv.join(" ")).toBe(0);
+      expect(help.stderr).toBe("");
+      expect(help.stdout).toContain("bb keep-awake");
+    }
+    expect((await host.harness.runCli(["hosts", "--help"])).stdout).toContain(
+      "<host-id...>",
+    );
+
+    const unknownFlag = await host.harness.runCli(["status", "--jsn"]);
+    expect(unknownFlag.exitCode).toBe(1);
+    expect(unknownFlag.stderr).toContain("unknown option '--jsn'");
+    expect(unknownFlag.stderr).toContain("(Did you mean --json?)");
+
+    const unknownCommand = await host.harness.runCli(["enabel"]);
+    expect(unknownCommand.exitCode).toBe(1);
+    expect(unknownCommand.stderr).toContain("unknown command 'enabel'");
+    expect(unknownCommand.stderr).toContain("(Did you mean enable?)");
+
+    const stray = await host.harness.runCli(["status", "host-1"]);
+    expect(stray.exitCode).toBe(1);
+    expect(stray.stderr).toContain("unexpected argument 'host-1'");
+
+    const envelope = await host.harness.runCli([
+      "hosts",
+      "all",
+      "host-1",
+      "--json",
+    ]);
+    expect(envelope.exitCode).toBe(1);
+    expect(JSON.parse(envelope.stdout)).toMatchObject({
+      ok: false,
+      error: { code: "invalid_host_selection" },
+    });
+    expect(envelope.stderr).toContain(
+      '"all" cannot be combined with individual host ids',
+    );
+    await expect(
+      host.bb.storage.kv.get("configuration"),
+    ).resolves.toBeUndefined();
 
     await host.harness.dispose();
   });

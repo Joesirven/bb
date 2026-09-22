@@ -16,8 +16,12 @@ import {
 import { publishAutomationChange } from "./realtime.js";
 import { executeStoredScript, mapScriptResultToRun } from "./script-runner.js";
 import type { AutomationExecution } from "./rpc-types.js";
+import type {
+  ProjectsSdk,
+  ScriptWorkingDirectoryResolver,
+} from "./working-directory.js";
 
-export type RunFailureHandler = (error: unknown) => void;
+type RunFailureHandler = (error: unknown) => void;
 type AgentThreadsSdk = {
   get(
     args: Parameters<BbPluginApi["sdk"]["threads"]["get"]>[0],
@@ -29,8 +33,11 @@ type AgentThreadsSdk = {
     args: Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0],
   ): Promise<unknown>;
 };
-type AgentRunApi = Pick<BbPluginApi, "realtime" | "log"> & {
+export type AgentRunApi = Pick<BbPluginApi, "realtime" | "log"> & {
   sdk: { threads: AgentThreadsSdk };
+};
+export type ScriptRunApi = Pick<BbPluginApi, "realtime" | "log"> & {
+  sdk: { projects: ProjectsSdk };
 };
 
 const sdkThreadSchema = z
@@ -38,7 +45,14 @@ const sdkThreadSchema = z
     id: z.string(),
     archivedAt: z.number().nullable(),
     deletedAt: z.number().nullable(),
-    status: z.enum(["idle", "active", "starting", "stopping", "error"]),
+    status: z.enum([
+      "pending",
+      "idle",
+      "active",
+      "starting",
+      "stopping",
+      "error",
+    ]),
   })
   .passthrough();
 type SdkThread = z.infer<typeof sdkThreadSchema>;
@@ -59,16 +73,10 @@ function isThreadGoneError(error: unknown): boolean {
   return threadGoneErrorSchema.safeParse(error).success;
 }
 
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * Thread creation rejects 404 project_not_found/project_unavailable when the
- * automation's project was deleted. Detected structurally (the SDK's
- * BbHttpError carries status + code) because the bundled plugin cannot
- * instanceof-match the host's error class.
- */
 function isProjectGoneError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return projectGoneErrorSchema.safeParse(error).success;
@@ -117,6 +125,10 @@ export async function executeAgentRun(
         title: args.automation.name,
         providerId: args.execution.providerId,
         model: args.execution.model,
+        reasoningLevel: args.execution.reasoningLevel,
+        ...(args.execution.serviceTier === undefined
+          ? {}
+          : { serviceTier: args.execution.serviceTier }),
         permissionMode: args.execution.permissionMode,
       }),
     );
@@ -137,11 +149,6 @@ export async function executeAgentRun(
   }
 }
 
-/**
- * Failure policy for agent dispatch: a deleted project is terminal (the
- * project never comes back), so disable the automation and close the run
- * instead of treating the failure as transient and scheduling another run.
- */
 function settleDispatchFailure(
   bb: Pick<BbPluginApi, "log">,
   db: Db,
@@ -182,6 +189,7 @@ async function reuseTargetThreadForRun(
       await bb.sdk.threads.get({ threadId: args.targetThreadId }),
     );
   } catch (error) {
+    if (!isThreadGoneError(error)) throw error;
     closeRunForUnusableTargetThread(bb, db, {
       ...args,
       detail: errorMessage(error),
@@ -224,12 +232,6 @@ async function reuseTargetThreadForRun(
   });
 }
 
-/**
- * The target thread is gone or unusable — a deliberate disable, not a
- * transient dispatch failure: close the run failed and leave the automation
- * disabled instead of treating the failure as transient and scheduling
- * another run.
- */
 function closeRunForUnusableTargetThread(
   bb: Pick<BbPluginApi, "log">,
   db: Db,
@@ -252,7 +254,7 @@ function closeRunForUnusableTargetThread(
 }
 
 export async function executeScriptRun(
-  bb: Pick<BbPluginApi, "realtime" | "log">,
+  bb: ScriptRunApi,
   db: Db,
   args: {
     pluginDataDir: string;
@@ -261,6 +263,7 @@ export async function executeScriptRun(
     execution: Extract<AutomationExecution, { mode: "script" }>;
     onFailure: RunFailureHandler;
     serverUrl: string;
+    resolveWorkingDirectory: ScriptWorkingDirectoryResolver;
   },
 ): Promise<void> {
   try {
@@ -274,6 +277,15 @@ export async function executeScriptRun(
       });
       return;
     }
+    const workingDir = await args.resolveWorkingDirectory(
+      args.automation.projectId,
+      args.execution.workingDirectory,
+    );
+    if (workingDir === null) {
+      throw new Error(
+        `Project ${args.automation.projectId} has no source on the bb server host`,
+      );
+    }
     const result = await executeStoredScript({
       pluginDataDir: args.pluginDataDir,
       automationId: args.automation.id,
@@ -284,10 +296,9 @@ export async function executeScriptRun(
       timeoutMs: args.execution.timeoutMs,
       env: args.execution.env,
       serverUrl: args.serverUrl,
+      workingDir,
     });
     const mapped = mapScriptResultToRun(result);
-    // Close with the completion time, not dispatch time — scripts run for
-    // up to 15 minutes and the duration surfaces in the run history.
     closeAutomationRun(db, {
       runId: args.run.id,
       status: mapped.status,
@@ -343,23 +354,6 @@ type ReconcileOutcome =
   | { status: "failed"; error: string }
   | { status: "skipped"; skipReason: string };
 
-/**
- * Settles the running rows this process cannot otherwise settle. Called once
- * when the plugin starts: a run row survives a server crash or restart, but
- * the process that owned it does not, and thread settlement events fired
- * while the plugin was down were never delivered. Left alone, such a row
- * blocks its automation forever under single-flight.
- *
- * - Script runs: the child process died with the previous server. Skipped as
- *   interrupted (the outcome is unknown; it is not the automation's fault).
- * - Agent runs without a thread: dispatch never got that far. Skipped.
- * - Agent runs with a thread: ask the server. Idle settles as succeeded and
- *   error as failed (the same rules the live events apply); a deleted,
- *   archived, or missing thread is skipped as interrupted; a thread that is
- *   still starting, active, or stopping keeps its row, and the live event
- *   settles it. A transport failure leaves the row alone and logs, rather
- *   than closing a run whose thread may well be alive.
- */
 export async function reconcileRunningAutomationRuns(
   bb: AgentRunApi,
   db: Db,
@@ -445,6 +439,10 @@ async function reconcileOutcome(
         status: "failed",
         error: "Turn failed while the automations plugin was not running",
       };
+    // Still going somewhere: leave the run marked running and re-check later.
+    // `pending` belongs here — the thread's first dispatch is queued, not
+    // failed, so the run has neither succeeded nor finished.
+    case "pending":
     case "starting":
     case "active":
     case "stopping":

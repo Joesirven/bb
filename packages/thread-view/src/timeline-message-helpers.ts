@@ -6,7 +6,7 @@ export function isTimelineTerminalMessage(
   return message.kind === "assistant-text" || message.kind === "error";
 }
 
-export function isTimelineSummaryGroupableSteerMessage(
+function isTimelineSummaryGroupableSteerMessage(
   message: EventProjectionMessage,
 ): boolean {
   return (
@@ -25,13 +25,7 @@ export function isTimelineUngroupableMessage(
   if (message.kind === "assistant-text") {
     return message.isLegacyUserMessage === true;
   }
-  return message.kind === "debug/raw-event";
-}
-
-export function isTimelineSummaryCountedMessage(
-  message: EventProjectionMessage,
-): boolean {
-  return !isTimelineUngroupableMessage(message);
+  return false;
 }
 
 export function isSingletonContextManagementOperation(

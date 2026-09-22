@@ -17,25 +17,19 @@ import { useResolvedComposerPlusMenuItems } from "@/components/plugin/composer-s
 import { useOptionalPluginComposerView } from "@/components/plugin/plugin-composer-host";
 import { Icon, type IconName } from "@bb/shared-ui/icon";
 import { COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS } from "@bb/shared-ui/coarse-pointer-sizing";
-import { CREATE_PLUGIN_PROMPT } from "@/lib/create-resource-prompts";
-import type { ProviderPromptActionCommand } from "./mentions/command-trigger";
+import { CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS } from "@bb/shared-ui/chrome-style-tokens";
+import { CREATE_PLUGIN_PROMPT } from "@bb/client-core";
+import type { ProviderPromptActionCommand } from "@bb/client-core";
 
-export type PromptBoxActionKind =
-  | "skills"
-  | "plan"
-  | "goal"
-  | "automation"
-  | "plugin";
+type PromptBoxActionKind = "skills" | "plan" | "goal" | "automation" | "plugin";
 
 export interface PromptBoxAction {
   kind: PromptBoxActionKind;
   text: string;
   command?: ProviderPromptActionCommand;
-  label?: string;
-  disabled?: boolean;
 }
 
-export interface PromptBoxActionsMenuProps {
+interface PromptBoxActionsMenuProps {
   actions?: readonly PromptBoxAction[];
   isAttaching?: boolean;
   onAttach?: () => void;
@@ -62,11 +56,6 @@ export const AUTOMATION_PROMPT_ACTION: PromptBoxAction = {
   text: "/automation ",
 };
 
-/**
- * Seeds the composer with the plugin prompt prefix the plugin library uses, so
- * the user finishes one sentence and the agent reaches the plugin-authoring
- * skill. There is no provider command for it, so the text is inserted as is.
- */
 export const CREATE_PLUGIN_PROMPT_ACTION: PromptBoxAction = {
   kind: "plugin",
   text: CREATE_PLUGIN_PROMPT,
@@ -97,22 +86,15 @@ const PROMPT_ACTION_PRESENTATION = {
     label: "Automation",
     icon: "Repeat",
   },
-  // The icons follow the Tools navigation sections, so "Skills" and "Plugin"
-  // read the same here as they do in the sidebar. See tools-navigation.ts.
   plugin: {
     label: "Plugin",
-    icon: "ElectricPlugs",
+    icon: "Plug02",
   },
 } as const satisfies Record<
   PromptBoxActionKind,
   { label: string; icon: IconName }
 >;
 
-/**
- * Adds the app-owned prompt actions to the provider-owned ones. Providers
- * describe only their own composer commands, so bb appends the actions it owns
- * itself and keeps a provider entry when the provider already supplies one.
- */
 export function withAppPromptActions(
   actions: readonly PromptBoxAction[],
 ): PromptBoxAction[] {
@@ -198,15 +180,11 @@ export function PromptBoxActionsMenu({
           aria-label="Prompt actions"
           className={cn(
             COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS,
-            // Outdent so the "+" glyph lines up with the placeholder/text
-            // (toolbar px-3.5 + button px-2 sits 6px right of the editor's px-4).
+            CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
             "-ml-1.5",
           )}
         >
-          <Icon
-            name={isAttaching ? "Spinner" : "Plus"}
-            className={cn("size-4", isAttaching && "animate-spin")}
-          />
+          <Icon name="Plus" className="size-4" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -253,7 +231,6 @@ export function PromptBoxActionsMenu({
           return (
             <DropdownMenuItem
               key={action.kind}
-              disabled={action.disabled}
               onSelect={() => {
                 selectedItemRef.current = true;
                 onAction(action);
@@ -264,32 +241,22 @@ export function PromptBoxActionsMenu({
                 className="size-4 text-muted-foreground"
                 aria-hidden
               />
-              {action.label ?? presentation.label}
+              {presentation.label}
             </DropdownMenuItem>
           );
         })}
         {pluginItems.length > 0 ? <DropdownMenuSeparator /> : null}
-        {pluginItems.map((contribution, index) => {
-          const contributingPluginCount = new Set(
-            pluginItems.map((candidate) => candidate.pluginId),
-          ).size;
-          const previous = pluginItems[index - 1];
-          const startsPluginGroup =
-            contributingPluginCount >= 2 &&
-            previous?.pluginId !== contribution.pluginId;
-          return (
-            <PluginComposerPlusMenuEntry
-              key={contribution.key}
-              contribution={contribution}
-              showPluginLabel={startsPluginGroup}
-              onSelected={(selection) => {
-                selectedItemRef.current = true;
-                pluginSelectionRef.current = selection;
-                queueMicrotask(() => restorePluginComposerFocus(selection));
-              }}
-            />
-          );
-        })}
+        {pluginItems.map((contribution) => (
+          <PluginComposerPlusMenuEntry
+            key={contribution.key}
+            contribution={contribution}
+            onSelected={(selection) => {
+              selectedItemRef.current = true;
+              pluginSelectionRef.current = selection;
+              queueMicrotask(() => restorePluginComposerFocus(selection));
+            }}
+          />
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );

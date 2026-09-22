@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { Folder, Label, Preset } from "../../shared/contract.js";
+import { errorMessage } from "../../shared/errors.js";
 import {
   listAllTasks,
   useFolders,
@@ -19,11 +20,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@bb/shared-ui/tabs";
 import { Button } from "@bb/shared-ui/button";
 import { Input } from "@bb/shared-ui/input";
 import { Icon } from "@bb/shared-ui/icon";
-import { cn } from "@bb/shared-ui/lib/utils";
 import { ConfirmDialog } from "../../components/confirm-dialog.js";
 import {
   PERMISSION_LABELS,
-  PERMISSION_MODES,
   PresetDialog,
   describePresetEnvironment,
   savePresetDraft,
@@ -31,13 +30,18 @@ import {
 } from "./preset-dialog.js";
 import { ColorSwatchPicker, DEFAULT_COLOR } from "./shared.js";
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function useActionError() {
+  const [error, setError] = useState<string | null>(null);
+  const run = async (action: () => Promise<unknown>) => {
+    setError(null);
+    try {
+      await action();
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    }
+  };
+  return { error, setError, run };
 }
-
-// ---------------------------------------------------------------------------
-// Labels
-// ---------------------------------------------------------------------------
 
 function LabelEditorRow({
   initialName,
@@ -54,6 +58,14 @@ function LabelEditorRow({
 }) {
   const [name, setName] = useState(initialName);
   const [color, setColor] = useState(initialColor);
+  const submit = () => {
+    void onSubmit(name.trim(), color).then(() => {
+      if (!onCancel) {
+        setName("");
+        setColor(DEFAULT_COLOR);
+      }
+    });
+  };
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Input
@@ -63,12 +75,7 @@ function LabelEditorRow({
         onKeyDown={(event) => {
           if (event.key === "Enter" && name.trim() !== "") {
             event.preventDefault();
-            void onSubmit(name.trim(), color).then(() => {
-              if (!onCancel) {
-                setName("");
-                setColor(DEFAULT_COLOR);
-              }
-            });
+            submit();
           }
         }}
         className="h-7 w-44 text-xs"
@@ -79,14 +86,7 @@ function LabelEditorRow({
         variant="outline"
         className="h-7"
         disabled={name.trim() === ""}
-        onClick={() =>
-          void onSubmit(name.trim(), color).then(() => {
-            if (!onCancel) {
-              setName("");
-              setColor(DEFAULT_COLOR);
-            }
-          })
-        }
+        onClick={submit}
       >
         {submitLabel}
       </Button>
@@ -116,20 +116,11 @@ function LabelsSection() {
     [projectId],
   );
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { error, run } = useActionError();
   const [confirmDelete, setConfirmDelete] = useState<{
     label: Label;
     usedBy: number;
   } | null>(null);
-
-  const run = async (action: () => Promise<unknown>) => {
-    setError(null);
-    try {
-      await action();
-    } catch (actionError) {
-      setError(describeError(actionError));
-    }
-  };
 
   const askDelete = (label: Label) =>
     run(async () => {
@@ -256,7 +247,6 @@ function LabelsSection() {
             : "This label isn't used by any tasks."
         }
         confirmLabel="Delete label"
-        destructive
         onConfirm={() => {
           const target = confirmDelete;
           if (target) {
@@ -270,10 +260,6 @@ function LabelsSection() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Presets
-// ---------------------------------------------------------------------------
-
 function PresetsSection() {
   const rpc = useTasksRpc();
   const presets = usePresets();
@@ -281,7 +267,6 @@ function PresetsSection() {
     async (rpc) => (await rpc.call("listMachines", {})).machines,
     [],
   );
-  // Keyed remount resets the dialog draft per open/target.
   const [dialog, setDialog] = useState<{
     key: number;
     editing: Preset | null;
@@ -316,6 +301,7 @@ function PresetsSection() {
               <th className="px-3 py-2 font-medium">Provider</th>
               <th className="px-3 py-2 font-medium">Model</th>
               <th className="px-3 py-2 font-medium">Reasoning</th>
+              <th className="px-3 py-2 font-medium">Tier</th>
               <th className="px-3 py-2 font-medium">Permissions</th>
               <th className="px-3 py-2 font-medium">Environment</th>
               <th className="px-3 py-2 font-medium">Instructions</th>
@@ -323,79 +309,75 @@ function PresetsSection() {
             </tr>
           </thead>
           <tbody className="divide-y divide-border-hairline">
-            {(presets.data ?? []).map((preset) => {
-              const permission = PERMISSION_MODES.find(
-                (mode) => mode === preset.permissionMode,
-              );
-              return (
-                <tr key={preset.id} className="group">
-                  <td className="px-3 py-2">
-                    <span className="flex items-center gap-2">
-                      <Icon
-                        name="Brain"
-                        className="size-3.5 text-muted-foreground"
-                      />
-                      {preset.name}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-muted-foreground">
-                    {preset.providerId}
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                    {preset.modelId}
-                  </td>
-                  <td className="px-3 py-2 text-muted-foreground">
-                    {preset.reasoningLevel}
-                  </td>
-                  <td className="px-3 py-2 text-muted-foreground">
-                    {permission
-                      ? PERMISSION_LABELS[permission]
-                      : preset.permissionMode}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
-                    {describePresetEnvironment(preset, machines.data ?? [])}
-                  </td>
-                  <td
-                    className="max-w-48 truncate px-3 py-2 text-xs text-muted-foreground"
-                    title={preset.instructions}
-                  >
-                    {preset.instructions === "" ? "—" : preset.instructions}
-                  </td>
-                  <td className="px-3 py-2">
-                    <span className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100">
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="size-6 text-muted-foreground"
-                        aria-label={`Edit preset ${preset.name}`}
-                        onClick={() =>
-                          setDialog({ key: Date.now(), editing: preset })
-                        }
-                      >
-                        <Icon name="Edit" className="size-3.5" />
-                      </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="size-6 text-muted-foreground hover:text-destructive"
-                        aria-label={`Delete preset ${preset.name}`}
-                        onClick={() => {
-                          setError(null);
-                          rpc
-                            .call("deletePreset", { presetId: preset.id })
-                            .then(() => presets.refresh())
-                            .catch((deleteError: unknown) =>
-                              setError(describeError(deleteError)),
-                            );
-                        }}
-                      >
-                        <Icon name="Trash2" className="size-3.5" />
-                      </Button>
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
+            {(presets.data ?? []).map((preset) => (
+              <tr key={preset.id} className="group">
+                <td className="px-3 py-2">
+                  <span className="flex items-center gap-2">
+                    <Icon
+                      name="Bot"
+                      className="size-3.5 text-muted-foreground"
+                    />
+                    {preset.name}
+                  </span>
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {preset.providerId}
+                </td>
+                <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                  {preset.modelId}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {preset.reasoningLevel}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {preset.serviceTier ?? "—"}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {PERMISSION_LABELS[preset.permissionMode]}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
+                  {describePresetEnvironment(preset, machines.data ?? [])}
+                </td>
+                <td
+                  className="max-w-48 truncate px-3 py-2 text-xs text-muted-foreground"
+                  title={preset.instructions}
+                >
+                  {preset.instructions === "" ? "—" : preset.instructions}
+                </td>
+                <td className="px-3 py-2">
+                  <span className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-6 text-muted-foreground"
+                      aria-label={`Edit preset ${preset.name}`}
+                      onClick={() =>
+                        setDialog({ key: Date.now(), editing: preset })
+                      }
+                    >
+                      <Icon name="Edit" className="size-3.5" />
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-6 text-muted-foreground hover:text-destructive"
+                      aria-label={`Delete preset ${preset.name}`}
+                      onClick={() => {
+                        setError(null);
+                        rpc
+                          .call("deletePreset", { presetId: preset.id })
+                          .then(() => presets.refresh())
+                          .catch((deleteError: unknown) =>
+                            setError(errorMessage(deleteError)),
+                          );
+                      }}
+                    >
+                      <Icon name="Trash2" className="size-3.5" />
+                    </Button>
+                  </span>
+                </td>
+              </tr>
+            ))}
             {(presets.data ?? []).length === 0 ? (
               <tr>
                 <td
@@ -429,10 +411,6 @@ function PresetsSection() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Folders
-// ---------------------------------------------------------------------------
-
 const ROOT_PARENT = "__root__";
 
 function FolderRow({
@@ -440,15 +418,20 @@ function FolderRow({
   rootFolders,
   onRename,
   onMove,
+  onDelete,
 }: {
   folder: Folder;
   rootFolders: Folder[];
   onRename: (name: string) => Promise<void>;
   onMove: (parentFolderId: string | null) => Promise<void>;
+  onDelete: () => void;
 }) {
   const [renaming, setRenaming] = useState(false);
   const [draftName, setDraftName] = useState(folder.name);
   const parentOptions = rootFolders.filter((entry) => entry.id !== folder.id);
+  const rename = () => {
+    void onRename(draftName.trim()).then(() => setRenaming(false));
+  };
 
   return (
     <div className="flex items-center gap-2 px-3 py-2">
@@ -462,7 +445,7 @@ function FolderRow({
             onKeyDown={(event) => {
               if (event.key === "Enter" && draftName.trim() !== "") {
                 event.preventDefault();
-                void onRename(draftName.trim()).then(() => setRenaming(false));
+                rename();
               }
               if (event.key === "Escape") setRenaming(false);
             }}
@@ -473,9 +456,7 @@ function FolderRow({
             variant="outline"
             className="h-7"
             disabled={draftName.trim() === ""}
-            onClick={() =>
-              void onRename(draftName.trim()).then(() => setRenaming(false))
-            }
+            onClick={rename}
           >
             Save
           </Button>
@@ -524,6 +505,15 @@ function FolderRow({
           >
             <Icon name="Edit" className="size-3.5" />
           </Button>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="size-6 text-muted-foreground hover:text-destructive"
+            aria-label={`Delete folder ${folder.name}`}
+            onClick={onDelete}
+          >
+            <Icon name="Trash2" className="size-3.5" />
+          </Button>
         </>
       )}
     </div>
@@ -533,22 +523,47 @@ function FolderRow({
 function FoldersSection() {
   const rpc = useTasksRpc();
   const folders = useFolders();
-  const [error, setError] = useState<string | null>(null);
+  const projects = useProjects();
+  const { error, setError, run } = useActionError();
+  const [confirmDelete, setConfirmDelete] = useState<Folder | null>(null);
   const folderList = folders.data ?? [];
-  // The sidebar nests folders one level deep, so only roots can be parents.
   const rootFolders = useMemo(
     () => folderList.filter((folder) => folder.parentFolderId === null),
     [folderList],
   );
 
-  const run = async (action: () => Promise<unknown>) => {
-    setError(null);
-    try {
-      await action();
-    } catch (actionError) {
-      setError(describeError(actionError));
+  const impactError = folders.error ?? projects.error;
+  const impactReady =
+    impactError === null &&
+    folders.data !== undefined &&
+    !folders.isLoading &&
+    projects.data !== undefined &&
+    !projects.isLoading;
+
+  function describeDeleteImpact(folder: Folder): string {
+    if (!impactReady) {
+      return impactError !== null
+        ? `Could not load the folder's contents: ${impactError}`
+        : "Checking what the folder contains…";
     }
-  };
+    const projectCount = (projects.data ?? []).filter(
+      (project) => project.folderId === folder.id,
+    ).length;
+    const subfolderCount = folderList.filter(
+      (entry) => entry.parentFolderId === folder.id,
+    ).length;
+    const moved = [
+      projectCount > 0
+        ? `${projectCount} project${projectCount > 1 ? "s" : ""}`
+        : null,
+      subfolderCount > 0
+        ? `${subfolderCount} subfolder${subfolderCount > 1 ? "s" : ""}`
+        : null,
+    ].filter((part) => part !== null);
+    return moved.length === 0
+      ? "The folder is empty."
+      : `${moved.join(" and ")} move to the top level. No tasks are deleted.`;
+  }
 
   return (
     <div className="space-y-3">
@@ -576,6 +591,10 @@ function FoldersSection() {
                   }),
                 )
               }
+              onDelete={() => {
+                setError(null);
+                setConfirmDelete(folder);
+              }}
             />
           ))}
         </div>
@@ -585,29 +604,38 @@ function FoldersSection() {
           {error}
         </p>
       ) : null}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDelete(null);
+        }}
+        title={`Delete folder “${confirmDelete?.name ?? ""}”?`}
+        description={confirmDelete ? describeDeleteImpact(confirmDelete) : ""}
+        confirmLabel="Delete folder"
+        confirmDisabled={!impactReady}
+        onConfirm={() => {
+          const target = confirmDelete;
+          if (target) {
+            void run(async () => {
+              const result = await rpc.call("deleteFolder", {
+                folderId: target.id,
+              });
+              if (!result.deleted) {
+                folders.refresh();
+                projects.refresh();
+                throw new Error(`Folder “${target.name}” was already deleted.`);
+              }
+            });
+          }
+        }}
+      />
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Panel
-// ---------------------------------------------------------------------------
-
-/**
- * Settings-ish management surface: labels, agent presets, and folders.
- *
- * The shell does not yet reserve a manage route or sidebar-footer slot, so
- * this is exported unmounted; when the shell grows one (e.g. a `manage`
- * subPath or a sidebar "Manage" button), render <ManagePanel /> there.
- */
-export function ManagePanel({ className }: { className?: string }) {
+export function ManagePanel() {
   return (
-    <div
-      className={cn(
-        "flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-4",
-        className,
-      )}
-    >
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-4">
       <header className="space-y-1">
         <h2 className="text-base font-semibold">Manage</h2>
         <p className="text-sm text-muted-foreground">

@@ -6,7 +6,7 @@ import {
   usePluginComposerHost,
 } from "@/components/plugin/plugin-composer-host";
 import { SecondaryPanelLayout } from "@/components/secondary-panel/SecondaryPanelLayout";
-import { ThreadSecondaryPanel } from "@/components/secondary-panel/ThreadSecondaryPanel";
+import { LazyThreadSecondaryPanel } from "@/components/secondary-panel/lazySecondaryPanelComponents";
 import {
   ThreadMetadataCard,
   ThreadMetadataContent,
@@ -22,15 +22,19 @@ type ThreadTimelinePaneProps = Omit<
   "footer"
 >;
 type ThreadSecondaryPanelProps = Omit<
-  ComponentProps<typeof ThreadSecondaryPanel>,
+  ComponentProps<typeof LazyThreadSecondaryPanel>,
   | "metadataContent"
   | "renderAsDrawer"
   | "isConversationCollapsed"
   | "onToggleConversationCollapse"
-  | "browserDeck"
+  | "renderBrowserDeck"
+  | "drawerFallback"
 > & {
   renderBrowserDeck?: (args: {
+    activeBrowserTabId?: string | null;
+    canHandleBrowserCommands?: boolean;
     canShowNativeBrowserView: boolean;
+    onNativeFocus?: () => void;
   }) => ReactNode;
 };
 
@@ -40,11 +44,6 @@ interface ThreadDetailSecondaryContentProps {
   isMetadataLoading: boolean;
   isSecondaryPanelOpen: boolean;
   isConversationCollapsed: boolean;
-  /**
-   * True when rendering inside a bounded split card. Bounded panes skip the
-   * page-bleed negative margins below — the card supplies the boundary, so
-   * bleeding out of it only gets clipped by the card's overflow-hidden.
-   */
   isBoundedPane: boolean;
   onToggleSecondaryPanel: () => void;
   onToggleConversationCollapse: () => void;
@@ -81,14 +80,15 @@ function ThreadDetailSecondaryContentBody({
   const composerHost = usePluginComposerHost();
   const { renderBrowserDeck, ...threadSecondaryPanelProps } = secondaryPanel;
 
-  // Mirror ForksRow's query (deduped by react-query) so the visibility gate
-  // accounts for the lazily fetched Forks row.
-  const forksQuery = useThreads({
-    projectId: metadata.thread.projectId,
-    sourceThreadId: metadata.thread.id,
-    originKind: "fork",
-    archived: false,
-  });
+  const forksQuery = useThreads(
+    {
+      projectId: metadata.thread.projectId,
+      sourceThreadId: metadata.thread.id,
+      originKind: "fork",
+      archived: false,
+    },
+    { enabled: isSecondaryPanelOpen },
+  );
   const hasForks = (forksQuery.data?.length ?? 0) > 0;
   const metadataContent = useMemo(
     () =>
@@ -117,6 +117,7 @@ function ThreadDetailSecondaryContentBody({
         open={isSecondaryPanelOpen}
         onToggle={onToggleSecondaryPanel}
         onClose={threadSecondaryPanelProps.onClose}
+        panelGroupKey="thread-detail"
         resetKey={timeline.threadId}
         contentKey={timeline.threadId}
         drawerLabel="Thread details"
@@ -129,6 +130,7 @@ function ThreadDetailSecondaryContentBody({
           onToggle: onToggleConversationCollapse,
         }}
         composerHost={composerHost}
+        compactPresentation="full"
         renderHostedPanel={renderHostedPanel}
         renderPanel={({
           presentation,
@@ -137,9 +139,18 @@ function ThreadDetailSecondaryContentBody({
           onToggleMainCollapse,
           resizablePanelId,
         }) => (
-          <ThreadSecondaryPanel
+          <LazyThreadSecondaryPanel
             {...threadSecondaryPanelProps}
-            browserDeck={renderBrowserDeck?.({ canShowNativeBrowserView })}
+            drawerFallback={<ThreadMetadataLoadingSkeleton />}
+            renderBrowserDeck={(activeBrowserTabId, pane) =>
+              renderBrowserDeck?.({
+                activeBrowserTabId,
+                canHandleBrowserCommands:
+                  canShowNativeBrowserView && pane.isFocused,
+                canShowNativeBrowserView,
+                onNativeFocus: pane.onFocusPane,
+              })
+            }
             renderAsDrawer={presentation === "drawer"}
             isConversationCollapsed={
               presentation === "inline" && isMainCollapsed

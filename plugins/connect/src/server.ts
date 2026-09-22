@@ -1,7 +1,15 @@
+import {
+  createServerAccessRecheck,
+  registerServerAccess,
+} from "./server-access.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { registerConnectCli } from "./cli.js";
 import { createKvCredentialStore } from "./credential.js";
-import { connectRpcContract, createRpcHandlers } from "./rpc.js";
+import {
+  connectRpcContract,
+  createRpcHandlers,
+  type MobilePairingGate,
+} from "./rpc.js";
 import { ShareRegistry } from "./shares.js";
 import { ConnectTunnel } from "./tunnel.js";
 import { ShareHostResolver } from "./hosts.js";
@@ -13,8 +21,20 @@ import {
 } from "./types.js";
 
 export default async function plugin(bb: BbPluginApi) {
+  const settings = bb.settings.define({
+    sendRemoteInstructions: {
+      type: "boolean",
+      label: "Tell agents about remote access",
+      description:
+        "When you use BB remotely, tell agents to share servers through Connect. Applies to new agent sessions.",
+      default: true,
+    },
+  });
+  let currentSettings = await settings.get();
+  settings.onChange((next) => {
+    currentSettings = next;
+  });
   const store = createKvCredentialStore(bb.storage.kv);
-  // Tunnel is assigned below; ShareRegistry reads the live credential via this.
   let tunnel!: ConnectTunnel;
   const hostResolver = new ShareHostResolver(() => bb.sdk);
   const getLoopbackBaseUrl = () =>
@@ -35,20 +55,33 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  const recheckServerAccess = createServerAccessRecheck(bb);
   tunnel = new ConnectTunnel({
     store,
     shares,
     defaultBaseUrl: resolveDefaultConnectBaseUrl(process.env),
     getLoopbackBaseUrl,
     log: bb.log,
-    onStatusChange: (status) =>
-      bb.realtime.publish(CONNECT_REALTIME_CHANNEL, status),
+    onStatusChange: (status) => {
+      bb.realtime.publish(CONNECT_REALTIME_CHANNEL, status);
+      recheckServerAccess(status);
+    },
   });
 
-  bb.rpc.register(connectRpcContract, createRpcHandlers(tunnel, hostResolver));
-  registerConnectCli({ bb, tunnel, hostResolver });
+  await registerServerAccess(bb, tunnel);
+
+  const mobilePairing: MobilePairingGate = {
+    enabled: async () => (await bb.sdk.system.config()).experiments.mobileApp,
+  };
+
+  bb.rpc.register(
+    connectRpcContract,
+    createRpcHandlers(tunnel, hostResolver, mobilePairing),
+  );
+  registerConnectCli({ bb, tunnel, hostResolver, mobilePairing });
 
   bb.agents.contributeInstructions(() => {
+    if (!currentSettings.sendRemoteInstructions) return null;
     const status = tunnel.status();
     if (!status.paired || status.url === null) return null;
     const recent =
@@ -64,11 +97,6 @@ export default async function plugin(bb: BbPluginApi) {
     );
   });
 
-  // The tunnel lives inside this service: idle while unpaired, dialing when
-  // a credential exists, torn down on abort (reload/disable/shutdown) —
-  // disabling the plugin cuts off all remote access. The tunnel keeps its
-  // own capped-backoff reconnect; the host's restart-with-backoff is crash
-  // supervision on top.
   bb.background.service("tunnel", {
     async start(signal) {
       await tunnel.start();

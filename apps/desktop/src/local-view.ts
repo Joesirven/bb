@@ -1,31 +1,25 @@
 import { stripVTControlCharacters } from "node:util";
 import { escapeHtmlText } from "@bb/domain";
 
-export type LocalViewModel =
-  | InfoViewModel
-  | LoadingViewModel
-  | StartupErrorViewModel;
+export const STARTUP_RETRY_CHANNEL = "bb-desktop:retry-startup";
 
-export interface LoadingViewModel {
+export type LocalViewModel = LoadingViewModel | StartupErrorViewModel;
+
+interface LoadingViewModel {
   kind: "loading";
   message: string;
   title: string;
 }
 
-export interface InfoViewModel {
-  kind: "info";
-  message: string;
-  title: string;
-}
-
-export interface StartupErrorViewModel {
+interface StartupErrorViewModel {
   details: string;
   kind: "error";
   logText: string;
+  retryable: boolean;
   title: string;
 }
 
-export interface CreateLocalViewUrlArgs {
+interface CreateLocalViewUrlArgs {
   viewModel: LocalViewModel;
 }
 
@@ -43,37 +37,28 @@ function renderLoadingView(viewModel: LoadingViewModel): string {
   `;
 }
 
-function renderInfoView(viewModel: InfoViewModel): string {
-  return `
-    <main class="shell">
-      <h1>${escapeHtmlText(viewModel.title)}</h1>
-      <p>${escapeHtmlText(viewModel.message)}</p>
-    </main>
-  `;
-}
-
 function renderErrorView(viewModel: StartupErrorViewModel): string {
   const logText = formatPlainLogText(viewModel.logText);
   const logs =
     logText.trim().length > 0 ? `<pre>${escapeHtmlText(logText)}</pre>` : "";
+  const retry = viewModel.retryable
+    ? '<button type="button" data-testid="bb-startup-retry">Try again</button>'
+    : "";
   return `
     <main class="shell shell-error">
       <h1>${escapeHtmlText(viewModel.title)}</h1>
       <p>${escapeHtmlText(viewModel.details)}</p>
+      ${retry}
       ${logs}
     </main>
   `;
 }
 
 function renderLocalView(viewModel: LocalViewModel): string {
-  let body: string;
-  if (viewModel.kind === "loading") {
-    body = renderLoadingView(viewModel);
-  } else if (viewModel.kind === "info") {
-    body = renderInfoView(viewModel);
-  } else {
-    body = renderErrorView(viewModel);
-  }
+  const body =
+    viewModel.kind === "loading"
+      ? renderLoadingView(viewModel)
+      : renderErrorView(viewModel);
   return `<!doctype html>
 <html>
 <head>
@@ -145,6 +130,19 @@ function renderLocalView(viewModel: LocalViewModel): string {
       font-size: 14px;
       line-height: 1.5;
       margin: 0;
+    }
+
+    button {
+      background: CanvasText;
+      border: 0;
+      border-radius: 6px;
+      color: Canvas;
+      cursor: pointer;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      margin: 18px 0 0;
+      padding: 8px 14px;
     }
 
     pre {

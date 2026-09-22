@@ -1,12 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   createFakePluginHost,
   type FakePluginHost,
+  makePluginAgentConfigurationContext,
 } from "@get-bb/plugin-sdk/testing";
-import type { PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
-import plugin, { RENDERER_ID, TOOL_NAME } from "./server.js";
-import { TOOL_INPUT_JSON_SCHEMA } from "./tool-definition.js";
-import type { InteractionPayload, ToolResult } from "./contracts.js";
+import plugin, { TOOL_NAME } from "./server.js";
+import { TOO_FEW_OPTIONS_MESSAGE } from "./tool-definition.js";
+import {
+  ASK_USER_QUESTION_RENDERER_ID,
+  toolInputSchema,
+  type InteractionPayload,
+  type ToolResult,
+} from "./contracts.js";
 
 function createHost(): FakePluginHost {
   const host = createFakePluginHost({ pluginId: "ask-user-question" });
@@ -17,35 +23,13 @@ function createHost(): FakePluginHost {
 function configurationContext(
   providerId: string,
   supportsNativeUserQuestion = false,
-): PluginAgentConfigurationContext {
-  return {
-    thread: {
-      id: "thr-test",
-      title: null,
-      parentThreadId: null,
-      sourceThreadId: null,
-    },
-    project: {
-      id: "proj-test",
-      kind: "standard",
-      name: "bb",
-      gitRemoteUrl: null,
-    },
-    environment: {
-      id: "env-test",
-      name: null,
-      path: null,
-      workspaceProvisionType: "unmanaged",
-      branchName: null,
-    },
-    host: { id: "host-test", name: "local" },
+) {
+  return makePluginAgentConfigurationContext({
     provider: {
       id: providerId,
-      model: "test-model",
       capabilities: { supportsNativeUserQuestion },
     },
-    origin: { kind: null, pluginId: null },
-  };
+  });
 }
 
 const questions = [
@@ -74,8 +58,6 @@ async function resultText(
 }
 
 describe("provider gating", () => {
-  // Gated on the provider's declared capability, not on its id: a plugin
-  // provider that ships the tool natively is withheld too.
   it.each(["claude-code", "some-plugin-provider"])(
     "withholds the tool from %s, which declares it natively",
     async (providerId) => {
@@ -88,7 +70,7 @@ describe("provider gating", () => {
   );
 
   it.each(["codex", "pi", "acp-cursor"])(
-    "registers the tool for %s with Claude's exact advertised schema",
+    "registers the tool for %s with the schema generated from its input parser",
     async (providerId) => {
       const host = createHost();
       const resolved = await host.harness.resolveAgentConfiguration(
@@ -97,23 +79,69 @@ describe("provider gating", () => {
       expect(resolved.tools).toHaveLength(1);
       const [tool] = resolved.tools;
       expect(tool?.name).toBe(TOOL_NAME);
-      // The advertised schema is the hand-written mirror of Claude's, not the
-      // zod-derived one — that is the whole point of the override.
-      expect(tool?.inputSchema).toEqual(TOOL_INPUT_JSON_SCHEMA);
+      expect(tool?.inputSchema).toEqual(
+        z.toJSONSchema(toolInputSchema, { io: "input" }),
+      );
     },
   );
 
-  it("advertises multiSelect as required even though execution defaults it", async () => {
+  it.each(["codex", "pi", "acp-cursor"])(
+    "does not prescribe provider-specific plan tools to %s",
+    async (providerId) => {
+      const host = createHost();
+      const resolved = await host.harness.resolveAgentConfiguration(
+        configurationContext(providerId),
+      );
+      expect(resolved.tools).toHaveLength(1);
+      expect(resolved.tools[0]?.description).not.toMatch(
+        /EnterPlanMode|ExitPlanMode/,
+      );
+    },
+  );
+
+  it("advertises multiSelect as optional and defaults it during execution", async () => {
     const host = createHost();
     const resolved = await host.harness.resolveAgentConfiguration(
       configurationContext("codex"),
     );
-    const schema = resolved.tools[0]?.inputSchema as {
+    expect(resolved.tools[0]?.inputSchema).toMatchObject({
+      additionalProperties: false,
+      required: ["questions"],
       properties: {
-        questions: { items: { required: string[] } };
-      };
-    };
-    expect(schema.properties.questions.items.required).toContain("multiSelect");
+        questions: {
+          minItems: 1,
+          maxItems: 4,
+          items: {
+            additionalProperties: false,
+            required: ["question", "header", "options"],
+            properties: {
+              question: { minLength: 1, description: expect.any(String) },
+              header: { minLength: 1, description: expect.any(String) },
+              multiSelect: { type: "boolean", default: false },
+              options: {
+                minItems: 2,
+                maxItems: 4,
+                items: {
+                  additionalProperties: false,
+                  required: ["label", "description"],
+                  properties: {
+                    label: { minLength: 1, description: expect.any(String) },
+                    description: {
+                      minLength: 1,
+                      description: expect.any(String),
+                    },
+                    preview: {
+                      maxLength: 4096,
+                      description: expect.any(String),
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
 
     const answered = host.harness.callAgentTool(TOOL_NAME, {
       questions: [{ ...questions[0], multiSelect: undefined }],
@@ -125,11 +153,58 @@ describe("provider gating", () => {
     host.harness.submitInteraction(pending.id, {
       answers: { q0: { selected: ["q0o1"] } },
     });
-    await answered;
+    const result = JSON.parse(await resultText(await answered)) as ToolResult;
+    expect(result.questions[0]?.multiSelect).toBe(false);
   });
 });
 
 describe("asking a question", () => {
+  it.each([
+    ["root", { questions, extra: true }],
+    [
+      "question",
+      {
+        questions: questions.map((question) => ({ ...question, extra: true })),
+      },
+    ],
+    [
+      "option",
+      {
+        questions: questions.map((question) => ({
+          ...question,
+          options: question.options.map((option) => ({
+            ...option,
+            extra: true,
+          })),
+        })),
+      },
+    ],
+  ])("rejects unknown fields on the %s object", async (_level, input) => {
+    const host = createHost();
+    await expect(host.harness.callAgentTool(TOOL_NAME, input)).rejects.toThrow(
+      'Unrecognized key: "extra"',
+    );
+    expect(host.harness.pendingInteractions).toHaveLength(0);
+  });
+
+  it.each([0, 1])(
+    "rejects %i options with guidance to proceed before opening an interaction",
+    async (optionCount) => {
+      const host = createHost();
+      await expect(
+        host.harness.callAgentTool(TOOL_NAME, {
+          questions: [
+            {
+              ...questions[0],
+              options: questions[0]!.options.slice(0, optionCount),
+            },
+          ],
+        }),
+      ).rejects.toThrow(TOO_FEW_OPTIONS_MESSAGE);
+      expect(host.harness.pendingInteractions).toHaveLength(0);
+    },
+  );
+
   it("opens an interaction and returns the answer in Claude's result shape", async () => {
     const host = createHost();
     const call = host.harness.callAgentTool(TOOL_NAME, { questions });
@@ -138,7 +213,7 @@ describe("asking a question", () => {
       expect(host.harness.pendingInteractions).toHaveLength(1),
     );
     const pending = host.harness.pendingInteractions[0]!;
-    expect(pending.rendererId).toBe(RENDERER_ID);
+    expect(pending.rendererId).toBe(ASK_USER_QUESTION_RENDERER_ID);
     expect(pending.title).toBe("Database");
     const payload = pending.payload as InteractionPayload;
     expect(payload.questions[0]).toMatchObject({
@@ -146,6 +221,27 @@ describe("asking a question", () => {
       prompt: "Which database should we use?",
       shortLabel: "Database",
       allowFreeText: true,
+    });
+
+    expect(pending.presentation).toEqual({
+      label: { pending: "Asking a question", completed: "Asked" },
+      icon: { glyph: "MessageQuestion" },
+    });
+    expect(
+      await pending.describeSubmission?.({
+        answers: { q0: { selected: ["q0o0"], freeText: "with pgbouncer" } },
+      }),
+    ).toMatchObject({
+      title:
+        "Answered Which database should we use? — Postgres (Recommended); with pgbouncer",
+      detail:
+        "- Which database should we use? — Postgres (Recommended); with pgbouncer",
+      payload: expect.objectContaining({
+        answers: {
+          "Which database should we use?":
+            "Postgres (Recommended); with pgbouncer",
+        },
+      }),
     });
 
     host.harness.submitInteraction(pending.id, {
@@ -191,9 +287,6 @@ describe("asking a question", () => {
   });
 
   it("explains the collision when a second question races the first", async () => {
-    // A thread holds one interaction at a time; the server rejects the second
-    // with this error. The fake host queues instead of rejecting, so the
-    // server's failure is injected directly.
     const host = createFakePluginHost({ pluginId: "ask-user-question" });
     host.bb.ui.requestInput = () =>
       Promise.reject(

@@ -1,16 +1,14 @@
 import { useId, useState, type FormEvent, type RefObject } from "react";
 import { Button } from "@bb/shared-ui/button";
 import {
-  Dialog,
-  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@bb/shared-ui/dialog";
 import { Input } from "@bb/shared-ui/input";
+import { RenameDialog } from "./RenameDialog";
 import { useNameValidation } from "./useNameValidation.js";
-import { useRenameDialogAutoFocus } from "./useRenameDialogAutoFocus.js";
 
 interface ThreadSectionCreateDialogProps {
   errorMessage?: string | null;
@@ -37,7 +35,6 @@ interface ThreadSectionDialogContentProps {
   description: string;
   errorMessage?: string | null;
   initialName: string;
-  inputLabel: string;
   pending: boolean;
   submitLabel: string;
   title: string;
@@ -52,25 +49,23 @@ export function ThreadSectionCreateDialog({
   onOpenChange,
   onCreate,
 }: ThreadSectionCreateDialogProps) {
-  const { inputRef, handleOpenAutoFocus } = useRenameDialogAutoFocus();
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent onOpenAutoFocus={handleOpenAutoFocus}>
-        {open ? (
+    <RenameDialog open={open} onOpenChange={onOpenChange}>
+      {(inputRef) =>
+        open ? (
           <ThreadSectionDialogContent
             description="Create a section for threads."
             errorMessage={errorMessage}
             initialName=""
-            inputLabel="Section name"
             pending={pending}
             submitLabel="Create section"
             title="New section"
             onSubmit={onCreate}
             inputRef={inputRef}
           />
-        ) : null}
-      </DialogContent>
-    </Dialog>
+        ) : null
+      }
+    </RenameDialog>
   );
 }
 
@@ -81,26 +76,24 @@ export function ThreadSectionRenameDialog({
   onOpenChange,
   onRename,
 }: ThreadSectionRenameDialogProps) {
-  const { inputRef, handleOpenAutoFocus } = useRenameDialogAutoFocus();
   return (
-    <Dialog open={target !== null} onOpenChange={onOpenChange}>
-      <DialogContent onOpenAutoFocus={handleOpenAutoFocus}>
-        {target ? (
+    <RenameDialog open={target !== null} onOpenChange={onOpenChange}>
+      {(inputRef) =>
+        target ? (
           <ThreadSectionDialogContent
             key={target.id}
             description="Choose a new name for this section."
             errorMessage={errorMessage}
             initialName={target.name}
-            inputLabel="Section name"
             pending={pending}
             submitLabel="Rename section"
             title="Rename section"
             onSubmit={(name) => onRename(target.id, name)}
             inputRef={inputRef}
           />
-        ) : null}
-      </DialogContent>
-    </Dialog>
+        ) : null
+      }
+    </RenameDialog>
   );
 }
 
@@ -108,7 +101,6 @@ function ThreadSectionDialogContent({
   description,
   errorMessage,
   initialName,
-  inputLabel,
   pending,
   submitLabel,
   title,
@@ -149,7 +141,7 @@ function ThreadSectionDialogContent({
           <Input
             ref={inputRef}
             id={inputId}
-            aria-label={inputLabel}
+            aria-label="Section name"
             value={name}
             autoCapitalize="sentences"
             autoCorrect="off"

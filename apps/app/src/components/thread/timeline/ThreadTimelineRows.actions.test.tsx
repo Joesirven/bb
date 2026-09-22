@@ -26,25 +26,16 @@ import {
   type PluginRegistrationSet,
 } from "@/lib/plugin-slots";
 import { ThreadTimelineRows } from "./ThreadTimelineRows";
+import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 
 function messageActionRegistrationSet(
   messageActions: readonly PluginMessageActionRegistration[],
 ): PluginRegistrationSet {
-  return {
-    homepageSections: [],
-    settingsSections: [],
-    navPanels: [],
-    threadPanelActions: [],
-    sidebarFooterActions: [],
-    fileOpeners: [],
-    messageDirectives: [],
+  return makePluginRegistrationSet({
     messageActions,
-  };
+  });
 }
 
-// ThreadTimelineRows reads route state for the search deep-link scroll, so it
-// must render inside a Router. Production and Ladle always provide one; these
-// isolated unit renders wrap the tree in a MemoryRouter.
 const toMarkup = (ui: ReactElement) =>
   renderToStaticMarkup(<MemoryRouter>{ui}</MemoryRouter>);
 const renderWithRouter = (
@@ -303,12 +294,6 @@ describe("ThreadTimelineRows actions", () => {
     expect(
       latestMessage?.querySelector('[aria-label="Message actions"]'),
     ).toBeNull();
-    expect(
-      latestMessage?.querySelector('[aria-label="Copy message"]')?.className,
-    ).toContain("max-md:pointer-coarse:opacity-100");
-    expect(
-      latestMessage?.querySelector('[aria-label="Add to chat"]')?.className,
-    ).toContain("max-md:pointer-coarse:size-7");
   });
 
   it("uses inline mobile actions only for the last user message", () => {
@@ -345,12 +330,6 @@ describe("ThreadTimelineRows actions", () => {
     expect(
       latestMessage?.querySelector('[aria-label="Message actions"]'),
     ).toBeNull();
-    expect(
-      latestMessage?.querySelector('[aria-label="Copy message"]')?.className,
-    ).toContain("max-md:pointer-coarse:size-7");
-    expect(
-      latestMessage?.querySelector('[aria-label="Add to chat"]')?.className,
-    ).toContain("max-md:pointer-coarse:size-7");
   });
 
   it("keeps edit actions available while the thread is active", () => {
@@ -447,7 +426,7 @@ describe("ThreadTimelineRows actions", () => {
     });
   });
 
-  it("keeps the last real user action footer inline when a remote-image-only row follows", () => {
+  it("adds a copy action to a remote-image-only row", () => {
     const { container } = renderWithRouter(
       <ThreadTimelineRows
         timelineRows={[
@@ -490,7 +469,7 @@ describe("ThreadTimelineRows actions", () => {
     ).not.toBeNull();
     expect(
       remoteImageOnlyMessage?.querySelector('[aria-label="Copy message"]'),
-    ).toBeNull();
+    ).not.toBeNull();
   });
 
   it("keeps the last text footer inline when an attachment-only row has no add action", () => {
@@ -931,7 +910,6 @@ describe("ThreadTimelineRows actions", () => {
     const addToChat = await screen.findByRole("button", {
       name: "Add to chat",
     });
-    expect(addToChat.className).toContain("max-md:pointer-coarse:min-h-7");
     fireEvent.click(addToChat);
     expect(onSelectionAddToChat).toHaveBeenCalledWith("chat actions");
   });
@@ -974,10 +952,19 @@ describe("ThreadTimelineRows actions", () => {
     );
   });
 
-  it("ignores sidebar search scroll state for a different thread", () => {
-    const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame");
+  it("ignores thread-search scroll state for a different thread", () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(performance.now());
+      return 1;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
 
-    renderWithRouter(
+    const { container } = renderWithRouter(
       <ThreadTimelineRows
         threadId="thr_side_chat"
         timelineRows={[
@@ -1001,10 +988,15 @@ describe("ThreadTimelineRows actions", () => {
       ],
     );
 
-    expect(requestAnimationFrame).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(
+      container
+        .querySelector('[data-timeline-row-id="side_chat_message"]')
+        ?.classList.contains("bb-search-flash"),
+    ).toBe(false);
   });
 
-  it("scrolls sidebar search matches to the nested row instead of the containing parent", async () => {
+  it("scrolls thread-search matches to the nested row instead of the containing parent", async () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
       callback(performance.now());
       return 1;
@@ -1066,7 +1058,57 @@ describe("ThreadTimelineRows actions", () => {
     expect(parentRow?.classList.contains("bb-search-flash")).toBe(false);
   });
 
-  it("loads older timeline rows before scrolling to an older sidebar search match", async () => {
+  it("cancels the follow-up search reveals when the rows unmount", () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation(
+        (callback) => {
+          callback(performance.now());
+          return 1;
+        },
+      );
+      vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: vi.fn(),
+      });
+
+      const view = renderWithRouter(
+        <ThreadTimelineRows
+          threadId="thr_main"
+          timelineRows={[
+            conversationRow({
+              id: "match",
+              role: "assistant",
+              text: "Answer containing the search result.",
+              sourceSeqStart: 12,
+              sourceSeqEnd: 12,
+              threadId: "thr_main",
+            }),
+          ]}
+          threadRuntimeDisplayStatus="idle"
+          workspaceRootPath={undefined}
+        />,
+        [
+          {
+            pathname: "/thread",
+            state: { searchMessageSeq: 12, searchThreadId: "thr_main" },
+          },
+        ],
+      );
+      view.unmount();
+
+      const querySelector = vi.spyOn(document, "querySelector");
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(querySelector).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("loads older timeline rows before scrolling to an older thread-search match", async () => {
     const onLoadOlderRows = vi.fn();
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
       callback(performance.now());
@@ -1186,7 +1228,6 @@ describe("ThreadTimelineRows actions", () => {
       sourceSeqEnd: 9,
     });
     expect(context.selectedText).toBeUndefined();
-    // openPanel routes through the surface's opener with this plugin's id.
     expect(context.openPanel({ actionId: "panel", params: { a: 1 } })).toBe(
       true,
     );
@@ -1396,8 +1437,6 @@ describe("ThreadTimelineRows actions", () => {
     mockWindowSelection({ node: textNode!, text: "part of this answer" });
 
     fireEvent(document, new Event("selectionchange"));
-    // The registration also renders in the per-message bar (icon button with
-    // an aria-label); the floating menu button is the label-only one.
     const selectionAction = await waitFor(() => {
       const menuButton = screen
         .getAllByRole("button", { name: "Summarize selection" })
@@ -1419,7 +1458,6 @@ describe("ThreadTimelineRows actions", () => {
       text: "Select part of this answer.",
       sourceSeqEnd: 11,
     });
-    // No panel opener on this surface: openPanel reports false, never throws.
     expect(context.openPanel({ actionId: "panel" })).toBe(false);
   });
 
@@ -1464,5 +1502,167 @@ describe("ThreadTimelineRows actions", () => {
     await waitFor(() =>
       expect(nestedRow.classList.contains("bb-search-flash")).toBe(true),
     );
+  });
+});
+
+describe("ThreadTimelineRows shared message column width", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("expands overflow actions in place from the row list's one column measurement", () => {
+    mockSelectionMenuMedia({ isCompactViewport: true, isPointerCoarse: true });
+    const observations: { callback: ResizeObserverCallback; node: Element }[] =
+      [];
+    class ControlledResizeObserver {
+      readonly #callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback;
+      }
+      observe(node: Element) {
+        observations.push({ callback: this.#callback, node });
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", ControlledResizeObserver);
+
+    const { container } = renderWithRouter(
+      <ThreadTimelineRows
+        timelineRows={[
+          conversationRow({
+            id: "earlier_agent_message",
+            role: "assistant",
+            text: "An earlier answer.",
+          }),
+          conversationRow({
+            id: "latest_agent_message",
+            role: "assistant",
+            text: "The latest answer.",
+          }),
+        ]}
+        canSpawnChild
+        onForkMessage={vi.fn()}
+        onMessageAddToChat={vi.fn()}
+        threadRuntimeDisplayStatus="idle"
+        workspaceRootPath={undefined}
+      />,
+    );
+
+    act(() => {
+      for (const { callback, node } of observations) {
+        if (!node.hasAttribute("data-timeline-row-list")) continue;
+        callback(
+          [
+            {
+              target: node,
+              contentRect: { width: 358, height: 600 },
+            } as unknown as ResizeObserverEntry,
+          ],
+          undefined as unknown as ResizeObserver,
+        );
+      }
+    });
+
+    const earlierMessage = container.querySelector(
+      '[data-timeline-row-id="earlier_agent_message"]',
+    );
+    const trigger = earlierMessage?.querySelector<HTMLButtonElement>(
+      '[aria-label="Message actions"]',
+    );
+    if (!trigger) throw new Error("Missing overflow trigger");
+    fireEvent.click(trigger);
+
+    expect(document.body.querySelector('[data-side="top"]')).toBeNull();
+    expect(
+      earlierMessage?.querySelector('[aria-label="Copy message"]'),
+    ).not.toBeNull();
+    expect(
+      earlierMessage?.querySelector('[aria-label="Fork into new thread"]'),
+    ).not.toBeNull();
+  });
+
+  it("subtracts the assistant column's padding from the shared list width", () => {
+    mockSelectionMenuMedia({ isCompactViewport: true, isPointerCoarse: true });
+    const observations: { callback: ResizeObserverCallback; node: Element }[] =
+      [];
+    class ControlledResizeObserver {
+      readonly #callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback;
+      }
+      observe(node: Element) {
+        observations.push({ callback: this.#callback, node });
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", ControlledResizeObserver);
+
+    const { container } = renderWithRouter(
+      <ThreadTimelineRows
+        timelineRows={[
+          conversationRow({
+            id: "earlier_agent_message",
+            role: "assistant",
+            text: "An earlier answer.",
+          }),
+          conversationRow({
+            id: "latest_agent_message",
+            role: "assistant",
+            text: "The latest answer.",
+          }),
+        ]}
+        canSpawnChild
+        onForkMessage={vi.fn()}
+        onMessageAddToChat={vi.fn()}
+        threadRuntimeDisplayStatus="idle"
+        workspaceRootPath={undefined}
+      />,
+    );
+    const reportListWidth = (width: number) => {
+      act(() => {
+        for (const { callback, node } of observations) {
+          if (!node.hasAttribute("data-timeline-row-list")) continue;
+          callback(
+            [
+              {
+                target: node,
+                contentRect: { width, height: 600 },
+              } as unknown as ResizeObserverEntry,
+            ],
+            undefined as unknown as ResizeObserver,
+          );
+        }
+      });
+    };
+    const earlierMessage = container.querySelector(
+      '[data-timeline-row-id="earlier_agent_message"]',
+    );
+    if (!earlierMessage) throw new Error("Missing earlier assistant row");
+    const clickTrigger = () => {
+      const trigger = earlierMessage.querySelector<HTMLButtonElement>(
+        '[aria-label="Message actions"]',
+      );
+      if (!trigger) throw new Error("Missing overflow trigger");
+      fireEvent.click(trigger);
+    };
+
+    reportListWidth(131);
+    clickTrigger();
+    expect(document.body.querySelector('[data-side="top"]')).not.toBeNull();
+    expect(
+      earlierMessage.querySelector('[aria-label="Copy message"]'),
+    ).toBeNull();
+
+    reportListWidth(132);
+    clickTrigger();
+    expect(document.body.querySelector('[data-side="top"]')).toBeNull();
+    expect(
+      earlierMessage.querySelector('[aria-label="Copy message"]'),
+    ).not.toBeNull();
+    expect(
+      earlierMessage.querySelector('[aria-label="Fork into new thread"]'),
+    ).not.toBeNull();
   });
 });

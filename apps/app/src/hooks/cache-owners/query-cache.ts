@@ -1,11 +1,16 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
-import type { Thread, ThreadListEntry, ThreadWithRuntime } from "@bb/domain";
+import type {
+  Thread,
+  ThreadListEntry,
+  ThreadStatusChangeMetadata,
+} from "@bb/domain";
 import {
   applyToCachedThreadLists,
   getCachedThreadLists,
   iterateThreadListCacheEntries,
 } from "./thread-list-cache-data";
 import { bumpDiffPatchEvictionGeneration } from "./environment-diff-patch-cache-owner";
+import { readCachedSidebarBootstrap } from "@/lib/sidebar-bootstrap-cache";
 import type {
   SidebarBootstrapResponse,
   ThreadResponse,
@@ -23,6 +28,7 @@ import {
   environmentQueryKey,
   environmentWorkStatusQueryKey,
   environmentWorkStatusQueryKeyPrefix,
+  SIDEBAR_NAVIGATION_QUERY_KEY,
   sidebarNavigationQueryKey,
   THREADS_QUERY_KEY,
   threadQueryKey,
@@ -46,25 +52,25 @@ interface UpdateCachedTimelineRowsArgs {
   updater: TimelineRowsUpdater;
 }
 
-export interface EnvironmentInvalidationParams {
+interface EnvironmentInvalidationParams {
   environmentId: string;
 }
 
-export interface EnvironmentDiffPatchRemovalParams {
+interface EnvironmentDiffPatchRemovalParams {
   environmentId: string;
   queryClient: QueryClient;
 }
 
-export interface ProjectThreadListInvalidationParams {
+interface ProjectThreadListInvalidationParams {
   projectId: string;
   queryClient: QueryClient;
 }
 
-export interface CachedGlobalThreadListInvalidationParams {
+interface CachedGlobalThreadListInvalidationParams {
   queryClient: QueryClient;
 }
 
-export interface RootOrderThreadListInvalidationParams {
+interface RootOrderThreadListInvalidationParams {
   projectId?: string;
   queryClient: QueryClient;
 }
@@ -175,7 +181,6 @@ function isArchivedThreadsListFilters(
     return false;
   }
 
-  // An empty filter object is the global archived list.
   return true;
 }
 
@@ -195,6 +200,27 @@ function getArchivedThreadListFiltersFromQueryKey(
   }
 
   return filters;
+}
+
+export function isArchivedThreadListQueryKey(queryKey: QueryKey): boolean {
+  return getArchivedThreadListFiltersFromQueryKey(queryKey) !== undefined;
+}
+
+export function getCachedThreadListQueryKeys(
+  queryClient: QueryClient,
+): QueryKey[] {
+  const queryKeys: QueryKey[] = [];
+  for (const [queryKey] of queryClient.getQueriesData({
+    queryKey: threadsQueryKey(),
+  })) {
+    if (
+      getThreadListFiltersFromQueryKey(queryKey) !== undefined ||
+      getArchivedThreadListFiltersFromQueryKey(queryKey) !== undefined
+    ) {
+      queryKeys.push(queryKey);
+    }
+  }
+  return queryKeys;
 }
 
 function getThreadListProjectIdFromQueryKey(
@@ -318,6 +344,15 @@ export function applyToCachedThreadListsAndSidebarNavigation(
   });
 }
 
+export function listSidebarNavigationThreads(
+  navigation: SidebarBootstrapResponse,
+): ThreadListEntry[] {
+  return [
+    ...navigation.projects.flatMap((project) => project.threads),
+    ...navigation.personalProject.threads,
+  ];
+}
+
 export function getCachedSidebarNavigationThreads(
   queryClient: QueryClient,
 ): ThreadListEntry[] {
@@ -327,10 +362,28 @@ export function getCachedSidebarNavigationThreads(
   if (!navigation) {
     return [];
   }
-  return [
-    ...navigation.projects.flatMap((project) => project.threads),
-    ...navigation.personalProject.threads,
-  ];
+  return listSidebarNavigationThreads(navigation);
+}
+
+export function findSidebarNavigationThreadPlaceholder(
+  queryClient: QueryClient,
+  threadId: string,
+): ThreadListEntry | undefined {
+  if (!threadId) {
+    return undefined;
+  }
+  const cached = getCachedSidebarNavigationThreads(queryClient).find(
+    (thread) => thread.id === threadId,
+  );
+  if (cached !== undefined) {
+    return cached;
+  }
+  const persisted = readCachedSidebarBootstrap();
+  return persisted === null
+    ? undefined
+    : listSidebarNavigationThreads(persisted).find(
+        (thread) => thread.id === threadId,
+      );
 }
 
 export function snapshotCachedSidebarNavigation(
@@ -354,16 +407,6 @@ export function getEnvironmentRecordInvalidationQueryKeys({
   return [environmentQueryKey(environmentId)];
 }
 
-/**
- * Invalidation targets for an environment's workspace-derived views. The
- * per-file diff PATCH cache is deliberately absent: it is an observer-less
- * imperative cache (written with `setQueryData`, read with `getQueryData`, no
- * `useQuery`/`queryFn`), so `invalidateQueries` only marks it stale and never
- * evicts or refetches — `getQueryData` would keep returning the stale patch.
- * Callers must evict patches via {@link removeEnvironmentDiffPatchQueries}
- * instead; the diff TOC ({@link environmentDiffFilesQueryKeyPrefix}) has a real
- * observer and refetches on invalidation.
- */
 export function getEnvironmentWorkspaceStateInvalidationQueryKeys({
   environmentId,
 }: EnvironmentInvalidationParams): QueryKey[] {
@@ -375,19 +418,6 @@ export function getEnvironmentWorkspaceStateInvalidationQueryKeys({
   ];
 }
 
-/**
- * Evict every cached per-file diff PATCH for an environment. The patch cache is
- * observer-less (see {@link getEnvironmentWorkspaceStateInvalidationQueryKeys}),
- * so it must be removed — not invalidated — for a content-only file edit to
- * surface fresh patches: eviction makes `readDiffPatchEntry` return undefined,
- * which the panel re-requests once the TOC refetch fires.
- *
- * The eviction generation is bumped synchronously here, before the async TOC
- * refetch fires. A patch fetch that started before this eviction observes the
- * stale generation when it resolves and drops its (pre-edit) write rather than
- * re-seeding the just-cleared cache — otherwise a fetch in flight at edit time
- * could leave a stale patch that nothing re-requests.
- */
 export function removeEnvironmentDiffPatchQueries({
   environmentId,
   queryClient,
@@ -439,11 +469,6 @@ export function getCachedEnvironmentRefWorkspaceStateInvalidationQueryKeys(
     }
   }
 
-  // A moved merge base affects the ref-derived (`all`/`branch_committed`) diff
-  // targets, so invalidate the diff TOC cache by prefix. Mirrors the bulk
-  // workspace-state path; the per-target keys are not enumerated here. The
-  // observer-less patch cache is evicted separately via
-  // removeEnvironmentDiffPatchQueries — invalidation is a no-op for it.
   queryKeys.push(environmentDiffFilesQueryKeyPrefix(environmentId));
 
   return queryKeys;
@@ -537,9 +562,6 @@ function threadMatchesListFilters(
   ) {
     return false;
   }
-  // Mirror the server default: hidden threads stay out of list caches —
-  // otherwise realtime inserts leak them into surfaces (sidebar, recents)
-  // whose fetches exclude them.
   if (thread.visibility === "hidden") {
     return false;
   }
@@ -549,11 +571,50 @@ function threadMatchesListFilters(
 
 export function optimisticallyInsertThread(
   queryClient: QueryClient,
-  thread: ThreadWithRuntime,
+  thread: ThreadResponse,
 ): void {
-  // Only inserts into flat-array list caches (`useThreads`). The paginated
-  // archived view uses `InfiniteData` and only displays threads with an
-  // archivedAt — newly created threads can't belong to it.
+  const queuedWork = thread.queuedMessageCount > 0 ? "waiting" : "none";
+  const insertedThread: ThreadListEntry = {
+    ...thread,
+    activity: {
+      activeWorkflowCount: 0,
+      activeBackgroundAgentCount: 0,
+      activeBackgroundCommandCount: 0,
+      activePlanModeCount: 0,
+      activeGoalCount: 0,
+    },
+    environmentBranchName: null,
+    environmentHostId: null,
+    environmentName: null,
+    environmentPath: null,
+    environmentProviderId: null,
+    environmentIsWorktree: null,
+    environmentWorkspaceDisplayKind: "other",
+    runtime: thread.runtime,
+    hasPendingInteraction: false,
+    pinSortKey: null,
+    queuedWork,
+  };
+  const upsertThread = (threads: ThreadListEntry[]): ThreadListEntry[] => {
+    const existingIndex = threads.findIndex(
+      (candidate) => candidate.id === thread.id,
+    );
+    if (existingIndex === -1) {
+      return [insertedThread, ...threads];
+    }
+    return threads.map((candidate, index) =>
+      index === existingIndex
+        ? {
+            ...candidate,
+            queuedWork:
+              candidate.queuedWork === "none"
+                ? queuedWork
+                : candidate.queuedWork,
+          }
+        : candidate,
+    );
+  };
+
   for (const { queryKey, data } of getCachedThreadLists(queryClient, {
     queryKey: threadsQueryKey(),
   })) {
@@ -565,31 +626,33 @@ export function optimisticallyInsertThread(
     if (!threadMatchesListFilters(thread, filters)) {
       continue;
     }
-    if (data.some((candidate) => candidate.id === thread.id)) {
-      continue;
-    }
 
-    queryClient.setQueryData<ThreadListEntry[]>(queryKey, [
-      {
-        ...thread,
-        activity: {
-          activeWorkflowCount: 0,
-          activeBackgroundAgentCount: 0,
-          activeBackgroundCommandCount: 0,
-          activePlanModeCount: 0,
-          activeGoalCount: 0,
-        },
-        environmentBranchName: null,
-        environmentHostId: null,
-        environmentName: null,
-        runtime: thread.runtime,
-        hasPendingInteraction: false,
-        pinSortKey: null,
-        environmentWorkspaceDisplayKind: "other",
-      },
-      ...data,
-    ]);
+    queryClient.setQueryData<ThreadListEntry[]>(queryKey, upsertThread(data));
   }
+
+  if (thread.visibility === "hidden" || thread.archivedAt !== null) {
+    return;
+  }
+
+  queryClient.setQueryData<SidebarBootstrapResponse>(
+    sidebarNavigationQueryKey(),
+    (navigation) => {
+      if (!navigation) {
+        return navigation;
+      }
+      const updateProject = (
+        project: SidebarNavigationProject,
+      ): SidebarNavigationProject =>
+        project.id === thread.projectId
+          ? mapSidebarNavigationProjectThreads(project, upsertThread)
+          : project;
+      return {
+        sections: navigation.sections,
+        projects: navigation.projects.map(updateProject),
+        personalProject: updateProject(navigation.personalProject),
+      };
+    },
+  );
 }
 
 const updateEveryTimelineQuery: TimelineRowsUpdatePredicate = () => true;
@@ -666,4 +729,34 @@ export function updateCachedThreadListPendingInteractionState(
       thread.id === threadId ? { ...thread, hasPendingInteraction } : thread,
     );
   });
+}
+
+export function updateCachedThreadListStatusState(
+  queryClient: QueryClient,
+  threadId: string,
+  statusChange: ThreadStatusChangeMetadata,
+): void {
+  applyToCachedThreadListsAndSidebarNavigation(queryClient, (list) => {
+    if (!list.some((thread) => thread.id === threadId)) {
+      return list;
+    }
+    return list.map((thread) =>
+      thread.id === threadId ? { ...thread, ...statusChange } : thread,
+    );
+  });
+}
+
+export function getFetchingThreadListQueryKeys(
+  queryClient: QueryClient,
+): QueryKey[] {
+  return queryClient
+    .getQueryCache()
+    .findAll({ fetchStatus: "fetching" })
+    .map((query) => query.queryKey)
+    .filter(
+      (queryKey) =>
+        queryKey[0] === SIDEBAR_NAVIGATION_QUERY_KEY ||
+        getThreadListFiltersFromQueryKey(queryKey) !== undefined ||
+        getArchivedThreadListFiltersFromQueryKey(queryKey) !== undefined,
+    );
 }

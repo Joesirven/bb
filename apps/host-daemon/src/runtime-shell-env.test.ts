@@ -3,9 +3,9 @@ import os from "node:os";
 import path, { delimiter } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createUserShellPathResolver,
   prepareRuntimeShellEnv,
   resolveLocalBbExecutablePath,
-  resolveUserShellPath,
   type SpawnUserShellEnv,
   type SpawnUserShellEnvArgs,
   type UserShellEnvSpawnResult,
@@ -23,10 +23,12 @@ interface FakeCliPackageOptions {
   executablePath?: string;
   executable?: boolean;
   writeEntry?: boolean;
+  writeRuntime?: boolean;
 }
 
 interface FakeCliPackage {
   cliEntryPath: string;
+  cliRuntimePath: string;
 }
 
 interface FakeShellEnvSpawn {
@@ -76,6 +78,7 @@ async function createFakeCliPackage(
   const cliPackageRoot = await makeTempDir("bb-cli-package-");
   const executablePath = options.executablePath ?? "./dist/bin/bb";
   const cliEntryPath = path.resolve(cliPackageRoot, executablePath);
+  const cliRuntimePath = path.resolve(cliPackageRoot, "dist/index.js");
 
   if (options.writeEntry ?? true) {
     await fs.mkdir(path.dirname(cliEntryPath), { recursive: true });
@@ -87,8 +90,14 @@ async function createFakeCliPackage(
     await fs.chmod(cliEntryPath, options.executable ? 0o755 : 0o644);
   }
 
+  if (options.writeRuntime) {
+    await fs.mkdir(path.dirname(cliRuntimePath), { recursive: true });
+    await fs.writeFile(cliRuntimePath, "process.stdout.write('bb')\n", "utf8");
+  }
+
   return {
     cliEntryPath,
+    cliRuntimePath,
   };
 }
 
@@ -146,15 +155,32 @@ afterEach(async () => {
 
 describe("resolveLocalBbExecutablePath", () => {
   it("returns the built CLI executable path", async () => {
-    const { cliEntryPath } = await createFakeCliPackage({
+    const { cliEntryPath, cliRuntimePath } = await createFakeCliPackage({
+      executable: true,
+      writeRuntime: true,
+    });
+
+    await expect(
+      resolveLocalBbExecutablePath({
+        cliExecutablePath: cliEntryPath,
+        cliRuntimePath,
+      }),
+    ).resolves.toBe(cliEntryPath);
+  });
+
+  it("fails before startup when the source CLI runtime is unbuilt", async () => {
+    const { cliEntryPath, cliRuntimePath } = await createFakeCliPackage({
       executable: true,
     });
 
     await expect(
       resolveLocalBbExecutablePath({
         cliExecutablePath: cliEntryPath,
+        cliRuntimePath,
       }),
-    ).resolves.toBe(cliEntryPath);
+    ).rejects.toThrow(
+      `Missing built bb CLI runtime at ${cliRuntimePath}. Build @bb/cli before starting the host daemon.`,
+    );
   });
 
   it("fails clearly when the built CLI entry is missing", async () => {
@@ -200,7 +226,7 @@ describe("resolveLocalBbExecutablePath", () => {
   });
 });
 
-describe("resolveUserShellPath", () => {
+describe("createUserShellPathResolver", () => {
   it("settles when the shell env probe times out even if the shell ignores SIGTERM", async () => {
     const shellDir = await makeTempDir("bb-shell-timeout-");
     const shellPath = path.join(shellDir, "ignore-term-shell");
@@ -219,11 +245,11 @@ describe("resolveUserShellPath", () => {
     const startedAt = Date.now();
 
     await expect(
-      resolveUserShellPath({
+      createUserShellPathResolver({
         env: { SHELL: shellPath, PATH: "/usr/bin" },
         platform: "linux",
         timeoutMs: 25,
-      }),
+      })(),
     ).resolves.toBeNull();
     expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
@@ -239,12 +265,12 @@ describe("resolveUserShellPath", () => {
     });
 
     await expect(
-      resolveUserShellPath({
+      createUserShellPathResolver({
         env: { SHELL: "/usr/bin/bash", PATH: "/usr/bin" },
         platform: "linux",
         spawnUserShellEnv: fakeSpawn.spawn,
         timeoutMs: 1234,
-      }),
+      })(),
     ).resolves.toBe(shellPath);
 
     expect(fakeSpawn.calls).toEqual([
@@ -275,16 +301,45 @@ describe("resolveUserShellPath", () => {
     });
 
     await expect(
-      resolveUserShellPath({
+      createUserShellPathResolver({
         env: { SHELL: "/bin/zsh", PATH: "/usr/bin" },
         platform: "linux",
         spawnUserShellEnv: fakeSpawn.spawn,
-      }),
+      })(),
     ).resolves.toBe(shellPath);
 
     expect(fakeSpawn.calls.map((call) => call.args[0])).toEqual([
       "-ilc",
       "-lc",
+    ]);
+  });
+
+  it("retains the previous PATH when a refreshed interactive probe fails", async () => {
+    const interactivePath = "/home/me/.local/bin:/usr/bin";
+    const fakeSpawn = createFakeShellEnvSpawn({
+      results: [
+        createShellEnvSpawnResult({
+          stdout: createMarkedShellEnvOutput(interactivePath),
+        }),
+        createShellEnvSpawnResult({
+          status: 1,
+          stderr: "interactive shell failed",
+        }),
+      ],
+    });
+
+    const resolvePath = createUserShellPathResolver({
+      env: { SHELL: "/bin/zsh", PATH: "/usr/bin" },
+      platform: "linux",
+      spawnUserShellEnv: fakeSpawn.spawn,
+    });
+
+    await expect(resolvePath()).resolves.toBe(interactivePath);
+    await expect(resolvePath()).resolves.toBe(interactivePath);
+
+    expect(fakeSpawn.calls.map((call) => call.args[0])).toEqual([
+      "-ilc",
+      "-ilc",
     ]);
   });
 
@@ -298,11 +353,11 @@ describe("resolveUserShellPath", () => {
     });
 
     await expect(
-      resolveUserShellPath({
+      createUserShellPathResolver({
         env: { PATH: "/usr/bin" },
         platform: "linux",
         spawnUserShellEnv: fakeSpawn.spawn,
-      }),
+      })(),
     ).resolves.toBe("/usr/bin:/bin");
 
     expect(fakeSpawn.calls[0]?.command).toBe("/bin/sh");
@@ -319,11 +374,11 @@ describe("resolveUserShellPath", () => {
     });
 
     await expect(
-      resolveUserShellPath({
+      createUserShellPathResolver({
         env: { PATH: "/usr/bin" },
         platform: "darwin",
         spawnUserShellEnv: fakeSpawn.spawn,
-      }),
+      })(),
     ).resolves.toBe("/opt/homebrew/bin:/usr/bin");
 
     expect(fakeSpawn.calls[0]?.command).toBe("/bin/zsh");
@@ -340,11 +395,11 @@ describe("resolveUserShellPath", () => {
     });
 
     await expect(
-      resolveUserShellPath({
+      createUserShellPathResolver({
         env: { SHELL: "/bin/bash", PATH: "C:\\Windows" },
         platform: "win32",
         spawnUserShellEnv: fakeSpawn.spawn,
-      }),
+      })(),
     ).resolves.toBeNull();
 
     expect(fakeSpawn.calls).toEqual([]);

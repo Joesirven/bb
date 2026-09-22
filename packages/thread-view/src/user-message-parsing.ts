@@ -104,7 +104,7 @@ export function parsePromptInput(
   };
 }
 
-export function shouldRenderClientRequestedInput(
+function shouldRenderClientRequestedInput(
   threadStatus: BuildEventProjectionMessagesOptions["threadStatus"] | undefined,
 ): boolean {
   if (!threadStatus) return false;
@@ -114,6 +114,9 @@ export function shouldRenderClientRequestedInput(
     case "idle":
     case "active":
     case "stopping":
+    // A pending thread's first message is queued and has not been accepted,
+    // so the requested input is the only record of it there is to show.
+    case "pending":
       return true;
     default:
       return assertNever(threadStatus);
@@ -127,6 +130,9 @@ export function shouldPreservePendingMessages(
   switch (threadStatus) {
     case "starting":
     case "active":
+    // The queued first message is exactly what must survive: nothing has been
+    // accepted yet, so dropping it would leave the timeline empty.
+    case "pending":
       return true;
     case "error":
     case "idle":
@@ -154,22 +160,22 @@ function buildAttachments(
   };
 }
 
-export interface ParseUserFromClientRequestArgs {
+interface ParseUserFromClientRequestArgs {
   acceptedClientRequest?: AcceptedClientRequest;
   decoded: ThreadEvent;
   meta: EventMeta;
   options?: BuildEventProjectionMessagesOptions;
 }
 
-export interface ParseAcceptedSteerFromClientRequestArgs extends ParseUserFromClientRequestArgs {
+interface ParseAcceptedSteerFromClientRequestArgs extends ParseUserFromClientRequestArgs {
   acceptedClientRequest: AcceptedClientRequest;
 }
 
-export interface ParsePendingSteerFromClientRequestArgs extends ParseUserFromClientRequestArgs {
+interface ParsePendingSteerFromClientRequestArgs extends ParseUserFromClientRequestArgs {
   acceptedClientRequest: AcceptedClientRequest | undefined;
 }
 
-export interface ParseRejectedUsersFromClientRequestArgs {
+interface ParseRejectedUsersFromClientRequestArgs {
   decoded: ThreadEvent;
   meta: EventMeta;
   options?: BuildEventProjectionMessagesOptions;
@@ -215,7 +221,7 @@ function resolveTurnRequestKind({
   return "steer";
 }
 
-export function isSteerRequest(decoded: ClientTurnRequestedEvent): boolean {
+function isSteerRequest(decoded: ClientTurnRequestedEvent): boolean {
   return (
     resolveTurnRequestKind({
       acceptedClientRequest: undefined,
@@ -286,9 +292,6 @@ function buildClientUserMessage({
     acceptedClientRequest && turnRequest.kind === "steer"
       ? acceptedClientRequest.meta
       : meta;
-  // Recover the structured source for legacy cross-thread requests that were
-  // persisted as ordinary user turns. The reserved envelope is written by BB,
-  // so an exact match is authoritative even when old event metadata is absent.
   const agentEnvelope = parseAgentMessageEnvelope(parsedInput.text);
   const initiator =
     decoded.initiator === "user" && agentEnvelope !== null
@@ -314,10 +317,6 @@ function buildClientUserMessage({
       : { scope: decoded.scope }),
     initiator,
     senderThreadId,
-    // Legacy defaulting lives in `storedTurnRequestEventDataSchema`, so decoded
-    // rows always carry concrete values at runtime. These `??` fallbacks only
-    // satisfy the base in-flight schema's `.optional()` static type; they never
-    // fire for a decoded stored event.
     systemMessageKind: decoded.systemMessageKind ?? "unlabeled",
     systemMessageSubject: decoded.systemMessageSubject ?? null,
     turnRequest,
@@ -331,39 +330,33 @@ function clientUserMessageIdSuffix(messageIndex: number): string | undefined {
   return messageIndex > 0 ? String(messageIndex) : undefined;
 }
 
-export function parseUserFromClientRequest(
-  args: ParseUserFromClientRequestArgs,
-): EventProjectionUserMessage | null {
-  const { acceptedClientRequest, decoded, meta, options } = args;
-  if (decoded.type !== "client/turn/requested") {
-    return null;
+function buildClientUserMessagesForInputGroups({
+  acceptedClientRequest,
+  decoded,
+  meta,
+  requestStatus,
+}: {
+  acceptedClientRequest: AcceptedClientRequest | undefined;
+  decoded: ClientTurnRequestedEvent;
+  meta: EventMeta;
+  requestStatus: EventProjectionTurnRequest["status"];
+}): EventProjectionUserMessage[] {
+  const groups = decoded.inputGroups ?? [decoded.input];
+  const messages: EventProjectionUserMessage[] = [];
+  for (const input of groups) {
+    if (!parsePromptInput(input)) continue;
+    messages.push(
+      buildClientUserMessage({
+        acceptedClientRequest,
+        decoded,
+        idSuffix: clientUserMessageIdSuffix(messages.length),
+        input,
+        meta,
+        requestStatus,
+      }),
+    );
   }
-
-  const parsedInput = parsePromptInput(decoded.input);
-  if (!parsedInput) return null;
-  if (!shouldRenderClientRequestedInput(options?.threadStatus)) {
-    return null;
-  }
-
-  // Steers flow through parsePendingSteer / parseAcceptedSteer regardless of
-  // initiator — the steer-vs-message distinction is about turn shape, not who
-  // initiated it.
-  if (
-    resolveTurnRequestKind({
-      acceptedClientRequest,
-      decoded,
-    }) !== "message"
-  ) {
-    return null;
-  }
-
-  return buildClientUserMessage({
-    acceptedClientRequest,
-    decoded,
-    input: decoded.input,
-    meta,
-    requestStatus: acceptedClientRequest ? "accepted" : "pending",
-  });
+  return messages;
 }
 
 export function parseUsersFromClientRequest(
@@ -385,30 +378,12 @@ export function parseUsersFromClientRequest(
     return [];
   }
 
-  const groups = decoded.inputGroups ?? [decoded.input];
-  const messages: EventProjectionUserMessage[] = [];
-  for (const input of groups) {
-    const parsedInput = parsePromptInput(input);
-    if (!parsedInput) continue;
-    const visibleMessageIndex = messages.length;
-    messages.push(
-      buildClientUserMessage({
-        acceptedClientRequest,
-        decoded,
-        idSuffix: clientUserMessageIdSuffix(visibleMessageIndex),
-        input,
-        meta,
-        requestStatus: acceptedClientRequest ? "accepted" : "pending",
-      }),
-    );
-  }
-  return messages;
-}
-
-export function parsePendingSteerFromClientRequest(
-  args: ParsePendingSteerFromClientRequestArgs,
-): EventProjectionUserMessage | null {
-  return parsePendingSteersFromClientRequest(args)[0] ?? null;
+  return buildClientUserMessagesForInputGroups({
+    acceptedClientRequest,
+    decoded,
+    meta,
+    requestStatus: acceptedClientRequest ? "accepted" : "pending",
+  });
 }
 
 export function parsePendingSteersFromClientRequest(
@@ -425,28 +400,12 @@ export function parsePendingSteersFromClientRequest(
     return [];
   }
 
-  const groups = decoded.inputGroups ?? [decoded.input];
-  const messages: EventProjectionUserMessage[] = [];
-  for (const input of groups) {
-    if (!parsePromptInput(input)) continue;
-    const visibleMessageIndex = messages.length;
-    messages.push(
-      buildClientUserMessage({
-        decoded,
-        idSuffix: clientUserMessageIdSuffix(visibleMessageIndex),
-        input,
-        meta,
-        requestStatus: "pending",
-      }),
-    );
-  }
-  return messages;
-}
-
-export function parseAcceptedSteerFromClientRequest(
-  args: ParseAcceptedSteerFromClientRequestArgs,
-): EventProjectionUserMessage | null {
-  return parseAcceptedSteersFromClientRequest(args)[0] ?? null;
+  return buildClientUserMessagesForInputGroups({
+    acceptedClientRequest: undefined,
+    decoded,
+    meta,
+    requestStatus: "pending",
+  });
 }
 
 export function parseAcceptedSteersFromClientRequest(
@@ -468,23 +427,12 @@ export function parseAcceptedSteersFromClientRequest(
     return [];
   }
 
-  const groups = decoded.inputGroups ?? [decoded.input];
-  const messages: EventProjectionUserMessage[] = [];
-  for (const input of groups) {
-    if (!parsePromptInput(input)) continue;
-    const visibleMessageIndex = messages.length;
-    messages.push(
-      buildClientUserMessage({
-        acceptedClientRequest,
-        decoded,
-        idSuffix: clientUserMessageIdSuffix(visibleMessageIndex),
-        input,
-        meta,
-        requestStatus: "accepted",
-      }),
-    );
-  }
-  return messages;
+  return buildClientUserMessagesForInputGroups({
+    acceptedClientRequest,
+    decoded,
+    meta,
+    requestStatus: "accepted",
+  });
 }
 
 export function parseRejectedUsersFromClientRequest(
@@ -498,22 +446,49 @@ export function parseRejectedUsersFromClientRequest(
     return [];
   }
 
-  const groups = decoded.inputGroups ?? [decoded.input];
-  const messages: EventProjectionUserMessage[] = [];
-  for (const input of groups) {
-    if (!parsePromptInput(input)) continue;
-    const visibleMessageIndex = messages.length;
-    messages.push(
-      buildClientUserMessage({
-        decoded,
-        idSuffix: clientUserMessageIdSuffix(visibleMessageIndex),
-        input,
-        meta,
-        requestStatus: "rejected",
-      }),
-    );
+  return buildClientUserMessagesForInputGroups({
+    acceptedClientRequest: undefined,
+    decoded,
+    meta,
+    requestStatus: "rejected",
+  });
+}
+
+export function parseProviderUserMessage(
+  decoded: ThreadEvent,
+  meta: EventMeta,
+): EventProjectionUserMessage | null {
+  if (
+    decoded.type !== "item/completed" ||
+    decoded.item.type !== "userMessage"
+  ) {
+    return null;
   }
-  return messages;
+  const text = decoded.item.content
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("");
+  if (text.length === 0) {
+    return null;
+  }
+  return {
+    kind: "user",
+    id: messageId(decoded.threadId, "provider-input", decoded.item.id),
+    threadId: decoded.threadId,
+    sourceSeqStart: meta.seq,
+    sourceSeqEnd: meta.seq,
+    createdAt: meta.createdAt,
+    scope: decoded.scope,
+    ...(decoded.item.parentToolCallId
+      ? { parentToolCallId: decoded.item.parentToolCallId }
+      : {}),
+    initiator: "system",
+    senderThreadId: null,
+    systemMessageKind: "unlabeled",
+    systemMessageSubject: null,
+    turnRequest: { isGrouped: false, kind: "steer", status: "accepted" },
+    text,
+    mentions: [],
+  };
 }
 
 export function parseLegacyUserMessage(

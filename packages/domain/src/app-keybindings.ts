@@ -36,6 +36,7 @@ export const PANE_FOCUS_APP_COMMAND_IDS = [
 ] as const;
 
 export const APP_COMMAND_IDS = [
+  "palette.open",
   "thread.new",
   "thread.search",
   "thread.rename",
@@ -49,10 +50,12 @@ export const APP_COMMAND_IDS = [
   "pane.maximize.toggle",
   "pane.close",
   "window.new",
+  "app.back",
   "settings.open",
   "settings.openServers",
   "sidebar.toggle",
   "panel.newTab",
+  "panel.reopenClosedTab",
   "panel.close",
   "panel.toggle",
   "file.quickOpen",
@@ -68,14 +71,39 @@ export const APP_COMMAND_IDS = [
   "modelPicker.cycleReasoningBackward",
   "browser.focusLocation",
   "browser.reload",
+  "browser.find",
   "workspace.openPreferred",
+  "logs.openServerDaemon",
+  "notifications.open",
   ...QUESTION_SELECT_APP_COMMAND_IDS,
 ] as const;
 
 export const appCommandIdSchema = z.enum(APP_COMMAND_IDS);
 export type AppCommandId = z.infer<typeof appCommandIdSchema>;
 
-export const APP_COMMAND_CONTEXT_KEYS = [
+export const pluginCommandIdSchema = z
+  .templateLiteral(["plugin:", z.string(), "/", z.string()])
+  .refine(
+    (id) =>
+      /^plugin:[a-z0-9][a-z0-9-]*\/[a-zA-Z0-9_-]+$/u.test(id) &&
+      id.length <= 256,
+    "Invalid plugin command ID",
+  );
+export type PluginCommandId = z.infer<typeof pluginCommandIdSchema>;
+export const keyboardCommandIdSchema = z.union([
+  appCommandIdSchema,
+  pluginCommandIdSchema,
+]);
+export type KeyboardCommandId = z.infer<typeof keyboardCommandIdSchema>;
+
+export function pluginCommandId(
+  pluginId: string,
+  commandId: string,
+): PluginCommandId {
+  return pluginCommandIdSchema.parse(`plugin:${pluginId}/${commandId}`);
+}
+
+const APP_COMMAND_CONTEXT_KEYS = [
   "mainSurface",
   "modalOpen",
   "editableFocus",
@@ -89,14 +117,12 @@ export const APP_COMMAND_CONTEXT_KEYS = [
   "macPlatform",
 ] as const;
 
-export const appCommandContextKeySchema = z.enum(APP_COMMAND_CONTEXT_KEYS);
+const appCommandContextKeySchema = z.enum(APP_COMMAND_CONTEXT_KEYS);
 export type AppCommandContextKey = z.infer<typeof appCommandContextKeySchema>;
 export type AppCommandContext = Record<AppCommandContextKey, boolean>;
 
 export const appShortcutSchema = z
   .object({
-    // Store the unshifted base key; `shift` records the modifier separately.
-    // For example, Command+Shift+[ is `{ key: "[", shift: true }`.
     key: z.string().min(1).max(32),
     mod: z.boolean(),
     meta: z.boolean(),
@@ -109,7 +135,6 @@ export type AppShortcut = z.infer<typeof appShortcutSchema>;
 
 export interface AppShortcutInput {
   altKey: boolean;
-  /** The physical key (`KeyboardEvent.code`), layout- and modifier-independent. */
   code: string;
   ctrlKey: boolean;
   key: string;
@@ -141,8 +166,6 @@ const SHIFTED_KEY_BASES: Readonly<Record<string, string>> = {
   "?": "/",
 };
 
-// The unshifted letter or digit a physical key produces, or null for every
-// other key (arrows, punctuation, F-keys), whose `key` is already stable.
 function baseKeyFromCode(code: string): string | null {
   if (/^Key[A-Z]$/u.test(code)) return code.slice(3).toLowerCase();
   if (/^Digit[0-9]$/u.test(code)) return code.slice(5);
@@ -157,11 +180,6 @@ export function normalizeAppShortcutInputKey(input: AppShortcutInput): string {
   if (input.key === " " || input.key === "Spacebar") {
     return "Space";
   }
-  // macOS composes Option+<letter> into another character — Option+M reports
-  // key "µ" — so an Alt chord could never be matched by `key` there. Fall back
-  // to the physical key only when the composed character is NOT a plain letter
-  // or digit. A non-US layout still reports one (AZERTY Alt+A is key "a", code
-  // "KeyQ"), so it keeps matching the character the user actually sees.
   if (input.altKey && !isAsciiAlphanumeric(input.key)) {
     const fromCode = baseKeyFromCode(input.code);
     if (fromCode !== null) return fromCode;
@@ -192,17 +210,16 @@ export function matchesAppShortcut(
   );
 }
 
-export const appCommandWhenSchema = z
+const appCommandWhenSchema = z
   .object({
     all: z.array(appCommandContextKeySchema),
     none: z.array(appCommandContextKeySchema),
   })
   .strict();
-export type AppCommandWhen = z.infer<typeof appCommandWhenSchema>;
 
 export const appKeybindingSchema = z
   .object({
-    command: appCommandIdSchema,
+    command: keyboardCommandIdSchema,
     desktopOnly: z.boolean(),
     shortcut: appShortcutSchema,
     when: appCommandWhenSchema,
@@ -210,8 +227,7 @@ export const appKeybindingSchema = z
   .strict();
 export type AppKeybinding = z.infer<typeof appKeybindingSchema>;
 
-export const appDefaultKeybindingSchema = appKeybindingSchema.extend({
-  // Null keeps a command assignable without shipping a default shortcut.
+const appDefaultKeybindingSchema = appKeybindingSchema.extend({
   shortcut: appShortcutSchema.nullable(),
 });
 export type AppDefaultKeybinding = z.infer<typeof appDefaultKeybindingSchema>;
@@ -237,20 +253,18 @@ export const appDefaultKeybindingsSchema = z
   .max(256);
 export type AppDefaultKeybindings = z.infer<typeof appDefaultKeybindingsSchema>;
 
-export const appKeybindingOverrideSchema = z
+const appKeybindingOverrideSchema = z
   .object({
-    command: appCommandIdSchema,
-    // Null has explicit meaning: disable every default binding for this command.
+    command: keyboardCommandIdSchema,
     shortcut: appShortcutSchema.nullable(),
   })
   .strict();
-export type AppKeybindingOverride = z.infer<typeof appKeybindingOverrideSchema>;
 
 export const appKeybindingOverridesSchema = z
   .array(appKeybindingOverrideSchema)
-  .max(APP_COMMAND_IDS.length)
+  .max(1024)
   .superRefine((overrides, context) => {
-    const seen = new Set<AppCommandId>();
+    const seen = new Set<KeyboardCommandId>();
     for (const [index, override] of overrides.entries()) {
       if (seen.has(override.command)) {
         context.addIssue({

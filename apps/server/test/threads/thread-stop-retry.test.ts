@@ -1,10 +1,12 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { getThread, listEvents } from "@bb/db";
-import type { Environment, Thread } from "@bb/domain";
+import { getThread, listEvents, markThreadDeleted } from "@bb/db";
+import type { EnvironmentRow } from "@bb/db";
+import type { Thread } from "@bb/domain";
 import { describe, expect, it } from "vitest";
 import {
   finalizeStoppedThread,
   hasLiveThreadStopInFlight,
+  requestThreadStorageDeletion,
   requestThreadStopForCurrentState,
 } from "../../src/services/threads/thread-lifecycle.js";
 import {
@@ -23,7 +25,7 @@ import {
 import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
 
 interface ActiveThreadStopFixture {
-  environment: Environment;
+  environment: EnvironmentRow;
   thread: Thread;
 }
 
@@ -74,6 +76,67 @@ async function waitForStopRpcIdle(args: WaitForStopRpcIdleArgs): Promise<void> {
 }
 
 describe("thread stop dispatch", () => {
+  it("keeps a deleted thread tombstone until storage deletion succeeds", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedActiveThreadStopFixture({
+        harness,
+        value: 5,
+      });
+      markThreadDeleted(harness.db, harness.hub, { threadId: thread.id });
+
+      requestThreadStorageDeletion(harness.deps, thread, environment);
+      const failedDelete = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.storage.delete" &&
+          command.threadId === thread.id,
+      );
+      expect(getThread(harness.db, thread.id)).toMatchObject({
+        deletedAt: expect.any(Number),
+        storageDeletedAt: null,
+      });
+
+      await reportQueuedCommandError(harness, failedDelete, {
+        errorCode: "test_storage_delete_failure",
+        errorMessage: "Test storage delete failure",
+      });
+      await sleep(10);
+      expect(getThread(harness.db, thread.id)).toMatchObject({
+        storageDeletedAt: null,
+      });
+
+      requestThreadStorageDeletion(harness.deps, thread, environment);
+      const successfulDelete = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.storage.delete" &&
+          command.threadId === thread.id,
+      );
+      await reportQueuedCommandSuccess(harness, successfulDelete, {
+        providerCheckpointId: null,
+      });
+
+      expect(getThread(harness.db, thread.id)).toBeNull();
+    });
+  });
+
+  it("keeps attached storage pending when its environment is unavailable", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedActiveThreadStopFixture({ harness, value: 6 });
+      markThreadDeleted(harness.db, harness.hub, { threadId: thread.id });
+
+      requestThreadStorageDeletion(harness.deps, thread, null);
+
+      expect(getThread(harness.db, thread.id)).toMatchObject({
+        deletedAt: expect.any(Number),
+        storageDeletedAt: null,
+      });
+      expect(
+        listQueuedThreadCommands(harness, "thread.storage.delete", thread.id),
+      ).toHaveLength(0);
+    });
+  });
+
   it("does not re-dispatch the stop after a live stop RPC failure", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedActiveThreadStopFixture({
@@ -89,16 +152,10 @@ describe("thread stop dispatch", () => {
           command.type === "thread.stop" && command.threadId === thread.id,
       );
       expect(hasLiveThreadStopInFlight(thread.id)).toBe(true);
-      // The stop is the durable `stopping` status, not a side-field.
       expect(getThread(harness.db, thread.id)).toMatchObject({
         status: "stopping",
       });
 
-      // A live stop RPC failure is NOT retried inline. The thread stays
-      // `stopping` (the durable record), the in-flight guard releases so a
-      // fresh stop can be issued, and no second stop command is queued.
-      // Recovery is reconnect reconciliation or the turn settling itself —
-      // not a retry loop.
       await reportQueuedCommandError(harness, stopCommand, {
         errorCode: "test_thread_stop_failure",
         errorMessage: "Test live stop failure",
@@ -109,8 +166,6 @@ describe("thread stop dispatch", () => {
       expect(getThread(harness.db, thread.id)).toMatchObject({
         status: "stopping",
       });
-      // No follow-up stop command was dispatched (a retry would have queued
-      // one); the failed command was consumed and nothing replaced it.
       expect(
         listQueuedThreadCommands(harness, "thread.stop", thread.id),
       ).toHaveLength(0);
@@ -182,13 +237,10 @@ describe("thread stop dispatch", () => {
         status: "idle",
       });
 
-      // Daemon reconnect reconciliation re-finalizes settling threads; a second
-      // completion of the same stop must change nothing.
-      const finalized = finalizeStoppedThread(harness.deps, {
+      finalizeStoppedThread(harness.deps, {
         threadId: thread.id,
       });
 
-      expect(finalized).toBe(true);
       expect(getThread(harness.db, thread.id)).toEqual(settled);
       const threadEvents = listEvents(harness.db, { threadId: thread.id });
       expect(
@@ -226,8 +278,6 @@ describe("thread stop dispatch", () => {
       );
       expect(hasLiveThreadStopInFlight(thread.id)).toBe(true);
 
-      // A second stop request while one is in flight is deduped by the
-      // process-local RPC guard, not re-queued.
       requestThreadStopForCurrentState(harness.deps, thread, environment);
 
       expect(

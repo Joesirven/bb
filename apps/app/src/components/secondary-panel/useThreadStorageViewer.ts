@@ -1,25 +1,16 @@
-import {
-  DEFAULT_THREAD_STORAGE_FILE_LIST_OPTIONS,
-  type ThreadStorageFileListOptions,
-} from "@/lib/thread-storage-files";
-import {
-  useThreadStorageFilePreview,
-  useThreadStorageFiles,
-} from "../../hooks/queries/thread-queries";
+import { useCallback } from "react";
+import type { FixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+import { sdk } from "@/lib/sdk";
+import { DEFAULT_THREAD_STORAGE_FILE_LIST_OPTIONS } from "@/lib/thread-storage-files";
+import { useThreadStorageFiles } from "../../hooks/queries/thread-queries";
 
 interface UseThreadStorageViewerParams {
-  activePath: string | null;
   fileListEnabled?: boolean;
-  fileListOptions?: ThreadStorageFileListOptions;
-  filePreviewEnabled?: boolean;
   threadId?: string;
 }
 
 export function useThreadStorageViewer({
-  activePath,
   fileListEnabled = true,
-  fileListOptions = DEFAULT_THREAD_STORAGE_FILE_LIST_OPTIONS,
-  filePreviewEnabled = true,
   threadId,
 }: UseThreadStorageViewerParams) {
   const hasThread = Boolean(threadId);
@@ -28,25 +19,52 @@ export function useThreadStorageViewer({
     isLoading: isThreadStorageFilesLoading,
     error: threadStorageFilesError,
     refetch: refetchThreadStorageFiles,
-  } = useThreadStorageFiles(threadId ?? "", fileListOptions, {
-    enabled: hasThread && fileListEnabled,
-  });
-  const {
-    data: threadStorageFilePreview,
-    isLoading: isThreadStorageFilePreviewLoading,
-    error: threadStorageFilePreviewError,
-  } = useThreadStorageFilePreview(threadId ?? "", activePath, {
-    enabled: hasThread && filePreviewEnabled && activePath !== null,
-  });
+  } = useThreadStorageFiles(
+    threadId ?? "",
+    DEFAULT_THREAD_STORAGE_FILE_LIST_OPTIONS,
+    {
+      enabled: hasThread && fileListEnabled,
+    },
+  );
+  const checkThreadStorageFileExists = useCallback(
+    async (path: string): Promise<boolean> => {
+      if (!threadId) return false;
+      const result = await sdk.threads.storageFiles({
+        limit: "1",
+        query: path,
+        threadId,
+      });
+      return result.files.some((file) => file.path === path);
+    },
+    [threadId],
+  );
 
   return {
-    isThreadStorageFilePreviewLoading,
+    checkThreadStorageFileExists,
     isThreadStorageFilesLoading,
-    threadStorageFilePreview,
-    threadStorageFilePreviewError,
     threadStorageFilesError,
     threadStorageFiles,
     threadStorageRootPath: threadStorageFiles?.storageRootPath ?? null,
     refetchThreadStorageFiles,
   };
+}
+
+interface ShouldLoadThreadStorageFileListArgs {
+  hasThread: boolean;
+  isSecondaryPanelOpen: boolean;
+  secondaryTabs: readonly Pick<FixedPanelTab, "kind">[];
+}
+
+export function shouldLoadThreadStorageFileList({
+  hasThread,
+  isSecondaryPanelOpen,
+  secondaryTabs,
+}: ShouldLoadThreadStorageFileListArgs): boolean {
+  if (!hasThread) {
+    return false;
+  }
+  return (
+    isSecondaryPanelOpen ||
+    secondaryTabs.some((tab) => tab.kind === "thread-storage-file-preview")
+  );
 }

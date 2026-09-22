@@ -1,6 +1,5 @@
 export { formatThreadTimelineText } from "./format-timeline-text.js";
 export { parseAgentMessageEnvelope } from "./agent-message-envelope.js";
-export type { AgentMessageEnvelope } from "./agent-message-envelope.js";
 export type { ThreadTimelineTextFormat } from "./format-timeline-text.js";
 export { assertNever } from "./assert-never.js";
 export {
@@ -13,10 +12,13 @@ export {
   findActiveLatestBundleId,
   findTimelineFrontierRow,
 } from "./timeline-row-title.js";
+export { hasTimelineExplorationIntent } from "./timeline-activity-intents.js";
 export {
-  hasTimelineExplorationIntent,
-  primaryTimelineActivityIntent,
-} from "./timeline-activity-intents.js";
+  activityIntentTitleGlyph,
+  workRowGlyph,
+  workRowPluginGlyph,
+  workRowPresentation,
+} from "./timeline-work-row-glyph.js";
 export {
   capitalize,
   durationToCompactString,
@@ -45,13 +47,8 @@ export {
   buildThreadTimelineFromEvents,
   buildThreadTimelineTurnDetailsFromEvents,
 } from "./build-thread-timeline.js";
-export {
-  extractThreadTimelineActivePlanTurn,
-  extractThreadTimelineActivePromptMode,
-  type ThreadTimelineActivePlanTurn,
-} from "./active-prompt-mode-extraction.js";
+export { extractThreadTimelineActivePlanTurn } from "./active-prompt-mode-extraction.js";
 export { extractThreadTimelineGoal } from "./goal-snapshot-extraction.js";
-export { extractThreadTimelineModelFallback } from "./model-fallback-extraction.js";
 export type { AcceptedClientRequestContext } from "./accepted-client-request-context.js";
 export {
   buildTimelineViewRows,
@@ -60,11 +57,18 @@ export {
 export type {
   BuildTimelineViewRowsOptions,
   ThreadTimelineViewRow,
-  TimelineImageViewViewWorkRow,
   TimelineQuestionViewWorkRow,
   TimelineViewTurnRow,
   TimelineViewWorkflowWorkRow,
   TimelineViewWorkRow,
+  TimelineWorkSummaryChild,
 } from "./timeline-view.js";
 export { compactThreadTimelineSummaryEvents } from "./summary-event-compaction.js";
 export type { ThreadEventWithMeta } from "./group-event-projection-turns.js";
+
+export { extractThreadContextWindowUsage } from "./thread-context-window-usage.js";
+export {
+  isExternalUserBoundaryForTurn,
+  type ExternalUserBoundaryMessage,
+  type ExternalUserBoundaryTurnSpan,
+} from "./external-user-boundaries.js";

@@ -1,55 +1,34 @@
 #!/usr/bin/env node
-
-/**
- * Claude Code bridge process.
- *
- * Thin JSON-RPC shell that manages Claude Agent SDK sessions and forwards
- * raw `SDKMessage` events to the parent process. The parent (host-daemon)
- * passes these to the adapter's `translateEvent` for conversion to
- * `ThreadEvent[]`.
- *
- * The bridge does NOT translate events — it only:
- * - Manages SDK session lifecycle (start, resume, stop, push input)
- * - Forwards raw SDK messages as `{ method: "sdk/message", params: { threadId, message } }`
- * - Forwards tool call requests to the parent and feeds responses back to the SDK
- * - Emits `thread/identity` when the SDK session ID is captured
- */
+import { ClaudeContextUsageCollector } from "./context-usage.js";
 
 import {
-  DEFAULT_CLAUDE_CODE_MOCK_CLI_TRAFFIC_ENDPOINT,
-  pendingInteractionResolutionSchema,
-  turnScope,
   type PendingInteractionGrantedPermissionProfile,
   type PendingInteractionPayload,
   type PermissionEscalation,
   type ReasoningLevel,
-  type ThreadEvent,
+  type ThreadDelta,
   BRIDGE_INBOUND_REQUEST_METHODS,
   BRIDGE_JSON_RPC_ERRORS,
   BRIDGE_NOTIFICATION_METHODS,
   PROVIDER_BRIDGE_PROTOCOL_VERSION,
-  threadDiscardParamsSchema as canonicalThreadDiscardParamsSchema,
+  THREAD_DELTA_GRAMMAR_V3,
+  THREAD_DELTA_NOTIFICATION_METHOD,
   threadStartParamsSchema as canonicalThreadStartParamsSchema,
-  threadStopParamsSchema as canonicalThreadStopParamsSchema,
   turnStartParamsSchema as canonicalTurnStartParamsSchema,
   turnSteerParamsSchema as canonicalTurnSteerParamsSchema,
   type InitializeResult,
-  UNSTAMPED_THREAD_ID,
-  buildAcceptedUserMessageEvent,
   createBridgeIo,
   createBridgeLineHandler,
-  createBridgeSessionRegistry,
+  createPendingToolCallTracker,
   decodeBridgeJsonRpcResponse,
-  queueAcceptedUserMessage,
   runBridgeRequest,
   shouldAutoDenyInteractiveRequest,
   withoutBridgeRuntimeEnv,
   type BridgeToolCallRequest,
-  type PendingBridgeToolCall,
   experimental_defineProviderBridge,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { randomUUID } from "node:crypto";
-import { resolve as resolvePath } from "node:path";
+import { join as joinPath, resolve as resolvePath } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   forkSession,
@@ -60,12 +39,13 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import {
-  createClaudeEventTranslator,
-  type ClaudeEventTranslator,
-} from "../event-translation.js";
+  createClaudeDeltaTranslator,
+  type ClaudeDeltaTranslator,
+} from "../delta-translation.js";
 import {
   buildClaudeApprovalInteractionPayload,
   buildClaudeInteractiveResponse,
+  claudeInteractionOutcomeSchema,
   buildClaudeUserQuestionPayload,
 } from "../interactions.js";
 import {
@@ -73,10 +53,8 @@ import {
   buildClaudeTurnParams,
   type ClaudeCodeSkillRoot,
 } from "../session-params.js";
-import { buildInterruptedClaudeTaskEvents } from "../task-translation.js";
 import { SdkSession, type SdkSessionOptions } from "./sdk-session.js";
-import { extractEnvOverrides } from "./env-overrides.js";
-import { listClaudeCodeBridgeModels } from "./model-list.js";
+import { createClaudeCodeBridgeModelListMemo } from "./model-list.js";
 import {
   claudeThreadForkParamsSchema,
   claudeThreadResumeParamsSchema,
@@ -93,6 +71,13 @@ import {
   type TurnSteerParams,
 } from "./commands.js";
 import {
+  getClaudeProviderHealth,
+  getClaudeProviderInstallationRun,
+  getClaudeProviderInstallationStatus,
+  getClaudeProviderUsage,
+} from "./provider-maintenance.js";
+import {
+  buildChromeExtraArgs,
   buildReadonlyDenialMessage,
   buildMutableFlagSettings,
   buildSessionOptions,
@@ -102,15 +87,15 @@ import {
   type PermissionEscalationWorkContext,
 } from "./session-options.js";
 import {
-  startClaudeCodeMockCliTrafficProxy,
-  type ClaudeCodeMockCliTrafficProxy,
-} from "./mock-cli-traffic-proxy.js";
-import { buildReadonlyBashUpdatedInput } from "./readonly-bash-policy.js";
+  createClaudeSkillPluginsRoot,
+  ensureClaudeSkillPlugin,
+} from "./skill-plugins.js";
 import {
   buildBridgeMcpServer,
   getAllowedToolNames,
-  BRIDGE_MCP_SERVER_NAME,
+  type ToolCallForwarder,
 } from "./tool-proxy-mcp.js";
+import { BB_BRIDGE_MCP_SERVER_NAME } from "../tool-classification.js";
 import {
   type ClaudeInteractiveResponse,
   type ClaudePermissionMode,
@@ -119,17 +104,13 @@ import {
   type ClaudeUserQuestionInput,
   type ClaudeUserQuestionRequestParams,
   CLAUDE_EXIT_PLAN_MODE_TOOL_NAME,
-  CLAUDE_PERMISSION_REQUEST_APPROVAL_METHOD,
-  CLAUDE_USER_QUESTION_REQUEST_METHOD,
   CLAUDE_USER_QUESTION_TOOL_NAME,
   claudeExitPlanModeInputSchema,
-  claudeInteractiveResponseSchema,
   claudeSuggestedPermissionUpdateSchema,
   claudeUserQuestionInputSchema,
   shouldRequestClaudePermissionApproval,
   toPendingInteractionPermissionProfile,
 } from "../interactive-contract.js";
-export { buildSessionOptions } from "./session-options.js";
 
 const promptInputItemSchema = z.discriminatedUnion("type", [
   z.object({
@@ -156,14 +137,6 @@ const promptInputItemSchema = z.discriminatedUnion("type", [
 const CLAUDE_PROVIDER_SUBAGENT_TOOL_NAMES = new Set(["Agent", "Task"]);
 const CLAUDE_WORKFLOW_TOOL_NAME = "Workflow";
 
-/** JSON-RPC notification carrying a raw SDK message. */
-interface SdkMessageNotification {
-  jsonrpc: "2.0";
-  method: "sdk/message";
-  params: { threadId: string; message: SDKMessage };
-}
-
-/** JSON-RPC notification for bridge-originated events. */
 interface BridgeEventNotification {
   jsonrpc: "2.0";
   method: string;
@@ -187,10 +160,6 @@ interface CreateSdkCallbackArgs {
 interface PendingInteractiveRequestBase {
   itemId: string;
   resolve: (value: PermissionResult) => void;
-  /**
-   * The `PendingInteractionPayload` sent out via `interaction/request`; the
-   * resolution maps back through it.
-   */
   payload: PendingInteractionPayload;
 }
 
@@ -226,47 +195,47 @@ interface ClaudeSessionPermissionGrantCoverageArgs {
   toolName: string;
 }
 
+interface ClaudeSessionRestart {
+  reason: string;
+  showRuntimeNote: boolean;
+}
+
 interface ThreadSession {
+  contextUsageCollector: ClaudeContextUsageCollector;
   session: SdkSession;
-  sessionConstructionConfig: SessionConstructionConfig;
-  sessionOptions: SdkSessionOptions;
+  attachment: ThreadAttachment;
   sessionSerial: number;
   closing: boolean;
+  restartBeforeNextTurn: ClaudeSessionRestart | null;
+  recoveryHintRaisedThisTurn: "authRequired" | "rateLimited" | null;
   streamEnded: boolean;
-  /** Every session-scoped notification is translated through this. */
-  translator: ClaudeEventTranslator;
-  mockCliTrafficProxy: ClaudeCodeMockCliTrafficProxy | null;
-  pendingToolCalls: Map<string | number, PendingBridgeToolCall>;
+  translator: ClaudeDeltaTranslator;
   pendingInteractiveRequests: Map<string | number, PendingInteractiveRequest>;
-  /** Current-turn fallback when Claude supplies no originating-work metadata. */
-  permissionEscalation: PermissionEscalation | null;
   permissionEscalationByAgentId: Map<string, PermissionEscalation | null>;
-  /**
-   * Retained for the session lifetime because background work can wake after
-   * multiple newer prompts have run.
-   */
   permissionEscalationByPromptId: Map<string, PermissionEscalation | null>;
-  /**
-   * Retained for the session lifetime so SDK messages from background
-   * subagents can inherit the policy of the Agent/Task call that launched
-   * them, even after that parent tool call has completed.
-   */
   permissionEscalationBySubagentParentToolUseId: Map<
     string,
     PermissionEscalation | null
   >;
   permissionEscalationByToolUseId: Map<string, PermissionEscalation | null>;
+}
+
+interface ThreadAttachment {
+  envSignature: string;
+  sessionConstructionConfig: SessionConstructionConfig;
+  sessionOptions: SdkSessionOptions;
+  closing: boolean;
+  residentSession: ThreadSession | null;
+  permissionEscalation: PermissionEscalation | null;
   permissionMode: ClaudePermissionMode;
   liveSettings: ClaudeLiveSessionSettings;
-  /** Mode to return to once the user approves a plan. See commands.ts. */
   approvedPlanPermissionMode: ClaudePermissionMode;
   providerThreadId?: string;
   sessionPermissionGrants: ClaudeSessionPermissionGrant[];
   threadIdRef: ThreadIdRef;
 }
 
-interface CreateThreadSessionArgs {
-  mockCliTrafficProxy: ClaudeCodeMockCliTrafficProxy | null;
+interface CreateThreadAttachmentArgs {
   permissionEscalation: PermissionEscalation | null;
   permissionMode: ClaudePermissionMode;
   liveSettings: ClaudeLiveSessionSettings;
@@ -274,43 +243,23 @@ interface CreateThreadSessionArgs {
   providerThreadId?: string;
   sessionConstructionConfig: SessionConstructionConfig;
   sessionOptions: SdkSessionOptions;
-  sessionPermissionGrants?: ClaudeSessionPermissionGrant[];
   threadIdRef: ThreadIdRef;
 }
 
-type CanonicalThreadStopParams = z.infer<
-  typeof canonicalThreadStopParamsSchema
->;
-type CanonicalThreadDiscardParams = z.infer<
-  typeof canonicalThreadDiscardParamsSchema
->;
 type CanonicalTurnStartParams = z.infer<typeof canonicalTurnStartParamsSchema>;
 type CanonicalTurnSteerParams = z.infer<typeof canonicalTurnSteerParamsSchema>;
 
-/** Acceptance correlation for canonical turn input (turn/input/accepted). */
 interface CanonicalTurnAcceptance {
   clientRequestId: CanonicalTurnStartParams["clientRequestId"];
   providerThreadId: string;
 }
 
-interface PreparedSessionEnv {
-  env: NodeJS.ProcessEnv;
-  mockCliTrafficProxy: ClaudeCodeMockCliTrafficProxy | null;
-}
-
 interface SessionConstructionConfig {
-  claudeCodeMockCliTraffic: ThreadResumeParams["claudeCodeMockCliTraffic"];
   config: ThreadResumeParams["config"];
   dynamicTools: ThreadResumeParams["dynamicTools"];
-  // Live settings are not part of the comparable construction config: the
-  // bridge applies them through SDK controls without replacing the session.
   sessionOptions: Omit<
     BuildSessionOptionsArgs,
-    | "getPermissionEscalation"
-    | "memoryEnabled"
-    | "model"
-    | "reasoningLevel"
-    | "workflowsEnabled"
+    "memoryEnabled" | "model" | "reasoningLevel" | "workflowsEnabled"
   >;
 }
 
@@ -327,21 +276,17 @@ type SessionConstructionParams =
   | ThreadResumeParams
   | ThreadForkParams;
 
-interface PrepareSessionEnvParams {
-  claudeCodeMockCliTraffic: ThreadStartParams["claudeCodeMockCliTraffic"];
-  config?: ThreadStartParams["config"];
-  threadId: ThreadStartParams["threadId"];
-}
-
 interface ReplaceThreadSessionArgs {
+  attachment: ThreadAttachment;
   providerThreadId: string;
-  replacementSession: ThreadSession;
-  reason: string;
+  restart: ClaudeSessionRestart;
   threadId: string;
   threadSession: ThreadSession;
 }
 
-interface ReplaceEndedThreadSessionArgs {
+interface ReplaceThreadSessionBeforeNextTurnArgs {
+  attachment: ThreadAttachment;
+  restart: ClaudeSessionRestart;
   threadId: string;
   threadSession: ThreadSession;
 }
@@ -385,55 +330,169 @@ interface ForwardUserQuestionRequestArgs extends BuildUserQuestionRequestParamsA
 }
 
 let sessionSerialCounter = 0;
-let toolCallRequestIdCounter = 0;
-/**
- * Skill roots latched by the canonical `skills/configure` request. The runtime
- * configures the process once, before any session exists, and every canonical
- * session built afterwards loads them as local plugins. `null` means the
- * runtime never configured skills for this process.
- */
-let configuredSkillRoots: ClaudeCodeSkillRoot[] | null = null;
+let interactiveRequestIdCounter = 0;
 
-// Runtime waits on thread/stop until the SDK stream drains or this timeout
-// forces the session closed. Stop remains a best-effort success boundary.
+function nextInteractiveRequestId(): string {
+  interactiveRequestIdCounter += 1;
+  return `interaction-${interactiveRequestIdCounter}`;
+}
+let configuredSkillRoots: ClaudeCodeSkillRoot[] | null = null;
+let skillPluginsRoot: string | null = null;
+let bridgeTempDir: string | null = null;
+
+function assembleSkillPlugins(
+  roots: readonly { id: string; path: string }[],
+): ClaudeCodeSkillRoot[] {
+  const takenNames = new Map<string, string>();
+  const assembled: ClaudeCodeSkillRoot[] = [];
+  for (const root of roots) {
+    try {
+      assembled.push({
+        id: root.id,
+        localPluginPath: ensureClaudeSkillPlugin({
+          pluginsRoot: requireSkillPluginsRoot(),
+          root: { id: root.id, path: root.path },
+          takenNames,
+        }),
+      });
+    } catch (error) {
+      process.stderr.write(
+        `claude bridge: skipping injected skill root "${root.id}": could not assemble its plugin: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+  return assembled;
+}
+
+function requireSkillPluginsRoot(): string {
+  if (skillPluginsRoot === null) {
+    skillPluginsRoot = createClaudeSkillPluginsRoot(
+      bridgeTempDir === null ? undefined : joinPath(bridgeTempDir, "skills"),
+    );
+  }
+  return skillPluginsRoot;
+}
+
 const THREAD_STOP_CLOSE_TIMEOUT_MS = 4_000;
+const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
 
 const { send, sendResult, sendError } = createBridgeIo<
-  SdkMessageNotification | BridgeEventNotification | BridgeToolCallRequest
+  BridgeEventNotification | BridgeToolCallRequest
 >();
 
-const {
-  closeThreadSession,
-  closeThreadSessionsGracefully,
-  createForwardToolCall,
-  handleToolCallResponse,
-  resolvePendingSessionWork,
-  sessions,
-} = createBridgeSessionRegistry<ThreadSession>({
-  closeSessionGracefully: (threadSession) =>
-    closeClaudeThreadSession(threadSession, true),
-  getProviderThreadId: (threadSession, threadId) =>
-    threadSession.providerThreadId ?? threadId,
-  nextToolCallRequestId: () => {
-    toolCallRequestIdCounter += 1;
-    return toolCallRequestIdCounter;
-  },
-  resolveAdditionalPendingWork: resolvePendingInteractiveRequests,
-  sendToolCall: send,
-  stopSession: (threadSession) =>
-    closeClaudeThreadSession(threadSession, false),
-});
+const threadAttachments = new Map<string, ThreadAttachment>();
+const closingSessions = new Map<string, Promise<void>>();
+const toolCallTracker = createPendingToolCallTracker({ sendToolCall: send });
+const { forwardToolCall, handleToolCallResponse } = toolCallTracker;
 
-function normalizePermissionPath(path: string): string {
-  return resolvePath(path);
+function resolvePendingSessionWork(
+  threadSession: ThreadSession,
+  message: string,
+): void {
+  toolCallTracker.resolvePendingToolCalls(threadSession, message);
+  resolvePendingInteractiveRequests(threadSession, message);
+}
+
+function applyChromeSetting(
+  attachment: ThreadAttachment,
+  enabled: boolean | undefined,
+): void {
+  const sessionOptions = attachment.sessionConstructionConfig.sessionOptions;
+  if (enabled === undefined || sessionOptions.chromeEnabled === enabled) {
+    return;
+  }
+  sessionOptions.chromeEnabled = enabled;
+  const extraArgs = buildChromeExtraArgs(enabled);
+  if (extraArgs) {
+    attachment.sessionOptions.extraArgs = extraArgs;
+  } else {
+    delete attachment.sessionOptions.extraArgs;
+  }
+  if (attachment.residentSession) {
+    attachment.residentSession.restartBeforeNextTurn = {
+      reason: CLAUDE_CHROME_SETTING_RESTART_REASON,
+      showRuntimeNote: false,
+    };
+  }
+}
+
+function createForwardToolCall(getThreadId: () => string): ToolCallForwarder {
+  return (toolName, args) => {
+    const threadId = getThreadId();
+    const attachment = threadAttachments.get(threadId);
+    const threadSession = attachment?.residentSession;
+    if (
+      !attachment ||
+      attachment.closing ||
+      !threadSession ||
+      threadSession.closing
+    ) {
+      return Promise.resolve({
+        content: "Thread session not found",
+        isError: true,
+      });
+    }
+    return forwardToolCall({
+      arguments: args,
+      providerThreadId: attachment.providerThreadId ?? threadId,
+      scope: threadSession,
+      threadId,
+      toolName,
+    });
+  };
+}
+
+async function closeThreadSession(args: {
+  graceful?: boolean;
+  message: string;
+  threadId: string;
+}): Promise<void> {
+  const existingClose = closingSessions.get(args.threadId);
+  if (existingClose) {
+    return existingClose;
+  }
+
+  const attachment = threadAttachments.get(args.threadId);
+  if (!attachment) {
+    return;
+  }
+
+  attachment.closing = true;
+  const threadSession = attachment.residentSession;
+  if (threadSession) {
+    threadSession.closing = true;
+    resolvePendingSessionWork(threadSession, args.message);
+  }
+  const closePromise = Promise.resolve()
+    .then(async () => {
+      if (threadSession) {
+        await closeClaudeThreadSession(threadSession, args.graceful !== false);
+      }
+    })
+    .finally(() => {
+      if (threadAttachments.get(args.threadId) === attachment) {
+        threadAttachments.delete(args.threadId);
+      }
+      closingSessions.delete(args.threadId);
+    });
+  closingSessions.set(args.threadId, closePromise);
+  return closePromise;
+}
+
+async function closeThreadSessionsGracefully(message: string): Promise<void> {
+  await Promise.all(
+    Array.from(threadAttachments.keys()).map((threadId) =>
+      closeThreadSession({ graceful: true, message, threadId }),
+    ),
+  );
 }
 
 function permissionPathCovers(
   grantPath: string,
   requestedPath: string,
 ): boolean {
-  const normalizedGrantPath = normalizePermissionPath(grantPath);
-  const normalizedRequestedPath = normalizePermissionPath(requestedPath);
+  const normalizedGrantPath = resolvePath(grantPath);
+  const normalizedRequestedPath = resolvePath(requestedPath);
   if (normalizedGrantPath === normalizedRequestedPath) {
     return true;
   }
@@ -519,14 +578,8 @@ function shouldCacheClaudeSessionPermission(
   );
 }
 
-// stdout is the JSON-RPC channel; the runtime captures stderr into the
-// provider's diagnostics buffer.
 function logBridgeError(message: string): void {
   process.stderr.write(`claude-code bridge: ${message}\n`);
-}
-
-function ignoreInputConsumption(promise: Promise<void>): void {
-  void promise.catch(() => {});
 }
 
 function pushPromptInput(
@@ -545,28 +598,12 @@ function pushPromptInput(
   });
 }
 
-function queuePromptInputs(
-  threadSession: ThreadSession,
-  inputs: readonly string[],
-  permissionEscalation: PermissionEscalation | null,
-): boolean {
-  if (!threadSession.session.canPushInput()) {
-    return false;
-  }
-  for (const input of inputs) {
-    ignoreInputConsumption(
-      pushPromptInput(threadSession, input, permissionEscalation),
-    );
-  }
-  return true;
-}
-
 async function applyLiveSessionSettings(
   threadSession: ThreadSession,
   threadId: string,
   next: ClaudeLiveSessionSettings,
 ): Promise<void> {
-  const current = threadSession.liveSettings;
+  const current = threadSession.attachment.liveSettings;
   if (current.model !== next.model) {
     await threadSession.session.setModel(next.model);
     seedModelContextWindowHint(threadSession, threadId, next.model);
@@ -590,65 +627,126 @@ async function applyLiveSessionSettings(
     });
   }
 
-  threadSession.liveSettings = next;
+  threadSession.attachment.liveSettings = next;
 }
 
-// ---------------------------------------------------------------------------
-// Thread-event emission
-// ---------------------------------------------------------------------------
+const MODEL_LIST_MEMO_TTL_MS = 2 * 60_000;
+const listModelsMemoized = createClaudeCodeBridgeModelListMemo({
+  ttlMs: MODEL_LIST_MEMO_TTL_MS,
+});
 
-/**
- * Per-process entropy for turn/item id prefixes (#1224): combined with a
- * per-session serial below, ids never collide across process restarts or
- * session resumes.
- */
-const sessionIdEntropyPrefix = `bt${randomUUID().slice(0, 8)}-`;
-let translatorSessionSerial = 0;
-const CLAUDE_PROVIDER_ID = "claude-code";
-
-function createSessionTranslator(): ClaudeEventTranslator {
-  translatorSessionSerial += 1;
-  const idPrefix = `${sessionIdEntropyPrefix}${translatorSessionSerial}-`;
-  return createClaudeEventTranslator({
-    providerId: CLAUDE_PROVIDER_ID,
-    turnIdPrefix: idPrefix,
-    itemIdPrefix: idPrefix,
-    synthesizeItemStarted: true,
+function sendThreadDeltas(
+  threadId: string,
+  deltas: readonly ThreadDelta[],
+): void {
+  if (deltas.length === 0) {
+    return;
+  }
+  send({
+    jsonrpc: "2.0",
+    method: THREAD_DELTA_NOTIFICATION_METHOD,
+    params: { threadId, deltas: [...deltas] },
   });
 }
 
-function sendThreadEvents(
-  threadId: string,
-  events: readonly ThreadEvent[],
-): void {
-  for (const event of events) {
-    send({
-      jsonrpc: "2.0",
-      method: BRIDGE_NOTIFICATION_METHODS.threadEvent,
-      params: { threadId, event },
-    });
-  }
+function sendSessionReset(threadId: string): void {
+  sendThreadDeltas(threadId, [
+    { kind: "session.reset" },
+    {
+      kind: "contextWindow",
+      used: null,
+      estimated: true,
+      attach: "currentOrLast",
+    },
+  ]);
 }
 
-/**
- * The one session-scoped emitter: it runs the Claude-flavored notification
- * through the session translator and emits the finished `ThreadEvent`s as
- * `thread/event` notifications. The `sdk/message` envelope never reaches the
- * wire — it is only the translator's input vocabulary.
- */
 function emitForSession(
   threadSession: ThreadSession,
   threadId: string,
   method: string,
   params: Record<string, unknown>,
 ): void {
-  sendThreadEvents(
-    threadId,
-    threadSession.translator.translateClaudeEvent(
-      { jsonrpc: "2.0", method, params },
-      { threadId },
-    ),
+  const deltas = threadSession.translator.translate(
+    { jsonrpc: "2.0", method, params },
+    { threadId },
   );
+  sendThreadDeltas(threadId, deltas);
+  for (const delta of deltas) {
+    if (delta.kind === "provider.error" && delta.willRetry !== true) {
+      const category = delta.errorInfo?.category;
+      const kind =
+        category === "unauthorized"
+          ? "authRequired"
+          : category === "rate-limit"
+            ? "rateLimited"
+            : null;
+      if (kind !== null) {
+        emitTerminalAccountErrorHint(
+          threadSession,
+          threadId,
+          kind,
+          delta.detail ?? delta.message,
+        );
+      }
+    }
+    if (delta.kind === "turn.boundary" || delta.kind === "session.reset") {
+      threadSession.recoveryHintRaisedThisTurn = null;
+    }
+  }
+}
+
+function emitTerminalAccountErrorHint(
+  threadSession: ThreadSession,
+  threadId: string,
+  kind: "authRequired" | "rateLimited",
+  message: string,
+): void {
+  if (threadSession.recoveryHintRaisedThisTurn === kind) {
+    return;
+  }
+  threadSession.recoveryHintRaisedThisTurn = kind;
+  send({
+    jsonrpc: "2.0",
+    method: BRIDGE_NOTIFICATION_METHODS.providerRecovery,
+    params: {
+      threadId,
+      kind,
+      message,
+      retryable: false,
+    },
+  });
+}
+
+function getAssistantMessageErrorText(message: SDKMessage): string {
+  if (message.type === "assistant") {
+    const text = message.message.content
+      .flatMap((block) => (block.type === "text" ? [block.text] : []))
+      .join("\n")
+      .trim();
+    if (text.length > 0) {
+      return text;
+    }
+    return `Claude reported ${message.error ?? "an account error"}`;
+  }
+  return "Claude reported an account error";
+}
+
+function getAssistantMessageRecoveryKind(
+  message: SDKMessage,
+): "authRequired" | "rateLimited" | null {
+  if (message.type !== "assistant") {
+    return null;
+  }
+  switch (message.error) {
+    case "authentication_failed":
+    case "oauth_org_not_allowed":
+      return "authRequired";
+    case "rate_limit":
+      return "rateLimited";
+    default:
+      return null;
+  }
 }
 
 function emitSessionError(
@@ -656,12 +754,7 @@ function emitSessionError(
   threadId: string,
   message: string,
 ): void {
-  // Settle any open translator turn first: every accepted turn reaches
-  // exactly one terminal state, and settlement events precede the error
-  // signal. Without an open turn the error stays a runtime notification —
-  // translating it would fabricate a failed turn bb never accepted.
-  const state = threadSession.translator.resolveState({ threadId });
-  if (state.currentTurnId !== undefined) {
+  if (threadSession.translator.hasOpenTurn(threadId)) {
     emitForSession(threadSession, threadId, "error", { threadId, message });
   }
   send({
@@ -669,48 +762,23 @@ function emitSessionError(
     method: BRIDGE_NOTIFICATION_METHODS.error,
     params: {
       threadId,
-      providerThreadId: threadSession.providerThreadId ?? threadId,
+      providerThreadId: threadSession.attachment.providerThreadId ?? threadId,
       message,
     },
   });
 }
 
-/**
- * Settle a session's in-flight work and announce the rebuild. Mandatory
- * whenever the bridge tears down and rebuilds a live provider session
- * (execution options it cannot apply in place, resume fallback): settlement
- * events precede the `session/replaced` notification, which is never silent
- * (#1268).
- */
 function emitSessionReplacement(args: {
-  contextLost: boolean;
   providerThreadId: string | null;
   reason: string;
+  showRuntimeNote?: boolean;
   threadId: string;
   threadSession: ThreadSession;
 }): void {
-  const translator = args.threadSession.translator;
-  const state = translator.resolveState({ threadId: args.threadId });
-  const settlement: ThreadEvent[] = [];
-  if (state.currentTurnId !== undefined) {
-    settlement.push({
-      type: "turn/completed",
-      threadId: UNSTAMPED_THREAD_ID,
-      providerThreadId: "",
-      scope: turnScope(state.currentTurnId),
-      status: "interrupted",
-    });
-    translator.turnState.finishTurn({ state, threadId: args.threadId });
-  }
-  // Replacing the CLI session kills its background tasks with it.
-  settlement.push(
-    ...buildInterruptedClaudeTaskEvents({
-      tasks: state.tasksById,
-      threadId: UNSTAMPED_THREAD_ID,
-    }),
+  sendThreadDeltas(
+    args.threadId,
+    args.threadSession.translator.buildSessionSettlementDeltas(args.threadId),
   );
-  state.opaqueTaskIds.clear();
-  sendThreadEvents(args.threadId, settlement);
   send({
     jsonrpc: "2.0",
     method: BRIDGE_NOTIFICATION_METHODS.sessionReplaced,
@@ -718,41 +786,22 @@ function emitSessionReplacement(args: {
       threadId: args.threadId,
       providerThreadId: args.providerThreadId,
       reason: args.reason,
-      contextLost: args.contextLost,
+      contextLost: false,
+      showRuntimeNote: args.showRuntimeNote ?? false,
     },
   });
 }
 
-/**
- * Correlate canonical turn input with its bb turn (turn/input/accepted): a
- * still-open translator turn gets the event immediately; otherwise it is
- * queued so the translator's onTurnStart drains it into the opening turn.
- */
 function emitCanonicalTurnInputAccepted(
   threadSession: ThreadSession,
   acceptance: CanonicalTurnAcceptance,
   threadId: string,
 ): void {
-  if (threadSession.translator === null) {
-    return;
-  }
-  const state = threadSession.translator.resolveState({ threadId });
-  if (state.currentTurnId !== undefined) {
-    sendThreadEvents(
-      threadId,
-      buildAcceptedUserMessageEvent({
-        clientRequestId: acceptance.clientRequestId,
-        providerThreadId: acceptance.providerThreadId,
-        threadId,
-        turnId: state.currentTurnId,
-      }),
-    );
-    return;
-  }
-  queueAcceptedUserMessage({
-    clientRequestId: acceptance.clientRequestId,
-    state,
-  });
+  threadSession.contextUsageCollector.invalidate();
+  sendThreadDeltas(
+    threadId,
+    threadSession.translator.acceptInput(threadId, acceptance.clientRequestId),
+  );
 }
 
 function sendThreadIdentity(threadId: string, providerThreadId: string): void {
@@ -762,8 +811,6 @@ function sendThreadIdentity(threadId: string, providerThreadId: string): void {
     params: {
       threadId,
       providerThreadId,
-      // Refines the handshake's sessionRestore per session: Claude sessions
-      // persist (persistSession) and reopen via SDK resume.
       sessionRestorable: true,
     },
   });
@@ -778,12 +825,12 @@ function toSessionConstructionConfig(
   params: SessionConstructionParams,
 ): SessionConstructionConfig {
   return {
-    claudeCodeMockCliTraffic: params.claudeCodeMockCliTraffic,
     config: params.config,
     dynamicTools: params.dynamicTools,
     sessionOptions: {
       additionalWorkspaceWriteRoots: params.additionalWorkspaceWriteRoots,
       baseInstructions: params.baseInstructions,
+      chromeEnabled: params.chromeEnabled,
       cwd: params.cwd,
       disallowedTools: params.disallowedTools,
       instructionMode: params.instructionMode,
@@ -824,86 +871,107 @@ function withTurnLiveSessionSettings(
   };
 }
 
-function withTrackedPermissionEscalation(
-  params: SessionConstructionParams,
-  threadIdRef: ThreadIdRef,
-): BuildSessionOptionsArgs {
-  return {
-    ...toSessionConstructionConfig(params).sessionOptions,
-    ...toInitialLiveSessionSettings(params),
-    getPermissionEscalation: (context) => {
-      const threadSession = sessions.get(threadIdRef.current);
-      return threadSession
-        ? resolvePermissionEscalationForWork(threadSession, context)
-        : null;
-    },
-  };
-}
-
-/**
- * Seed the translator's context-window fallback from the selected model.
- *
- * Claude reports `modelUsage.contextWindow` on some results and omits it on
- * others; when it is missing the translator falls back to the capacity implied
- * by the model id (notably the 1M `[1m]` aliases). The bridge seeds the hint
- * here, on every session construction and every turn that carries a model —
- * without it, capacity reads as unknown whenever Claude omits the field.
- */
 function seedModelContextWindowHint(
   threadSession: ThreadSession,
   threadId: string,
   model: string | undefined,
 ): void {
-  if (threadSession.translator === null || model === undefined) {
+  if (model === undefined) {
     return;
   }
   threadSession.translator.setClaudeModelContextWindowHint(threadId, model);
 }
 
-function createThreadSession(args: CreateThreadSessionArgs): ThreadSession {
-  const sessionSerial = nextSessionSerial();
-  const session = new SdkSession(
-    args.sessionOptions,
-    createOnSdkMessage({
-      sessionSerial,
-      threadIdRef: args.threadIdRef,
-    }),
-    createOnSdkDone({
-      sessionSerial,
-      threadIdRef: args.threadIdRef,
-    }),
-  );
-
-  const threadSession: ThreadSession = {
-    session,
+function createThreadAttachment(
+  args: CreateThreadAttachmentArgs,
+): ThreadAttachment {
+  const attachment: ThreadAttachment = {
+    envSignature: environmentSignature(
+      readConfigEnvOverrides(args.sessionConstructionConfig.config),
+    ),
     sessionConstructionConfig: args.sessionConstructionConfig,
     sessionOptions: args.sessionOptions,
-    sessionSerial,
     closing: false,
-    streamEnded: false,
-    translator: createSessionTranslator(),
-    mockCliTrafficProxy: args.mockCliTrafficProxy,
-    pendingToolCalls: new Map(),
-    pendingInteractiveRequests: new Map(),
+    residentSession: null,
     permissionEscalation: args.permissionEscalation,
-    permissionEscalationByAgentId: new Map(),
-    permissionEscalationByPromptId: new Map(),
-    permissionEscalationBySubagentParentToolUseId: new Map(),
-    permissionEscalationByToolUseId: new Map(),
     permissionMode: args.permissionMode,
     liveSettings: args.liveSettings,
     approvedPlanPermissionMode: args.approvedPlanPermissionMode,
     ...(args.providerThreadId
       ? { providerThreadId: args.providerThreadId }
       : {}),
-    sessionPermissionGrants: [...(args.sessionPermissionGrants ?? [])],
+    sessionPermissionGrants: [],
     threadIdRef: args.threadIdRef,
+  };
+  attachment.residentSession = createThreadSession(attachment);
+  return attachment;
+}
+
+function createThreadSession(attachment: ThreadAttachment): ThreadSession {
+  const sessionSerial = nextSessionSerial();
+  const session = new SdkSession(
+    attachment.sessionOptions,
+    createOnSdkMessage({
+      sessionSerial,
+      threadIdRef: attachment.threadIdRef,
+    }),
+    createOnSdkDone({
+      sessionSerial,
+      threadIdRef: attachment.threadIdRef,
+    }),
+  );
+
+  const translator = createClaudeDeltaTranslator({
+    cwd: attachment.sessionConstructionConfig.sessionOptions.cwd,
+    sandboxEnabled: attachment.sessionOptions.sandbox?.enabled === true,
+  });
+  translator.configureInjectedTools(
+    (attachment.sessionConstructionConfig.dynamicTools ?? []).map((tool) => ({
+      name: tool.name,
+      ...(tool.presentation === undefined
+        ? {}
+        : { presentation: tool.presentation }),
+    })),
+  );
+  const threadSession: ThreadSession = {
+    contextUsageCollector: new ClaudeContextUsageCollector(),
+    session,
+    attachment,
+    sessionSerial,
+    closing: false,
+    restartBeforeNextTurn: null,
+    recoveryHintRaisedThisTurn: null,
+    streamEnded: false,
+    translator,
+    pendingInteractiveRequests: new Map(),
+    permissionEscalationByAgentId: new Map(),
+    permissionEscalationByPromptId: new Map(),
+    permissionEscalationBySubagentParentToolUseId: new Map(),
+    permissionEscalationByToolUseId: new Map(),
   };
   seedModelContextWindowHint(
     threadSession,
-    args.threadIdRef.current,
-    args.liveSettings.model,
+    attachment.threadIdRef.current,
+    attachment.liveSettings.model,
   );
+  return threadSession;
+}
+
+function startResidentThreadSession(
+  attachment: ThreadAttachment,
+  resumeProviderThreadId?: string,
+): ThreadSession {
+  const threadSession = attachment.residentSession;
+  if (!threadSession) {
+    throw new Error("Claude thread attachment has no resident session");
+  }
+  try {
+    threadSession.session.start(resumeProviderThreadId);
+  } catch (error) {
+    threadSession.closing = true;
+    attachment.residentSession = null;
+    throw error;
+  }
   return threadSession;
 }
 
@@ -942,7 +1010,7 @@ function resolvePermissionEscalationForWork(
     context.promptId,
   );
   return promptPermissionEscalation === undefined
-    ? threadSession.permissionEscalation
+    ? threadSession.attachment.permissionEscalation
     : promptPermissionEscalation;
 }
 
@@ -961,7 +1029,7 @@ function trackSdkAssistantPermissionEscalation(
   );
   const permissionEscalation =
     parentPermissionEscalation === undefined
-      ? threadSession.permissionEscalation
+      ? threadSession.attachment.permissionEscalation
       : parentPermissionEscalation;
 
   for (const content of message.message.content) {
@@ -981,7 +1049,7 @@ function trackSdkAssistantPermissionEscalation(
   }
 }
 
-function buildPermissionEscalationTrackingHooks(
+function buildSessionTrackingHooks(
   threadIdRef: ThreadIdRef,
 ): NonNullable<SdkSessionOptions["hooks"]> {
   const trackPermissionRequest: HookCallback = async (input, toolUseId) => {
@@ -991,11 +1059,10 @@ function buildPermissionEscalationTrackingHooks(
     ) {
       return { continue: true };
     }
-    const threadSession = sessions.get(threadIdRef.current);
+    const threadSession = threadAttachments.get(
+      threadIdRef.current,
+    )?.residentSession;
     if (threadSession) {
-      // Claude can omit agentID from the later canUseTool callback. Preserve
-      // the work's provenance at the permission boundary, where the hook
-      // still carries its agent/prompt metadata.
       threadSession.permissionEscalationByToolUseId.set(
         toolUseId,
         resolvePermissionEscalationForWork(threadSession, {
@@ -1013,7 +1080,9 @@ function buildPermissionEscalationTrackingHooks(
     if (input.hook_event_name !== "PreToolUse") {
       return { continue: true };
     }
-    const threadSession = sessions.get(threadIdRef.current);
+    const threadSession = threadAttachments.get(
+      threadIdRef.current,
+    )?.residentSession;
     if (threadSession) {
       const permissionEscalation = resolvePermissionEscalationForWork(
         threadSession,
@@ -1035,7 +1104,7 @@ function buildPermissionEscalationTrackingHooks(
         );
       }
       if (
-        !threadSession.liveSettings.providerSubagentsEnabled &&
+        !threadSession.attachment.liveSettings.providerSubagentsEnabled &&
         CLAUDE_PROVIDER_SUBAGENT_TOOL_NAMES.has(input.tool_name)
       ) {
         return {
@@ -1049,7 +1118,7 @@ function buildPermissionEscalationTrackingHooks(
         };
       }
       if (
-        !threadSession.liveSettings.workflowsEnabled &&
+        !threadSession.attachment.liveSettings.workflowsEnabled &&
         input.tool_name === CLAUDE_WORKFLOW_TOOL_NAME
       ) {
         return {
@@ -1070,7 +1139,9 @@ function buildPermissionEscalationTrackingHooks(
     if (input.hook_event_name !== "SubagentStart") {
       return { continue: true };
     }
-    const threadSession = sessions.get(threadIdRef.current);
+    const threadSession = threadAttachments.get(
+      threadIdRef.current,
+    )?.residentSession;
     if (threadSession) {
       threadSession.permissionEscalationByAgentId.set(
         input.agent_id,
@@ -1086,9 +1157,9 @@ function buildPermissionEscalationTrackingHooks(
 
   const clearSubagent: HookCallback = async (input) => {
     if (input.hook_event_name === "SubagentStop") {
-      sessions
+      threadAttachments
         .get(threadIdRef.current)
-        ?.permissionEscalationByAgentId.delete(input.agent_id);
+        ?.residentSession?.permissionEscalationByAgentId.delete(input.agent_id);
     }
     return { continue: true };
   };
@@ -1099,9 +1170,11 @@ function buildPermissionEscalationTrackingHooks(
       input.hook_event_name === "PostToolUseFailure" ||
       input.hook_event_name === "PermissionDenied"
     ) {
-      sessions
+      threadAttachments
         .get(threadIdRef.current)
-        ?.permissionEscalationByToolUseId.delete(input.tool_use_id);
+        ?.residentSession?.permissionEscalationByToolUseId.delete(
+          input.tool_use_id,
+        );
     }
     return { continue: true };
   };
@@ -1117,135 +1190,114 @@ function buildPermissionEscalationTrackingHooks(
   };
 }
 
-function addPermissionEscalationTrackingHooks(
-  sessionOptions: SdkSessionOptions,
-  threadIdRef: ThreadIdRef,
-): void {
-  const existingHooks = sessionOptions.hooks;
-  const trackingHooks = buildPermissionEscalationTrackingHooks(threadIdRef);
-  // PreToolUse tracking must run before enforcement hooks so those hooks can
-  // resolve the tool ID back to the prompt or subagent that originated it.
-  sessionOptions.hooks = {
-    ...existingHooks,
-    PermissionDenied: [
-      ...(trackingHooks.PermissionDenied ?? []),
-      ...(existingHooks?.PermissionDenied ?? []),
-    ],
-    PermissionRequest: [
-      ...(trackingHooks.PermissionRequest ?? []),
-      ...(existingHooks?.PermissionRequest ?? []),
-    ],
-    PostToolUse: [
-      ...(trackingHooks.PostToolUse ?? []),
-      ...(existingHooks?.PostToolUse ?? []),
-    ],
-    PostToolUseFailure: [
-      ...(trackingHooks.PostToolUseFailure ?? []),
-      ...(existingHooks?.PostToolUseFailure ?? []),
-    ],
-    PreToolUse: [
-      ...(trackingHooks.PreToolUse ?? []),
-      ...(existingHooks?.PreToolUse ?? []),
-    ],
-    SubagentStart: [
-      ...(trackingHooks.SubagentStart ?? []),
-      ...(existingHooks?.SubagentStart ?? []),
-    ],
-    SubagentStop: [
-      ...(trackingHooks.SubagentStop ?? []),
-      ...(existingHooks?.SubagentStop ?? []),
-    ],
-  };
-}
-
 function buildTrackedSessionOptions(
   params: SessionConstructionParams,
   env: NodeJS.ProcessEnv,
   threadIdRef: ThreadIdRef,
 ): SdkSessionOptions {
   const sessionOptions = buildSessionOptions(
-    withTrackedPermissionEscalation(params, threadIdRef),
+    {
+      ...toSessionConstructionConfig(params).sessionOptions,
+      ...toInitialLiveSessionSettings(params),
+    },
     env,
   );
-  addPermissionEscalationTrackingHooks(sessionOptions, threadIdRef);
+  sessionOptions.hooks = buildSessionTrackingHooks(threadIdRef);
+  sessionOptions.recordThreadId = () => threadIdRef.current;
   return sessionOptions;
 }
 
-function replaceThreadSession(args: ReplaceThreadSessionArgs): void {
+function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
   args.threadSession.closing = true;
-  args.threadSession.mockCliTrafficProxy = null;
-  resolvePendingSessionWork(args.threadSession, args.reason);
-  // Canonical sessions settle in-flight work and announce the rebuild before
-  // any replacement-session traffic; the replacement resumes the same
-  // provider session id, so provider-side context survives.
+  resolvePendingSessionWork(args.threadSession, args.restart.reason);
   emitSessionReplacement({
-    contextLost: false,
     providerThreadId: args.providerThreadId,
-    reason: args.reason,
+    reason: args.restart.reason,
+    showRuntimeNote: args.restart.showRuntimeNote,
     threadId: args.threadId,
     threadSession: args.threadSession,
   });
   args.threadSession.session.stop();
 
-  // This is not a user-requested thread close: the thread remains active and
-  // immediately owns the replacement session. `closingSessions` only gates
-  // external stop/replace requests, so a stop after this point should target
-  // the replacement, not wait on the poisoned resume session.
-  sessions.set(args.threadId, args.replacementSession);
-  args.replacementSession.session.start(args.providerThreadId);
+  const replacementSession = createThreadSession(args.attachment);
+  args.attachment.residentSession = replacementSession;
+  startResidentThreadSession(args.attachment, args.providerThreadId);
   sendThreadIdentity(args.threadId, args.providerThreadId);
+  sendSessionReset(args.threadId);
+  return replacementSession;
 }
 
-function replaceEndedThreadSession(
-  args: ReplaceEndedThreadSessionArgs,
+function replaceThreadSessionBeforeNextTurn(
+  args: ReplaceThreadSessionBeforeNextTurnArgs,
 ): ThreadSession | undefined {
   const providerThreadId =
-    args.threadSession.providerThreadId ??
+    args.attachment.providerThreadId ??
     args.threadSession.session.getSessionId();
   if (!providerThreadId) {
     return undefined;
   }
 
-  const replacementSession = createThreadSession({
-    mockCliTrafficProxy: args.threadSession.mockCliTrafficProxy,
-    liveSettings: args.threadSession.liveSettings,
-    permissionEscalation: args.threadSession.permissionEscalation,
-    // Carries the live mode, so a session replaced after an approved plan
-    // keeps the restored preset instead of dropping back into Plan mode.
-    permissionMode: args.threadSession.permissionMode,
-    approvedPlanPermissionMode: args.threadSession.approvedPlanPermissionMode,
+  args.attachment.providerThreadId = providerThreadId;
+  return replaceThreadSession({
+    attachment: args.attachment,
     providerThreadId,
-    sessionConstructionConfig: args.threadSession.sessionConstructionConfig,
-    sessionOptions: args.threadSession.sessionOptions,
-    sessionPermissionGrants: args.threadSession.sessionPermissionGrants,
-    threadIdRef: args.threadSession.threadIdRef,
-  });
-
-  replaceThreadSession({
-    providerThreadId,
-    replacementSession,
-    reason: "Thread session replaced after Claude SDK stream ended",
+    restart: args.restart,
     threadId: args.threadId,
     threadSession: args.threadSession,
   });
-  return replacementSession;
 }
 
-function getWritableThreadSession(threadId: string): ThreadSession | undefined {
-  const threadSession = sessions.get(threadId);
-  if (!threadSession || threadSession.closing) {
+async function getWritableThreadSession(
+  threadId: string,
+  intent: "new-turn" | "steer",
+): Promise<ThreadSession | undefined> {
+  const attachment = threadAttachments.get(threadId);
+  if (!attachment || attachment.closing) {
     return undefined;
   }
-  if (!threadSession.streamEnded) {
+  const threadSession = attachment.residentSession;
+  if (!threadSession) {
+    return undefined;
+  }
+  const replacement: ClaudeSessionRestart | null = threadSession.streamEnded
+      ? {
+          reason: "Thread session replaced after Claude SDK stream ended",
+          showRuntimeNote: false,
+        }
+      : intent === "new-turn"
+        ? threadSession.restartBeforeNextTurn
+        : null;
+  if (replacement === null) {
     return threadSession;
   }
-  return replaceEndedThreadSession({ threadId, threadSession });
+  return replaceThreadSessionBeforeNextTurn({
+    attachment,
+    restart: replacement,
+    threadId,
+    threadSession,
+  });
+}
+
+function getAuthenticationFailureRestartReason(
+  message: SDKMessage,
+): string | null {
+  if (message.type !== "assistant") {
+    return null;
+  }
+  switch (message.error) {
+    case "authentication_failed":
+      return "Claude session restarted after authentication failed";
+    case "oauth_org_not_allowed":
+      return "Claude session restarted after OAuth organization authorization failed";
+    default:
+      return null;
+  }
 }
 
 function getCurrentThreadSession(
   args: CurrentThreadSessionArgs,
 ): ThreadSession | undefined {
-  const threadSession = sessions.get(args.threadId);
+  const threadSession = threadAttachments.get(args.threadId)?.residentSession;
   if (
     !threadSession ||
     threadSession.closing ||
@@ -1265,19 +1317,80 @@ function createOnSdkMessage(
       threadId: args.threadIdRef.current,
     });
     if (!threadSession) return;
+    if (
+      message.type === "assistant" ||
+      message.type === "user" ||
+      message.type === "stream_event"
+    ) {
+      threadSession.contextUsageCollector.invalidate();
+    }
     const providerThreadId = message.session_id?.trim() ?? "";
     if (
       providerThreadId.length > 0 &&
-      threadSession.providerThreadId !== providerThreadId
+      threadSession.attachment.providerThreadId !== providerThreadId
     ) {
-      threadSession.providerThreadId = providerThreadId;
+      threadSession.attachment.providerThreadId = providerThreadId;
       sendThreadIdentity(args.threadIdRef.current, providerThreadId);
+    }
+    const authenticationFailureRestartReason =
+      getAuthenticationFailureRestartReason(message);
+    if (authenticationFailureRestartReason !== null) {
+      threadSession.restartBeforeNextTurn = {
+        reason: authenticationFailureRestartReason,
+        showRuntimeNote: false,
+      };
     }
     trackSdkAssistantPermissionEscalation(threadSession, message);
     emitForSession(threadSession, args.threadIdRef.current, "sdk/message", {
       threadId: args.threadIdRef.current,
       message,
     });
+    if (
+      message.type === "result" ||
+      (message.type === "system" && message.subtype === "compact_boundary")
+    ) {
+      if (message.type === "system") {
+        sendThreadDeltas(args.threadIdRef.current, [
+          {
+            kind: "contextWindow",
+            used: null,
+            estimated: true,
+            attach: "currentOrLast",
+          },
+        ]);
+      }
+      if (providerThreadId) {
+        void threadSession.contextUsageCollector.capture({
+          read: () => threadSession.session.getContextUsage(),
+          providerSessionId: providerThreadId,
+          isCurrent: () =>
+            getCurrentThreadSession({
+              sessionSerial: args.sessionSerial,
+              threadId: args.threadIdRef.current,
+            }) === threadSession && !threadSession.streamEnded,
+          publish: (snapshot) =>
+            sendThreadDeltas(args.threadIdRef.current, [
+              {
+                kind: "contextWindow",
+                used: snapshot.usedTokens,
+                size: snapshot.contextWindowTokens,
+                estimated: snapshot.estimated,
+                snapshot,
+                attach: "currentOrLast",
+              },
+            ]),
+        });
+      }
+    }
+    const recoveryKind = getAssistantMessageRecoveryKind(message);
+    if (recoveryKind !== null) {
+      emitTerminalAccountErrorHint(
+        threadSession,
+        args.threadIdRef.current,
+        recoveryKind,
+        getAssistantMessageErrorText(message),
+      );
+    }
   };
 }
 
@@ -1308,9 +1421,10 @@ function createOnSdkDone(
 function findSessionByPendingInteractiveRequest(
   id: string | number,
 ): ThreadSession | undefined {
-  for (const session of sessions.values()) {
-    if (session.pendingInteractiveRequests.has(id)) {
-      return session;
+  for (const attachment of threadAttachments.values()) {
+    const threadSession = attachment.residentSession;
+    if (threadSession?.pendingInteractiveRequests.has(id)) {
+      return threadSession;
     }
   }
 
@@ -1336,33 +1450,13 @@ async function closeClaudeThreadSession(
   threadSession: ThreadSession,
   graceful: boolean,
 ): Promise<void> {
-  try {
-    if (graceful) {
-      await threadSession.session.closeGracefully(THREAD_STOP_CLOSE_TIMEOUT_MS);
-    } else {
-      threadSession.session.stop();
-    }
-  } finally {
-    await threadSession.mockCliTrafficProxy?.close();
-    threadSession.mockCliTrafficProxy = null;
+  if (graceful) {
+    await threadSession.session.closeGracefully(THREAD_STOP_CLOSE_TIMEOUT_MS);
+  } else {
+    threadSession.session.stop();
   }
 }
 
-/**
- * Builds the environment for an SDK-spawned Claude session so its API traffic
- * presents like the headless Claude CLI (`claude -p`) instead of a third-party
- * SDK app.
- *
- * - `CLAUDE_CODE_ENTRYPOINT=cli` makes the session report `cc_entrypoint=sdk-cli`
- *   and a `(external, sdk-cli, ...)` user-agent. The Agent SDK only defaults
- *   this to `sdk-ts` when it is unset, so we set it explicitly. The spawned
- *   binary always adds the `sdk-` prefix (and an `agent-sdk/<version>`
- *   user-agent segment) because it runs in stream-json mode, so the interactive
- *   `cli` entrypoint is not reachable from the SDK.
- * - Omitting `CLAUDE_AGENT_SDK_CLIENT_APP` drops the `client-app/...` user-agent
- *   segment, matching the CLI. The delete also clears any value inherited from a
- *   parent SDK process.
- */
 function buildSessionEnv(
   envOverrides: Record<string, string>,
 ): NodeJS.ProcessEnv {
@@ -1375,46 +1469,46 @@ function buildSessionEnv(
   return sessionEnv;
 }
 
-function appendNoProxyLoopback(value: string | undefined): string {
-  const entries = new Set(
-    (value ?? "")
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0),
-  );
-  entries.add("127.0.0.1");
-  entries.add("localhost");
-  return [...entries].join(",");
+const sessionConfigEnvVarsSchema = z.record(z.string(), z.string());
+
+function readConfigEnvOverrides(
+  config: Record<string, unknown> | undefined,
+): Record<string, string> {
+  const parsed = sessionConfigEnvVarsSchema.safeParse(config?.["envVars"]);
+  return parsed.success ? parsed.data : {};
 }
 
-async function prepareSessionEnv(
-  params: PrepareSessionEnvParams,
-): Promise<PreparedSessionEnv> {
-  const envOverrides = extractEnvOverrides(params.config);
-  if (!params.claudeCodeMockCliTraffic.enabled) {
-    return {
-      env: buildSessionEnv(envOverrides),
-      mockCliTrafficProxy: null,
+function environmentSignature(env: Readonly<Record<string, string>>): string {
+  return JSON.stringify(
+    Object.entries(env).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function applyTurnEnvironment(
+  attachment: ThreadAttachment,
+  config: TurnStartParams["config"],
+): void {
+  if (config === undefined) {
+    return;
+  }
+  const envOverrides = readConfigEnvOverrides(config);
+  const signature = environmentSignature(envOverrides);
+  if (attachment.envSignature === signature) {
+    return;
+  }
+  attachment.envSignature = signature;
+  attachment.sessionConstructionConfig = {
+    ...attachment.sessionConstructionConfig,
+    config,
+  };
+  attachment.sessionOptions.env = buildSessionEnv(envOverrides);
+  if (attachment.residentSession) {
+    attachment.residentSession.restartBeforeNextTurn = {
+      reason:
+        "Execution settings changed; the Claude session was rebuilt to apply them.",
+      showRuntimeNote: true,
     };
   }
-
-  const mockCliTrafficProxy = await startClaudeCodeMockCliTrafficProxy({
-    endpoint: DEFAULT_CLAUDE_CODE_MOCK_CLI_TRAFFIC_ENDPOINT,
-    threadId: params.threadId,
-  });
-  return {
-    env: buildSessionEnv({
-      ...envOverrides,
-      ANTHROPIC_BASE_URL: mockCliTrafficProxy.baseUrl,
-      NO_PROXY: appendNoProxyLoopback(
-        envOverrides.NO_PROXY ?? process.env.NO_PROXY,
-      ),
-      no_proxy: appendNoProxyLoopback(
-        envOverrides.no_proxy ?? process.env.no_proxy,
-      ),
-    }),
-    mockCliTrafficProxy,
-  };
 }
 
 function parseClaudeSuggestedPermissionUpdates(
@@ -1442,10 +1536,6 @@ function buildInteractiveRequestParams(
     itemId: args.toolUseId,
     toolName: args.toolName,
     input: args.input,
-    // Claude explains some prompts through decisionReason and others only
-    // through the prompt sentence it would have rendered itself. The sandbox
-    // network prompt uses the second: without it the banner names the tool but
-    // never the host, and the user cannot judge what they are granting.
     reason: args.decisionReason ?? args.promptText ?? null,
     permissions: toPendingInteractionPermissionProfile({
       toolName: args.toolName,
@@ -1467,25 +1557,19 @@ function buildUserQuestionRequestParams(
   };
 }
 
-/**
- * Decode an interactive-request response: it carries the canonical
- * `PendingInteractionResolution`, which maps back through the interactions
- * module. Null means undecodable (or a resolution kind that does not match
- * the payload) and settles as a deny.
- */
 function decodePendingInteractiveResponse(
   pending: PendingInteractiveRequest,
   result: unknown,
 ): ClaudeInteractiveResponse | null {
-  const resolution = pendingInteractionResolutionSchema.safeParse(result);
-  if (!resolution.success) {
+  const outcome = claudeInteractionOutcomeSchema.safeParse({
+    payload: pending.payload,
+    resolution: result,
+  });
+  if (!outcome.success) {
     return null;
   }
   try {
-    return buildClaudeInteractiveResponse({
-      payload: pending.payload,
-      resolution: resolution.data,
-    });
+    return buildClaudeInteractiveResponse(outcome.data);
   } catch {
     return null;
   }
@@ -1544,29 +1628,14 @@ function buildInteractivePermissionResult(
   }
 }
 
-/**
- * The bb turn id a canonical interaction correlates with: the translator's
- * open turn when one exists, else null so the runtime resolves it from the
- * active turn.
- */
-function resolveCanonicalInteractionTurnId(
-  threadSession: ThreadSession,
-  threadId: string,
-): string | null {
-  if (threadSession.translator === null) {
-    return null;
-  }
-  return (
-    threadSession.translator.resolveState({ threadId }).currentTurnId ?? null
-  );
-}
-
 function createForwardInteractiveRequest(
   threadIdRef: ThreadIdRef,
 ): (args: ForwardInteractiveRequestArgs) => Promise<PermissionResult> {
   return (args) =>
     new Promise<PermissionResult>((resolve) => {
-      const threadSession = sessions.get(threadIdRef.current);
+      const threadSession = threadAttachments.get(
+        threadIdRef.current,
+      )?.residentSession;
       if (!threadSession) {
         resolve({
           behavior: "deny",
@@ -1588,8 +1657,7 @@ function createForwardInteractiveRequest(
         return;
       }
 
-      toolCallRequestIdCounter += 1;
-      const requestId = toolCallRequestIdCounter;
+      const requestId = nextInteractiveRequestId();
 
       const finish = (result: PermissionResult): void => {
         args.signal.removeEventListener("abort", onAbort);
@@ -1607,8 +1675,6 @@ function createForwardInteractiveRequest(
         });
       };
 
-      // The session carries the PendingInteractionPayload out as
-      // interaction/request and maps the resolution back through it.
       const payload = buildClaudeApprovalInteractionPayload(params);
 
       args.signal.addEventListener("abort", onAbort, { once: true });
@@ -1629,10 +1695,8 @@ function createForwardInteractiveRequest(
         params: {
           threadId: args.threadId,
           providerThreadId: args.providerThreadId,
-          turnId: resolveCanonicalInteractionTurnId(
-            threadSession,
-            args.threadId,
-          ),
+          turnId: null,
+          providerNativeIds: true,
           payload,
         },
       });
@@ -1644,7 +1708,9 @@ function createForwardUserQuestionRequest(
 ): (args: ForwardUserQuestionRequestArgs) => Promise<PermissionResult> {
   return (args) =>
     new Promise<PermissionResult>((resolve) => {
-      const threadSession = sessions.get(threadIdRef.current);
+      const threadSession = threadAttachments.get(
+        threadIdRef.current,
+      )?.residentSession;
       if (!threadSession) {
         resolve({
           behavior: "deny",
@@ -1655,8 +1721,7 @@ function createForwardUserQuestionRequest(
       }
 
       const params = buildUserQuestionRequestParams(args);
-      toolCallRequestIdCounter += 1;
-      const requestId = toolCallRequestIdCounter;
+      const requestId = nextInteractiveRequestId();
 
       const finish = (result: PermissionResult): void => {
         args.signal.removeEventListener("abort", onAbort);
@@ -1691,38 +1756,40 @@ function createForwardUserQuestionRequest(
         params: {
           threadId: args.threadId,
           providerThreadId: args.providerThreadId,
-          turnId: resolveCanonicalInteractionTurnId(
-            threadSession,
-            args.threadId,
-          ),
+          turnId: null,
+          providerNativeIds: true,
           payload,
         },
       });
     });
 }
 
-/**
- * Leave Plan mode once the user approves a plan.
- *
- * `/plan` overrides the session permission mode for the life of the session:
- * `turn/start` carries no mode, so nothing restores the user's preset on a
- * later turn. Without this the agent keeps Plan mode's gating after the plan
- * is approved, and a full-access thread is asked to approve every edit it
- * already allowed.
- */
-function restoreApprovedPlanPermissionMode(threadSession: ThreadSession): void {
+async function enterPlanModeIfRequested(
+  threadSession: ThreadSession,
+  params: TurnStartParams | TurnSteerParams,
+): Promise<void> {
   if (
-    threadSession.permissionMode === threadSession.approvedPlanPermissionMode
+    params.claudeCodePermissionMode !== "plan" ||
+    threadSession.attachment.permissionMode === "plan"
   ) {
     return;
   }
-  threadSession.permissionMode = threadSession.approvedPlanPermissionMode;
+  await threadSession.session.setPermissionMode("plan");
+  threadSession.attachment.permissionMode = "plan";
+}
+
+function restoreApprovedPlanPermissionMode(threadSession: ThreadSession): void {
+  if (
+    threadSession.attachment.permissionMode ===
+    threadSession.attachment.approvedPlanPermissionMode
+  ) {
+    return;
+  }
+  threadSession.attachment.permissionMode =
+    threadSession.attachment.approvedPlanPermissionMode;
   void threadSession.session
-    .setPermissionMode(threadSession.approvedPlanPermissionMode)
+    .setPermissionMode(threadSession.attachment.approvedPlanPermissionMode)
     .catch((error: unknown) => {
-      // bb's own canUseTool gate already follows the restored mode, so a
-      // refused control request costs the session Claude's native gating
-      // alignment, not the user's preset.
       logBridgeError(
         `Failed to leave Plan mode: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -1736,12 +1803,11 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
     createForwardUserQuestionRequest(threadIdRef);
 
   return async (toolName, input, options) => {
-    // Claude can dispatch canUseTool while the preceding assistant tool-use
-    // message is queued for the SDK async iterator. Give the stream consumer
-    // one turn to record its parent-tool provenance before resolving policy.
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    const threadSession = sessions.get(threadIdRef.current);
+    const threadSession = threadAttachments.get(
+      threadIdRef.current,
+    )?.residentSession;
     if (!threadSession) {
       return {
         behavior: "deny",
@@ -1761,17 +1827,14 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       }
       return forwardUserQuestionRequest({
         threadId: threadIdRef.current,
-        providerThreadId: threadSession.providerThreadId ?? threadIdRef.current,
+        providerThreadId:
+          threadSession.attachment.providerThreadId ?? threadIdRef.current,
         toolUseId: options.toolUseID,
         input: parsedInput.data,
         signal: options.signal,
       });
     }
 
-    // Like AskUserQuestion, this tool call is the prompt itself rather than a
-    // guard on a side effect, so it must reach the user before any of the
-    // policy shortcuts below. `/plan` also overrides the session permission
-    // mode, so a "full" preset does not mean the user waived plan review.
     if (toolName === CLAUDE_EXIT_PLAN_MODE_TOOL_NAME) {
       if (!claudeExitPlanModeInputSchema.safeParse(input).success) {
         return {
@@ -1782,7 +1845,8 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       }
       return forwardInteractiveRequest({
         threadId: threadIdRef.current,
-        providerThreadId: threadSession.providerThreadId ?? threadIdRef.current,
+        providerThreadId:
+          threadSession.attachment.providerThreadId ?? threadIdRef.current,
         toolName,
         toolUseId: options.toolUseID,
         input,
@@ -1820,10 +1884,6 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       (input as { dangerouslyDisableSandbox?: unknown })
         .dangerouslyDisableSandbox === true
     ) {
-      // With `allowUnsandboxedCommands` permanently enabled, this deny is the
-      // only gate on the unsandboxed retry for escalation-denied turns. It must
-      // run before the session-grant shortcut: grants survive escalation flips
-      // now that an escalation-only change reuses the session.
       return {
         behavior: "deny",
         message: buildWorkspaceWriteDenialMessage(),
@@ -1832,7 +1892,7 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
     }
     if (
       hasClaudeSessionPermissionGrant({
-        grants: threadSession.sessionPermissionGrants,
+        grants: threadSession.attachment.sessionPermissionGrants,
         permissions: requestedPermissions,
         toolName,
       })
@@ -1843,24 +1903,6 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
         toolUseID: options.toolUseID,
         decisionClassification: "user_permanent",
       };
-    }
-
-    if (
-      toolName === "Bash" &&
-      (threadSession.permissionMode === "default" ||
-        threadSession.permissionMode === "dontAsk")
-    ) {
-      // Defensive mirror of the readonly PreToolUse allowlist: Claude may still
-      // call canUseTool after hook input rewriting, and safe policy allows are
-      // not user decisions, so no decisionClassification is attached.
-      const updatedInput = buildReadonlyBashUpdatedInput(input);
-      if (updatedInput) {
-        return {
-          behavior: "allow",
-          updatedInput,
-          toolUseID: options.toolUseID,
-        };
-      }
     }
 
     const shouldRequestApproval =
@@ -1875,7 +1917,7 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       };
     }
 
-    if (threadSession.permissionMode === "bypassPermissions") {
+    if (threadSession.attachment.permissionMode === "bypassPermissions") {
       return {
         behavior: "allow",
         updatedInput: input,
@@ -1883,13 +1925,10 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       };
     }
 
-    if (
-      shouldAutoDenyInteractiveRequest(interactiveRequestPolicy) ||
-      threadSession.permissionMode === "dontAsk"
-    ) {
+    if (shouldAutoDenyInteractiveRequest(interactiveRequestPolicy)) {
       const policyMessage =
-        threadSession.permissionMode === "acceptEdits" ||
-        threadSession.permissionMode === "auto"
+        threadSession.attachment.permissionMode === "acceptEdits" ||
+        threadSession.attachment.permissionMode === "auto"
           ? buildWorkspaceWriteDenialMessage()
           : buildReadonlyDenialMessage();
       return {
@@ -1901,7 +1940,8 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
 
     return forwardInteractiveRequest({
       threadId: threadIdRef.current,
-      providerThreadId: threadSession.providerThreadId ?? threadIdRef.current,
+      providerThreadId:
+        threadSession.attachment.providerThreadId ?? threadIdRef.current,
       toolName,
       toolUseId: options.toolUseID,
       input,
@@ -1917,19 +1957,6 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
 async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
   switch (request.method) {
     case "initialize":
-      // The canonical handshake (@bb/provider-bridge-protocol): the bridge
-      // reports the session-behavior facts its own code implements.
-      // sessionRestore is true — sessions persist (persistSession) and
-      // SdkSession.start(resumeSessionId) reopens them via SDK resume.
-      // fork is "checkpoint" — thread/fork maps
-      // sourceProviderCheckpointId onto forkSession's upToMessageId.
-      // approvalEnforcedBy is "provider" — canUseTool pre-filters
-      // approvals in this bridge (policy shortcuts above the forward), so
-      // every forwarded request already needs user input and the runtime
-      // must not reclassify it (#1236).
-      // Typed so a capability rename cannot silently degrade this bridge:
-      // an unrenamed key would be missing from InitializeResult, not
-      // defaulted false.
       const result: InitializeResult = {
         protocolVersion: PROVIDER_BRIDGE_PROTOCOL_VERSION,
         capabilities: {
@@ -1939,12 +1966,30 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
           threadGoalClear: false,
           fork: "checkpoint",
           approvalEnforcedBy: "provider",
+          grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
+          steerMode: "inject",
+          skills: { configure: true },
         },
       };
       sendResult(request.id, result);
       break;
     case "model/list":
-      sendResult(request.id, await listClaudeCodeBridgeModels());
+      sendResult(request.id, await listModelsMemoized());
+      break;
+    case "provider/health":
+      sendResult(request.id, await getClaudeProviderHealth());
+      break;
+    case "provider/usage":
+      sendResult(request.id, await getClaudeProviderUsage());
+      break;
+    case "provider/installation/status":
+      sendResult(request.id, await getClaudeProviderInstallationStatus());
+      break;
+    case "provider/installation/run":
+      sendResult(
+        request.id,
+        await getClaudeProviderInstallationRun(request.params.action),
+      );
       break;
     case "thread/start":
       await handleThreadStart(
@@ -1964,8 +2009,6 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
       );
       break;
     case "thread/fork":
-      // Claude supports checkpoint forks natively:
-      // sourceProviderCheckpointId maps onto forkSession's upToMessageId.
       await handleThreadFork(
         request.id,
         claudeThreadForkParamsSchema.parse({
@@ -1990,58 +2033,38 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
       await handleThreadStop(request.id, request.params);
       break;
     case "thread/discard":
-      // Claude has no provider-side thread deletion; discard closes any live
-      // session for the thread and succeeds.
       sendResult(request.id, await closeThreadForStop(request.params.threadId));
       break;
     case "skills/configure":
-      // Claude loads staged skill roots as local plugins; the SDK takes them
-      // at session construction only, so the payload is latched here and
-      // applied to every session started afterwards.
-      configuredSkillRoots = request.params.roots.map((root) => ({
-        id: root.id,
-        localPluginPath: root.path,
-      }));
+      configuredSkillRoots = assembleSkillPlugins(request.params.roots);
       sendResult(request.id, { ok: true });
       break;
   }
 }
 
-async function handleThreadStart(
+function attachThreadSession(
   id: string | number,
-  params: ThreadStartParams,
-): Promise<void> {
+  params: SessionConstructionParams,
+  providerThreadId: string,
+  resume: boolean,
+): void {
   const threadIdRef = { current: params.threadId };
-
-  const existing = sessions.get(threadIdRef.current);
-  if (existing) {
-    await closeThreadSession({
-      graceful: false,
-      message: "Thread session replaced while awaiting permission approval",
-      threadId: threadIdRef.current,
-    });
+  const env = buildSessionEnv(readConfigEnvOverrides(params.config));
+  const sessionOptions = buildTrackedSessionOptions(params, env, threadIdRef);
+  if (!resume) {
+    sessionOptions.sessionId = providerThreadId;
   }
-
-  const preparedEnv = await prepareSessionEnv(params);
-  const sessionOptions = buildTrackedSessionOptions(
-    params,
-    preparedEnv.env,
-    threadIdRef,
-  );
-  const providerThreadId = randomUUID();
-  sessionOptions.sessionId = providerThreadId;
   sessionOptions.canUseTool = createCanUseTool(threadIdRef);
   if (params.dynamicTools && params.dynamicTools.length > 0) {
     const mcpServer = buildBridgeMcpServer(
       params.dynamicTools,
       createForwardToolCall(() => threadIdRef.current),
     );
-    sessionOptions.mcpServers = { [BRIDGE_MCP_SERVER_NAME]: mcpServer };
+    sessionOptions.mcpServers = { [BB_BRIDGE_MCP_SERVER_NAME]: mcpServer };
     sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
   }
 
-  const threadSession = createThreadSession({
-    mockCliTrafficProxy: preparedEnv.mockCliTrafficProxy,
+  const attachment = createThreadAttachment({
     liveSettings: toInitialLiveSessionSettings(params),
     permissionEscalation: params.permissionEscalation,
     permissionMode: params.permissionMode,
@@ -2049,16 +2072,30 @@ async function handleThreadStart(
     providerThreadId,
     sessionConstructionConfig: toSessionConstructionConfig(params),
     sessionOptions,
-    sessionPermissionGrants: [],
     threadIdRef,
   });
-  sessions.set(threadIdRef.current, threadSession);
-  threadSession.session.start();
+  threadAttachments.set(params.threadId, attachment);
+  startResidentThreadSession(attachment, resume ? providerThreadId : undefined);
 
-  // Identity precedes any thread/event; the result carries the same identity
-  // with per-session restorability.
-  sendThreadIdentity(threadIdRef.current, providerThreadId);
+  sendThreadIdentity(params.threadId, providerThreadId);
+  sendSessionReset(params.threadId);
   sendResult(id, { providerThreadId, sessionRestorable: true });
+}
+
+async function handleThreadStart(
+  id: string | number,
+  params: ThreadStartParams,
+): Promise<void> {
+  const existing = threadAttachments.get(params.threadId);
+  if (existing) {
+    await closeThreadSession({
+      graceful: false,
+      message: "Thread session replaced while awaiting permission approval",
+      threadId: params.threadId,
+    });
+  }
+
+  attachThreadSession(id, params, randomUUID(), false);
 }
 
 async function handleThreadResume(
@@ -2067,25 +2104,37 @@ async function handleThreadResume(
 ): Promise<void> {
   const threadId = params.threadId;
   const requestedProviderThreadId = params.providerThreadId ?? undefined;
+  if (requestedProviderThreadId === undefined) {
+    sendError(
+      id,
+      BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS,
+      "thread/resume requires a providerThreadId",
+    );
+    return;
+  }
   const sessionConstructionConfig = toSessionConstructionConfig(params);
 
-  const existing = sessions.get(threadId);
+  const existing = threadAttachments.get(threadId);
+  const existingSession = existing?.residentSession;
   if (
     existing &&
     requestedProviderThreadId &&
     !existing.closing &&
-    !existing.streamEnded &&
+    !existingSession?.streamEnded &&
     existing.providerThreadId === requestedProviderThreadId &&
     isDeepStrictEqual(
       existing.sessionConstructionConfig,
       sessionConstructionConfig,
     )
   ) {
-    await applyLiveSessionSettings(
-      existing,
-      params.threadId,
-      toInitialLiveSessionSettings(params),
-    );
+    const liveSettings = toInitialLiveSessionSettings(params);
+    if (existingSession) {
+      await applyLiveSessionSettings(
+        existingSession,
+        params.threadId,
+        liveSettings,
+      );
+    }
     existing.permissionEscalation = params.permissionEscalation;
     sendResult(id, {
       providerThreadId: requestedProviderThreadId,
@@ -2095,18 +2144,13 @@ async function handleThreadResume(
   }
 
   if (existing) {
-    if (!existing.closing) {
-      // A live canonical session the new construction-scoped settings cannot
-      // be applied to: settle its in-flight work and announce the rebuild
-      // before tearing it down (never silent, #1268). The replacement resumes
-      // the same provider session id, so provider-side context survives.
+    if (!existing.closing && existingSession) {
       emitSessionReplacement({
-        contextLost: false,
         providerThreadId: requestedProviderThreadId ?? null,
         reason:
           "Claude session restarted: construction-scoped settings changed",
         threadId,
-        threadSession: existing,
+        threadSession: existingSession,
       });
     }
     await closeThreadSession({
@@ -2116,54 +2160,7 @@ async function handleThreadResume(
     });
   }
 
-  const preparedEnv = await prepareSessionEnv(params);
-  const threadIdRef = { current: threadId };
-  const sessionOptions = buildTrackedSessionOptions(
-    params,
-    preparedEnv.env,
-    threadIdRef,
-  );
-  sessionOptions.canUseTool = createCanUseTool(threadIdRef);
-  if (params.dynamicTools && params.dynamicTools.length > 0) {
-    const mcpServer = buildBridgeMcpServer(
-      params.dynamicTools,
-      createForwardToolCall(() => threadIdRef.current),
-    );
-    sessionOptions.mcpServers = { [BRIDGE_MCP_SERVER_NAME]: mcpServer };
-    sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
-  }
-  const threadSession = createThreadSession({
-    mockCliTrafficProxy: preparedEnv.mockCliTrafficProxy,
-    liveSettings: toInitialLiveSessionSettings(params),
-    permissionEscalation: params.permissionEscalation,
-    permissionMode: params.permissionMode,
-    approvedPlanPermissionMode: params.approvedPlanPermissionMode,
-    ...(requestedProviderThreadId
-      ? { providerThreadId: requestedProviderThreadId }
-      : {}),
-    sessionConstructionConfig,
-    sessionOptions,
-    sessionPermissionGrants: [],
-    threadIdRef,
-  });
-  sessions.set(threadId, threadSession);
-  threadSession.session.start(requestedProviderThreadId);
-
-  // A resume always names the session it reopens, so identity is known before
-  // any thread/event for it.
-  if (requestedProviderThreadId === undefined) {
-    sendError(
-      id,
-      BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS,
-      "thread/resume requires a providerThreadId",
-    );
-    return;
-  }
-  sendThreadIdentity(threadId, requestedProviderThreadId);
-  sendResult(id, {
-    providerThreadId: requestedProviderThreadId,
-    sessionRestorable: true,
-  });
+  attachThreadSession(id, params, requestedProviderThreadId, true);
 }
 
 async function handleThreadFork(
@@ -2172,7 +2169,7 @@ async function handleThreadFork(
 ): Promise<void> {
   const threadId = params.threadId;
 
-  const existing = sessions.get(threadId);
+  const existing = threadAttachments.get(threadId);
   if (existing) {
     await closeThreadSession({
       graceful: false,
@@ -2184,7 +2181,6 @@ async function handleThreadFork(
   let forkedProviderThreadId: string;
   try {
     const forkResult = await forkSession(params.sourceProviderThreadId, {
-      dir: params.cwd,
       ...(params.sourceProviderCheckpointId !== undefined
         ? { upToMessageId: params.sourceProviderCheckpointId }
         : {}),
@@ -2196,50 +2192,9 @@ async function handleThreadFork(
     return;
   }
 
-  const preparedEnv = await prepareSessionEnv(params);
-  const threadIdRef = { current: threadId };
-  const sessionOptions = buildTrackedSessionOptions(
-    params,
-    preparedEnv.env,
-    threadIdRef,
-  );
-  sessionOptions.canUseTool = createCanUseTool(threadIdRef);
-  if (params.dynamicTools && params.dynamicTools.length > 0) {
-    const mcpServer = buildBridgeMcpServer(
-      params.dynamicTools,
-      createForwardToolCall(() => threadIdRef.current),
-    );
-    sessionOptions.mcpServers = { [BRIDGE_MCP_SERVER_NAME]: mcpServer };
-    sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
-  }
-  const threadSession = createThreadSession({
-    mockCliTrafficProxy: preparedEnv.mockCliTrafficProxy,
-    liveSettings: toInitialLiveSessionSettings(params),
-    permissionEscalation: params.permissionEscalation,
-    permissionMode: params.permissionMode,
-    approvedPlanPermissionMode: params.approvedPlanPermissionMode,
-    providerThreadId: forkedProviderThreadId,
-    sessionConstructionConfig: toSessionConstructionConfig(params),
-    sessionOptions,
-    sessionPermissionGrants: [],
-    threadIdRef,
-  });
-  sessions.set(threadId, threadSession);
-  threadSession.session.start(forkedProviderThreadId);
-
-  sendThreadIdentity(threadId, forkedProviderThreadId);
-  sendResult(id, {
-    providerThreadId: forkedProviderThreadId,
-    sessionRestorable: true,
-  });
+  attachThreadSession(id, params, forkedProviderThreadId, true);
 }
 
-
-
-/**
- * Session-construction params for a start, resume, or fork, with this
- * process's latched skill roots folded in.
- */
 function toClaudeSessionParams(
   params: z.infer<typeof canonicalThreadStartParamsSchema>,
 ): Record<string, unknown> {
@@ -2254,10 +2209,11 @@ function toClaudeSessionParams(
   });
 }
 
-async function runTurnStart(
+async function runTurnInput(
   id: string | number,
-  params: TurnStartParams,
+  params: TurnStartParams | TurnSteerParams,
   acceptance: CanonicalTurnAcceptance,
+  intent: "new-turn" | "steer",
 ): Promise<void> {
   const promptText = buildPromptText(params.input);
   if (promptText === undefined) {
@@ -2265,7 +2221,15 @@ async function runTurnStart(
     return;
   }
 
-  const threadSession = getWritableThreadSession(params.threadId);
+  const attachment = threadAttachments.get(params.threadId);
+  if (attachment) {
+    if ("config" in params) {
+      applyTurnEnvironment(attachment, params.config);
+    }
+    applyChromeSetting(attachment, params.chromeEnabled);
+  }
+
+  const threadSession = await getWritableThreadSession(params.threadId, intent);
   if (!threadSession) {
     sendError(id, -32000, "No active session");
     return;
@@ -2279,30 +2243,38 @@ async function runTurnStart(
     await applyLiveSessionSettings(
       threadSession,
       params.threadId,
-      withTurnLiveSessionSettings(threadSession.liveSettings, params),
+      withTurnLiveSessionSettings(
+        threadSession.attachment.liveSettings,
+        params,
+      ),
     );
+    await enterPlanModeIfRequested(threadSession, params);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     sendError(id, -32000, message);
     return;
   }
 
-  if (
-    !queuePromptInputs(threadSession, [promptText], params.permissionEscalation)
-  ) {
-    sendError(id, -32000, "Claude SDK input stream is closed");
-    return;
+  try {
+    await pushPromptInput(
+      threadSession,
+      promptText,
+      params.permissionEscalation,
+    );
+    emitCanonicalTurnInputAccepted(threadSession, acceptance, params.threadId);
+    threadSession.attachment.permissionEscalation = params.permissionEscalation;
+    sendResult(id, { threadId: params.threadId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    sendError(id, -32000, message);
   }
-  emitCanonicalTurnInputAccepted(threadSession, acceptance, params.threadId);
-  threadSession.permissionEscalation = params.permissionEscalation;
-  sendResult(id, { threadId: params.threadId });
 }
 
 async function handleTurnStart(
   id: string | number,
   params: CanonicalTurnStartParams,
 ): Promise<void> {
-  await runTurnStart(
+  await runTurnInput(
     id,
     claudeTurnStartParamsSchema.parse(
       buildClaudeTurnParams({
@@ -2316,66 +2288,15 @@ async function handleTurnStart(
       clientRequestId: params.clientRequestId,
       providerThreadId: params.providerThreadId,
     },
+    "new-turn",
   );
-}
-
-async function runTurnSteer(
-  id: string | number,
-  params: TurnSteerParams,
-  acceptance: CanonicalTurnAcceptance,
-): Promise<void> {
-  const promptText = buildPromptText(params.input);
-  if (promptText === undefined) {
-    sendError(id, BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS, "Missing input text");
-    return;
-  }
-
-  const threadSession = getWritableThreadSession(params.threadId);
-  if (!threadSession) {
-    sendError(id, -32000, "No active session");
-    return;
-  }
-
-  if (!threadSession.session.canPushInput()) {
-    sendError(id, -32000, "Claude SDK input stream is closed");
-    return;
-  }
-  try {
-    await applyLiveSessionSettings(
-      threadSession,
-      params.threadId,
-      withTurnLiveSessionSettings(threadSession.liveSettings, params),
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    sendError(id, -32000, message);
-    return;
-  }
-
-  try {
-    await pushPromptInput(
-      threadSession,
-      promptText,
-      params.permissionEscalation,
-    );
-    // The acceptance is emitted only once the SDK actually consumed the
-    // queued input: a steer that joins a live turn correlates with it, and
-    // one that lands on an idle session correlates with the turn it opens.
-    emitCanonicalTurnInputAccepted(threadSession, acceptance, params.threadId);
-    // A failed steer must not change the running turn's escalation.
-    threadSession.permissionEscalation = params.permissionEscalation;
-    sendResult(id, { threadId: params.threadId });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    sendError(id, -32000, message);
-  }
 }
 
 async function handleTurnSteer(
   id: string | number,
   params: CanonicalTurnSteerParams,
 ): Promise<void> {
-  await runTurnSteer(
+  await runTurnInput(
     id,
     claudeTurnSteerParamsSchema.parse(
       buildClaudeTurnParams({
@@ -2390,6 +2311,7 @@ async function handleTurnSteer(
       clientRequestId: params.clientRequestId,
       providerThreadId: params.providerThreadId,
     },
+    "steer",
   );
 }
 
@@ -2408,45 +2330,17 @@ async function handleThreadStop(
   id: string | number,
   params: ThreadStopParams,
 ): Promise<void> {
-  const threadSession = sessions.get(params.threadId);
+  const threadSession = threadAttachments.get(params.threadId)?.residentSession;
   if (
     params.intent === "interrupt" &&
-    threadSession !== undefined &&
+    threadSession != null &&
     !threadSession.closing
   ) {
-    // An interrupt settles the active turn as interrupted and, like today's
-    // cancel semantics, takes the session's background tasks down with the
-    // CLI session it closes.
-    const state = threadSession.translator.resolveState({
-      threadId: params.threadId,
-    });
-    const settlement: ThreadEvent[] = [];
-    if (state.currentTurnId !== undefined) {
-      settlement.push({
-        type: "turn/completed",
-        threadId: UNSTAMPED_THREAD_ID,
-        providerThreadId: "",
-        scope: turnScope(state.currentTurnId),
-        status: "interrupted",
-      });
-      threadSession.translator.turnState.finishTurn({
-        state,
-        threadId: params.threadId,
-      });
-    }
-    settlement.push(
-      ...buildInterruptedClaudeTaskEvents({
-        tasks: state.tasksById,
-        threadId: UNSTAMPED_THREAD_ID,
-      }),
+    sendThreadDeltas(
+      params.threadId,
+      threadSession.translator.buildSessionSettlementDeltas(params.threadId),
     );
-    state.opaqueTaskIds.clear();
-    sendThreadEvents(params.threadId, settlement);
   }
-  // A release detaches the idle session and must not fabricate an
-  // interruption or settle background tasks (#1584): the session stays
-  // resumable from its persisted providerThreadId and the close path emits
-  // no turn events.
   sendResult(id, await closeThreadForStop(params.threadId));
 }
 
@@ -2509,8 +2403,10 @@ function handleParsedMessage(parsed: unknown): void {
     return;
   }
 
-  if (response && findSessionByPendingInteractiveRequest(response.id)) {
-    const threadSession = findSessionByPendingInteractiveRequest(response.id)!;
+  const threadSession = response
+    ? findSessionByPendingInteractiveRequest(response.id)
+    : undefined;
+  if (response && threadSession) {
     const pending = threadSession.pendingInteractiveRequests.get(response.id)!;
     threadSession.pendingInteractiveRequests.delete(response.id);
     if ("error" in response) {
@@ -2538,7 +2434,7 @@ function handleParsedMessage(parsed: unknown): void {
       pending.kind === "permission_request" &&
       shouldCacheClaudeSessionPermission(interactiveResponse)
     ) {
-      threadSession.sessionPermissionGrants.push({
+      threadSession.attachment.sessionPermissionGrants.push({
         permissions: pending.permissions,
         toolName: pending.toolName,
       });
@@ -2589,7 +2485,6 @@ function handleParsedMessage(parsed: unknown): void {
 
 export const handleLine = createBridgeLineHandler({ handleParsedMessage });
 
-// Main entry point
 let shuttingDown = false;
 
 function shutdownGracefully(message: string): void {
@@ -2604,6 +2499,9 @@ function shutdownGracefully(message: string): void {
 
 export const experimental_providerBridge = experimental_defineProviderBridge({
   handleLine,
+  start: (context) => {
+    bridgeTempDir = context.tempDir;
+  },
   onSigterm: () => {
     shutdownGracefully(
       "Bridge shutting down while awaiting permission approval",

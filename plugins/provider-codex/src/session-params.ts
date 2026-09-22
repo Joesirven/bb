@@ -1,11 +1,3 @@
-/**
- * Codex session/turn parameter builders.
- *
- * Pure translation from bb execution options to Codex app-server params.
- * Everything here is stateless; the stateful translation pipeline lives in
- * `translator.ts`.
- */
-
 import {
   jsonValueSchema,
   type PermissionEscalation,
@@ -13,7 +5,7 @@ import {
   type ReasoningLevel,
   type RuntimePermissionPolicy,
   type ServiceTier,
-  buildShellEnvironmentPolicyConfig,
+  buildShellEnvOverrides,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import fs from "node:fs";
 import path from "node:path";
@@ -28,11 +20,6 @@ import type { AskForApproval } from "./generated/codex-app-server/schema/v2/AskF
 import type { ApprovalsReviewer } from "./generated/codex-app-server/schema/v2/ApprovalsReviewer.js";
 import { mapBbReasoningLevelToCodex } from "./models.js";
 
-/**
- * The execution facts Codex param building actually reads. The bridge
- * assembles it from the wire options plus its provider-scoped
- * `providerOptions` bag.
- */
 export type CodexSessionOptions = {
   model?: string;
   serviceTier?: ServiceTier;
@@ -89,7 +76,6 @@ interface BuildCodexConfigArgs {
   threadId: string;
 }
 
-
 interface RealpathContainedDirectoryArgs {
   candidatePath: string;
   trustedParentPath: string;
@@ -144,10 +130,6 @@ type GitHeadState =
   | { ref: string; type: "ref" }
   | { type: "unsafe" };
 
-/**
- * The construction-command shape instruction overrides read: bb instructions
- * plus the append/replace mode.
- */
 interface CodexInstructionSource {
   instructionMode: "append" | "replace";
   options: { instructions?: string };
@@ -307,10 +289,6 @@ function isPathInsideOrEqual(
   );
 }
 
-/**
- * Resolves directory symlinks before containment checks so mutable Git metadata
- * cannot smuggle Codex writable roots outside the trusted common dir.
- */
 function realpathContainedDirectory(
   args: RealpathContainedDirectoryArgs,
 ): RealpathContainedDirectoryResult {
@@ -356,8 +334,6 @@ function addRefWritableRoots(args: AddRefWritableRootsArgs): boolean {
     return true;
   }
 
-  // Missing ref/log dirs are valid; escaped existing dirs make the linked
-  // worktree metadata untrusted, so reject all extra Git roots.
   const refsRoot = realpathContainedDirectory({
     trustedParentPath: args.commonDir,
     candidatePath: path.join(args.commonDir, "refs"),
@@ -479,10 +455,6 @@ export function gitWritableRootsForWorkspace(
     candidatePath: path.join(commonDir, "objects"),
   });
   if (objectsRoot.status !== "contained") {
-    // Missing objects or shared object stores/alternates may be legitimate Git
-    // layouts, but Codex workspace-write should not follow object storage
-    // outside this worktree's trusted common dir. Fall back to workspace-only
-    // access.
     return [];
   }
 
@@ -556,34 +528,24 @@ export function toCodexThreadPermissionSettings(
 export function toCodexPermissionSettings(
   args: ToCodexPermissionSettingsArgs,
 ): CodexPermissionSettings {
-  const permissionPolicy = args.options;
-  switch (permissionPolicy.permissionScope) {
-    case "workspace":
-      return {
-        approvalPolicy: toWorkspaceApprovalPolicy(permissionPolicy),
-        approvalsReviewer: toCodexApprovalsReviewer(args.options),
-        sandbox: "workspace-write",
-        sandboxPolicy: toWorkspaceWriteCodexSandboxPolicy(
-          combineWorkspaceWriteRoots(
-            args.gitWritableRoots,
-            args.additionalWorkspaceWriteRoots,
-          ),
-        ),
-      };
-    case "full":
-      return {
-        approvalPolicy: "never",
-        approvalsReviewer: toCodexApprovalsReviewer(args.options),
-        sandbox: "danger-full-access",
-        sandboxPolicy: { type: "dangerFullAccess" },
-      };
-  }
+  return {
+    ...toCodexThreadPermissionSettings(args.options),
+    sandboxPolicy:
+      args.options.permissionScope === "workspace"
+        ? toWorkspaceWriteCodexSandboxPolicy(
+            combineWorkspaceWriteRoots(
+              args.gitWritableRoots,
+              args.additionalWorkspaceWriteRoots,
+            ),
+          )
+        : { type: "dangerFullAccess" },
+  };
 }
 
 export function toCodexServiceTier(
   tier: ServiceTier | undefined,
-): "fast" | undefined {
-  return tier === "fast" ? "fast" : undefined;
+): "fast" | null | undefined {
+  return tier === "default" ? null : tier;
 }
 
 export function toCodexReasoningEffort(
@@ -591,10 +553,6 @@ export function toCodexReasoningEffort(
 ): CodexReasoningEffort {
   const codexEffort = mapBbReasoningLevelToCodex(reasoningLevel);
   if (codexEffort == null) {
-    // "none" is exposed by Cursor and some Pi models; "ultracode" is
-    // Claude-specific. Codex models never expose either, so model-switch
-    // reconciliation maps them away before here — but fail closed if
-    // something slips through.
     throw new Error(
       `Codex does not support the ${reasoningLevel} reasoning level.`,
     );
@@ -619,6 +577,19 @@ export function toCodexUserInput(input: PromptInput[]): CodexUserInput[] {
         };
     }
   });
+}
+
+function buildShellEnvironmentPolicyConfig(
+  envVars?: Record<string, string>,
+): Record<string, string> | undefined {
+  if (!envVars) {
+    return undefined;
+  }
+  const config: Record<string, string> = {};
+  for (const [key, value] of Object.entries(buildShellEnvOverrides(envVars))) {
+    config[`shell_environment_policy.set.${key}`] = value;
+  }
+  return Object.keys(config).length > 0 ? config : undefined;
 }
 
 export function buildCodexConfig(
@@ -658,7 +629,6 @@ export function buildCodexConfig(
   return Object.keys(config).length > 0 ? config : undefined;
 }
 
-/** Structural dynamic-tool shape shared by adapter commands and wire params. */
 interface CodexDynamicToolInput {
   name: string;
   description: string;
@@ -669,6 +639,7 @@ export function toCodexDynamicTools(
   dynamicTools: readonly CodexDynamicToolInput[] | undefined,
 ): DynamicToolSpec[] | undefined {
   return dynamicTools?.map((tool) => ({
+    type: "function",
     name: tool.name,
     description: tool.description,
     inputSchema: jsonValueSchema.parse(tool.inputSchema),

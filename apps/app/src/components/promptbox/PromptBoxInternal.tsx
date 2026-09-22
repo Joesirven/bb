@@ -1,7 +1,7 @@
-import { atom, useAtom } from "jotai";
-import { RESET, atomWithStorage } from "jotai/utils";
+import { registerThreadMentionDropTarget } from "@/lib/thread-mention-drop";
 import type {
   PromptMentionCommandTrigger,
+  PromptMentionResource,
   PromptTextMention,
 } from "@bb/domain";
 import type { ComposerView } from "@get-bb/plugin-sdk";
@@ -10,6 +10,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import { useEditor, type Editor } from "@tiptap/react";
 import {
   useCallback,
+  useContext,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -24,26 +25,36 @@ import {
   type Ref,
 } from "react";
 import {
+  commandPillDismissedRangeEnd,
+  findActiveTrigger,
   orderCommandSuggestions,
   type ActiveTrigger,
   type CommandMenuState,
-  type ComposerCommandSuggestion,
   type MentionMenuState,
+  type OrderedMentionSuggestions,
   type ProviderCommandSuggestion,
   type PromptMentionSuggestion,
   type TypeaheadMenuState,
   type TypeaheadTrigger,
-} from "@/components/promptbox/mentions/types";
+} from "@bb/client-core";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
 import {
   useAppCommandKeyDispatch,
   useAppCommandShortcut,
 } from "@/components/commands/AppCommandProvider";
-import { commandPillDismissedRangeEnd } from "@/components/promptbox/mentions/command-trigger";
-import { findActiveTrigger } from "@/components/promptbox/mentions/find-active-trigger";
 import { canLoadMoreCommandResults } from "@/components/promptbox/mentions/mention-menu-scroll";
+import {
+  voiceUnsupportedMessage,
+  type VoiceUnsupportedReason,
+} from "@/hooks/voice-input-support";
 import { Button } from "@bb/shared-ui/button";
-import { Icon } from "@bb/shared-ui/icon";
+import { Icon, type IconName } from "@bb/shared-ui/icon";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@bb/shared-ui/tooltip";
 import { ComposerActionsSlot } from "@/components/plugin/PluginComposerActions";
 import { useResolvedComposerEditor } from "@/components/plugin/composer-slot-hooks";
 import {
@@ -58,25 +69,26 @@ import {
   COARSE_POINTER_PROMPT_ACTION_BUTTON_CLASS,
   COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS,
 } from "@bb/shared-ui/coarse-pointer-sizing";
+import { CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS } from "@bb/shared-ui/chrome-style-tokens";
 import { usePointerCoarse } from "@bb/shared-ui/hooks/use-pointer-coarse";
 import {
   getMediaQuerySnapshot,
   REDUCED_MOTION_QUERY,
 } from "@bb/shared-ui/hooks/use-media-query";
 import { blurActiveKeyboardInputWithin } from "@bb/shared-ui/overlay-trigger";
-import { createJsonLocalStorage } from "@/lib/browser-storage";
 import {
   DEFAULT_PLUGIN_MENTION_TRIGGER,
   type PluginMentionTrigger,
-} from "@/lib/plugin-mention-triggers";
+} from "@bb/client-core";
 import { useRichTextEditingPreference } from "@/lib/rich-text-editing-preference";
 import {
   arePromptDraftStatesEqual,
   isPromptDraftEmpty,
   type PromptDraftAttachment,
   type PromptDraftState,
-} from "@/lib/prompt-draft";
+} from "@bb/client-core";
 import { cn } from "@bb/shared-ui/lib/utils";
+import { PROMPT_STACK_EDGE_CARET_BUTTON_WIDTH_CLASS } from "./banner/PromptStackCard";
 import { AttachmentPreview } from "./AttachmentPreview";
 import { VoiceRecordingBar } from "./VoiceRecordingBar";
 import {
@@ -110,14 +122,27 @@ import {
 import { exitHeading } from "./editor/prompt-editor-heading";
 import { applyPromptListNewline } from "./editor/prompt-editor-list";
 import { applyPromptParagraphNewline } from "./editor/prompt-editor-paragraph";
-import { MentionMenu, type TypeaheadSuggestion } from "./mentions/MentionMenu";
+import {
+  MentionMenu,
+  typeaheadSuggestionKey,
+  type TypeaheadSuggestion,
+} from "./mentions/MentionMenu";
 import { parsePromptMentionClipboardElement } from "./mentions/prompt-mention-clipboard";
-import { ComposerEditorSlot } from "./ComposerEditorSlot";
+import {
+  blurPromptEditor,
+  ComposerEditorSlot,
+  type ComposerEditorLayout,
+} from "./ComposerEditorSlot";
+import { QueuedEditorTypeaheadLayoutContext } from "./queued-editor-typeahead-layout";
+import {
+  isModifierSubmitKeyEvent,
+  modifierSubmitShortcutAria,
+} from "./modifier-submit-shortcut";
 
 const PROMPTBOX_MIN_HEIGHT = 68;
 const PROMPTBOX_SELECTION_REVEAL_MARGIN = 12;
 const COMPACT_PROMPT_ACTION_BUTTON_CLASS =
-  "size-8 p-0 transition-all [&_svg]:size-4";
+  "size-8 p-0 transition-all [&_[data-icon-root]]:size-4";
 const RICH_PASTE_BLOCK_TAGS = new Set([
   "ADDRESS",
   "ARTICLE",
@@ -151,6 +176,7 @@ const RICH_PASTE_BLOCK_TAGS = new Set([
   "THEAD",
   "TR",
 ]);
+const RICH_PASTE_LIST_MARKER = "- ";
 const RICH_PASTE_IGNORED_TAGS = new Set([
   "HEAD",
   "LINK",
@@ -175,34 +201,26 @@ function hasWhitespaceAfterPosition(
   return nextNode.type.name === "hardBreak";
 }
 
-type ZenModeLayout = "thread" | "root-compose";
-
-const ZEN_MODE_STORAGE_KEY: Record<ZenModeLayout, string> = {
-  thread: "bb.promptbox.zen-mode.thread",
-  "root-compose": "bb.promptbox.zen-mode.root-compose",
-};
-
-const ZEN_MODE_HEIGHT_CLASS: Record<ZenModeLayout, string> = {
-  thread: "h-[50dvh]",
-  "root-compose": "h-[70dvh]",
-};
+function mentionPillTrailingText(
+  doc: ProseMirrorNode,
+  position: number,
+): string {
+  return hasWhitespaceAfterPosition(doc, position) ? "" : " ";
+}
 
 const COLLAPSING_GRID_CLASS =
   "grid transition-[grid-template-rows] duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none";
 const VOICE_ACTION_TRANSITION_MS = 180;
 type VoiceActionTransition = "entering" | "active" | "exiting";
 
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-}
+export const DEFAULT_COMPOSER_SCOPE = {
+  kind: "new-thread",
+  projectId: null,
+} as const;
 
 function shouldFinishVoiceCompletionTransitionImmediately(): boolean {
   return (
-    prefersReducedMotion() ||
+    getMediaQuerySnapshot(REDUCED_MOTION_QUERY) ||
     (typeof document !== "undefined" && document.visibilityState === "hidden")
   );
 }
@@ -210,76 +228,175 @@ function shouldFinishVoiceCompletionTransitionImmediately(): boolean {
 export interface PromptBoxSubmissionConfig {
   isSubmitting?: boolean;
   disabled?: boolean;
+  disabledReason?: string;
+  label?: string;
+  icon?: IconName;
   title?: string;
   isRunning?: boolean;
   onStop?: () => void;
   onModifierSubmit?: () => void;
 }
 
-/**
- * The `@`-mention half of {@link TypeaheadConfig}. Unchanged from the prior
- * `MentionsConfig` surface other than living under `typeahead.mention`.
- */
+interface PromptSubmitButtonProps {
+  canSubmit: boolean;
+  className: string;
+  disabledReason: string | undefined;
+  icon: IconName | undefined;
+  isBusy: boolean;
+  isCompact: boolean;
+  label: string | undefined;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onTouchSubmit: () => void;
+  title: string;
+}
+
+function PromptSubmitButton({
+  canSubmit,
+  className,
+  disabledReason,
+  icon,
+  isBusy,
+  isCompact,
+  label,
+  onClick,
+  onPointerDown,
+  onTouchSubmit,
+  title,
+}: PromptSubmitButtonProps) {
+  const touchRef = useRef<{ pointerId: number; x: number; y: number } | null>(
+    null,
+  );
+  const suppressTouchClickRef = useRef(false);
+  const button = (
+    <Button
+      data-promptbox-submit-action=""
+      type="submit"
+      size={isCompact ? "icon" : "sm"}
+      variant="default"
+      aria-label={title}
+      aria-busy={isBusy}
+      disabled={!canSubmit}
+      onPointerDown={(event) => {
+        suppressTouchClickRef.current = false;
+        touchRef.current =
+          event.pointerType === "touch" && event.isPrimary && event.button === 0
+            ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+            : null;
+        onPointerDown(event);
+      }}
+      onPointerMove={(event) => {
+        const touch = touchRef.current;
+        if (
+          touch &&
+          touch.pointerId === event.pointerId &&
+          Math.hypot(event.clientX - touch.x, event.clientY - touch.y) > 10
+        ) {
+          touchRef.current = null;
+          suppressTouchClickRef.current = true;
+        }
+      }}
+      onPointerCancel={() => {
+        if (touchRef.current) suppressTouchClickRef.current = true;
+        touchRef.current = null;
+      }}
+      onPointerUp={(event) => {
+        const touch = touchRef.current;
+        touchRef.current = null;
+        if (!touch || touch.pointerId !== event.pointerId) return;
+        suppressTouchClickRef.current = true;
+        if (!canSubmit) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        if (
+          Math.hypot(event.clientX - touch.x, event.clientY - touch.y) > 10 ||
+          event.clientX < bounds.left ||
+          event.clientX >= bounds.right ||
+          event.clientY < bounds.top ||
+          event.clientY >= bounds.bottom
+        ) {
+          return;
+        }
+        onTouchSubmit();
+      }}
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={(event) => {
+        if (suppressTouchClickRef.current && event.detail > 0) {
+          event.preventDefault();
+          return;
+        }
+        onClick(event);
+      }}
+      className={cn(
+        className,
+        label !== undefined && !isCompact && "size-auto h-8 gap-1.5 px-2.5",
+      )}
+    >
+      {isBusy ? (
+        <Icon name="Spinner" className="size-4 animate-spin" />
+      ) : (
+        <>
+          <Icon name={icon ?? "CornerDownLeft"} className="size-4" />
+          {label !== undefined && !isCompact ? (
+            <span data-promptbox-submit-label="">{label}</span>
+          ) : null}
+        </>
+      )}
+    </Button>
+  );
+
+  if (!disabledReason) return button;
+
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            data-promptbox-submit-disabled-reason=""
+            className="inline-flex shrink-0"
+          >
+            {button}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top">{disabledReason}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 export interface TypeaheadMentionConfig {
-  /** Mention trigger characters to watch. Defaults to `@`. */
   triggers?: readonly PluginMentionTrigger[];
-  suggestions: readonly PromptMentionSuggestion[];
+  results: OrderedMentionSuggestions;
   isLoading: boolean;
   isError: boolean;
-  /** Called whenever the active mention query changes; null when no mention is active. */
   onQueryChange: (
     query: string | null,
     trigger: PluginMentionTrigger | null,
   ) => void;
-  /**
-   * Resolves the click action for an inserted mention pill (navigate to a
-   * thread, open a file preview). Omit to render pills as non-interactive
-   * text; returns null per-resource when that mention isn't openable here.
-   */
   resolveLink?: PromptMentionLinkResolver;
 }
 
-/**
- * The command-typeahead half of {@link TypeaheadConfig}. `trigger` is the
- * provider's command char or `null` when the provider has no command
- * surface — in which case the composer never activates a command trigger and
- * the rest of this config is inert.
- *
- * Hosts wire `suggestions` / `isLoading` / `isError` from
- * `useCommandSuggestions`; `onQueryChange` feeds that hook the text typed
- * after the trigger (`null` when no command trigger is active).
- */
 export interface TypeaheadCommandConfig {
-  trigger: PromptMentionCommandTrigger | null;
-  suggestions: readonly ComposerCommandSuggestion[];
+  triggers: readonly PromptMentionCommandTrigger[];
+  suggestions: readonly ProviderCommandSuggestion[];
   isLoading: boolean;
   isError: boolean;
   hasMore: boolean;
   isLoadingMore: boolean;
   loadMore: () => void;
-  /** Called whenever the active command query changes; null when no command trigger is active. */
-  onQueryChange: (query: string | null) => void;
+  onQueryChange: (
+    query: string | null,
+    trigger: PromptMentionCommandTrigger | null,
+  ) => void;
+  onEditorFocus?: () => void;
 }
 
-/**
- * Generalized composer typeahead config covering both trigger kinds. `@`
- * mentions are always available; commands are active only when
- * `command.trigger` is non-null. Hosts supply both halves; the composer picks
- * the active trigger from the caret and renders the matching data source.
- */
 export interface TypeaheadConfig {
   mention: TypeaheadMentionConfig;
   command: TypeaheadCommandConfig;
 }
 
-/**
- * Inert command half: no trigger, no suggestions, no-op query change. Hosts use
- * it as `typeahead.command` until they wire real command data from
- * `useCommandSuggestions`. With `trigger: null` the composer never activates a
- * command trigger, so the rest of the fields are never read.
- */
 export const INERT_TYPEAHEAD_COMMAND_CONFIG: TypeaheadCommandConfig = {
-  trigger: null,
+  triggers: [],
   suggestions: [],
   isLoading: false,
   isError: false,
@@ -298,14 +415,7 @@ export interface AttachmentsConfig {
   projectId?: string;
 }
 
-export interface PromptBoxZenModeConfig {
-  layout?: ZenModeLayout;
-  storageKey?: string | null;
-  resetKey?: string | number;
-  resetOnSubmit?: boolean;
-}
-
-export interface PromptBoxCompactConfig {
+interface PromptBoxCompactConfig {
   isCompact: boolean;
   placeholder?: string;
 }
@@ -317,11 +427,12 @@ export interface HistoryConfig {
   resetKey?: string | number;
 }
 
-export type PromptVoiceState = "idle" | "recording" | "transcribing" | "error";
+type PromptVoiceState = "idle" | "recording" | "transcribing" | "error";
 
 export interface PromptVoiceConfig {
   state: PromptVoiceState;
   isSupported: boolean;
+  unsupportedReason?: VoiceUnsupportedReason | null;
   stream: MediaStream | null;
   start: () => void | Promise<void>;
   stop: () => void;
@@ -329,15 +440,10 @@ export interface PromptVoiceConfig {
 }
 
 export interface PromptBoxHandle {
-  /** Focus the editor and move the caret to the end. */
   focusEnd: () => void;
-  /** Capture the current card height before a controlled layout change. */
   captureHeightForLayoutChange: () => void;
-  /** Insert text at the editor's current cursor position, with smart spacing. */
   insertTextAtCursor: (text: string) => void;
-  /** Return the trimmed text before the cursor, used as voice transcript context. */
   getTextBeforeCursor: () => string | undefined;
-  /** Exit the voice controls before inserting a completed transcript. */
   playVoiceCompletionTransition: () => Promise<void>;
 }
 
@@ -345,70 +451,37 @@ export type { PromptBoxAction } from "./PromptBoxActionsMenu";
 
 export type MentionMenuPlacement = "top" | "bottom";
 
-export interface PromptBoxInternalProps {
+interface PromptBoxInternalProps {
   id?: string;
   value: string;
   mentionRanges: readonly PromptTextMention[];
   onChange: (value: string, mentionRanges: PromptTextMention[]) => void;
   onSubmit: () => void;
-  /** Blur the editor after a pointer-activated primary submission. */
+  onEscape?: () => void;
   blurOnPointerSubmit?: boolean;
   placeholder?: string;
-  /**
-   * Whether the editor should take passive focus when it mounts or its history
-   * scope changes. Explicit clicks and focus commands remain available.
-   */
   autoFocus?: boolean;
-  className?: string;
-  /** Plugin-owned whole-draft paint sources, in deterministic composition order. */
+  allowSoftKeyboardAutoFocus?: boolean;
   textEffects?: readonly ComposerTextEffectSource[];
-  /** Publishes the editor-owned layout to the concrete composer shell. */
   onComposerLayoutChange?: (layout: ComposerView["layout"]) => void;
-  /** Content rendered inside the prompt box card, above the text area. Use
-   * for prominent context that should be impossible to miss — e.g. a
-   * "Reusing existing worktree" banner when env mode is set to reuse. */
   header?: ReactNode;
+  modeHeader?: ReactNode;
   footerStart?: ReactNode;
   submission?: PromptBoxSubmissionConfig;
-  /**
-   * Minimum textarea height in pixels. Defaults to PROMPTBOX_MIN_HEIGHT.
-   * Callers may pass a smaller value to make room for siblings that grow
-   * above the textarea (see FollowUpPromptBox's elastic compensation for
-   * the context banner stack) — total prompt-area height stays constant.
-   */
   minHeight?: number;
   typeahead: TypeaheadConfig;
-  /**
-   * Where the typeahead menu floats relative to the prompt box.
-   * "top" floats it above (used by FollowUp where the prompt sits at the
-   * bottom of the thread), "bottom" floats it below (used by NewThread
-   * where the prompt sits at the top of the project view).
-   */
   mentionMenuPlacement: MentionMenuPlacement;
   attachments?: AttachmentsConfig;
   promptActions?: readonly PromptBoxAction[];
-  /** Suppress plugin composer regions without unmounting the editor. */
   suppressPluginComposerCustomizations?: boolean;
-  zenMode?: PromptBoxZenModeConfig;
-  /** Optional one-line presentation for unfocused mobile follow-up composers. */
+  editorLayout?: ComposerEditorLayout;
+  onCollapse?: () => void;
   compact?: PromptBoxCompactConfig;
-  /** Compact placeholder used when a follow-up composer is narrowed by its container. */
   containerCompactPlaceholder?: string;
-  /**
-   * Changing this after captureHeightForLayoutChange() animates a layout
-   * change that is driven outside this component, such as a container query.
-   */
   heightAnimationKey?: string | number;
   history?: HistoryConfig;
-  /** When omitted, the mic button is hidden. Wrappers wire this via usePromptVoice. */
   voice?: PromptVoiceConfig;
   promptBoxRef?: Ref<PromptBoxHandle>;
-  /**
-   * Changing this re-focuses the editor caret to the end. Used by explicit
-   * draft-restore actions (e.g. editing a queued message) so the user can type
-   * immediately. Unlike the scope autofocus it fires even on coarse pointers,
-   * since it follows a deliberate click.
-   */
   focusEndKey?: string | number;
 }
 
@@ -436,11 +509,6 @@ interface ParsedRichClipboardValue {
   hasMentions: boolean;
   value: PromptEditorValue;
 }
-
-type ZenModeUpdate =
-  | boolean
-  | typeof RESET
-  | ((previous: boolean) => boolean | typeof RESET);
 
 type PromptBoxMouseDownEvent = ReactMouseEvent<HTMLFormElement>;
 
@@ -470,22 +538,33 @@ const PROMPTBOX_INTERACTIVE_TARGET_SELECTOR = [
   "[role='option']",
 ].join(",");
 
-function createTransientZenModeAtom() {
-  const baseAtom = atom(false);
-  return atom(
-    (get) => get(baseAtom),
-    (get, set, update: ZenModeUpdate) => {
-      const currentValue = get(baseAtom);
-      const nextValue =
-        typeof update === "function" ? update(currentValue) : update;
-
-      set(baseAtom, nextValue === RESET ? false : nextValue);
-    },
-  );
-}
-
-function promptEditorValueKey(value: PromptEditorValueKey): string {
-  return JSON.stringify(value);
+export function arePromptEditorValuesEqual(
+  left: PromptEditorValueKey | null,
+  right: PromptEditorValueKey,
+): boolean {
+  if (left === null) return false;
+  if (left.text !== right.text) return false;
+  if (left.mentions === right.mentions) return true;
+  if (left.mentions.length !== right.mentions.length) return false;
+  for (let index = 0; index < left.mentions.length; index += 1) {
+    const leftMention = left.mentions[index]!;
+    const rightMention = right.mentions[index]!;
+    if (leftMention === rightMention) continue;
+    if (
+      leftMention.start !== rightMention.start ||
+      leftMention.end !== rightMention.end
+    ) {
+      return false;
+    }
+    if (
+      leftMention.resource !== rightMention.resource &&
+      JSON.stringify(leftMention.resource) !==
+        JSON.stringify(rightMention.resource)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function normalizePastedPlainText(text: string): string {
@@ -629,7 +708,24 @@ function promptEditorValueFromRichHtml(html: string): ParsedRichClipboardValue {
   const document = new DOMParser().parseFromString(html, "text/html");
   let text = "";
   let hasMentions = false;
+  let listMarkerPending = false;
   const mentions: PromptTextMention[] = [];
+
+  const flushListMarker = () => {
+    if (!listMarkerPending) {
+      return;
+    }
+    listMarkerPending = false;
+    text += RICH_PASTE_LIST_MARKER;
+  };
+
+  const appendText = (appendedText: string) => {
+    if (appendedText.length === 0) {
+      return;
+    }
+    flushListMarker();
+    text += appendedText;
+  };
 
   const appendNewline = () => {
     text = text.replace(/[ \t]+$/u, "");
@@ -641,12 +737,15 @@ function promptEditorValueFromRichHtml(html: string): ParsedRichClipboardValue {
   const appendCollapsedText = (rawText: string) => {
     const collapsedText = rawText.replace(/\s+/gu, " ");
     if (collapsedText.trim().length === 0) {
+      if (listMarkerPending) {
+        return;
+      }
       if (text.length > 0 && !/[\s]$/u.test(text)) {
-        text += " ";
+        appendText(" ");
       }
       return;
     }
-    text += collapsedText;
+    appendText(collapsedText);
   };
 
   const appendClipboardMention = (element: Element): boolean => {
@@ -655,8 +754,9 @@ function promptEditorValueFromRichHtml(html: string): ParsedRichClipboardValue {
       return false;
     }
 
+    flushListMarker();
     const start = text.length;
-    text += payload.serializedText;
+    appendText(payload.serializedText);
     mentions.push({
       start,
       end: text.length,
@@ -676,7 +776,7 @@ function promptEditorValueFromRichHtml(html: string): ParsedRichClipboardValue {
     if (node.nodeType === Node.TEXT_NODE) {
       const rawText = node.textContent ?? "";
       if (preserveWhitespace) {
-        text += normalizePastedPlainText(rawText);
+        appendText(normalizePastedPlainText(rawText));
         return;
       }
       appendCollapsedText(rawText);
@@ -701,14 +801,15 @@ function promptEditorValueFromRichHtml(html: string): ParsedRichClipboardValue {
     }
     if (tagName === "PRE") {
       appendNewline();
-      text += normalizePastedPlainText(node.textContent ?? "");
+      appendText(normalizePastedPlainText(node.textContent ?? ""));
       appendNewline();
       return;
     }
     if (tagName === "LI") {
       appendNewline();
-      text += "- ";
+      listMarkerPending = true;
       visitChildren(node, preserveWhitespace);
+      listMarkerPending = false;
       appendNewline();
       return;
     }
@@ -796,7 +897,7 @@ function revealPromptEditorSelection({
 
   let selectionRect: ReturnType<Editor["view"]["coordsAtPos"]>;
   try {
-    selectionRect = editor.view.coordsAtPos(editor.state.selection.to);
+    selectionRect = editor.view.coordsAtPos(editor.state.selection.head);
   } catch {
     return;
   }
@@ -1055,13 +1156,6 @@ export function suppressPromptEditorAnchorActivation(event: Event): boolean {
   return true;
 }
 
-// TipTap's `blur` command defers to the next animation frame, so blur the
-// editor DOM directly and drop the caret with it.
-function blurPromptEditor(editor: Editor | null | undefined): void {
-  editor?.view.dom.blur();
-  window.getSelection()?.removeAllRanges();
-}
-
 function focusEditorAtEnd(editor: Editor): void {
   const transaction = editor.state.tr
     .setSelection(TextSelection.atEnd(editor.state.doc))
@@ -1084,11 +1178,6 @@ function isIPadOSWebKit(): boolean {
   return isAppleWebKit && isIPad;
 }
 
-/**
- * Holds the keydown events that the iPadOS hook refused as an IME candidate
- * confirmation, so the normal key handler refuses them too. The set is keyed on
- * the event object, so entries disappear with the events themselves.
- */
 function usePostCompositionKeyDownEvents(): WeakSet<KeyboardEvent> {
   const ref = useRef<WeakSet<KeyboardEvent> | null>(null);
   ref.current ??= new WeakSet<KeyboardEvent>();
@@ -1108,13 +1197,15 @@ export function PromptBoxInternal({
   mentionRanges,
   onChange,
   onSubmit,
+  onEscape,
   blurOnPointerSubmit = false,
   placeholder = "Ask anything. @ to mention files, folders, or sections",
   autoFocus = true,
-  className,
+  allowSoftKeyboardAutoFocus = false,
   textEffects,
   onComposerLayoutChange,
   header,
+  modeHeader,
   footerStart,
   submission = {},
   minHeight = PROMPTBOX_MIN_HEIGHT,
@@ -1123,7 +1214,8 @@ export function PromptBoxInternal({
   attachments: attachmentConfig = {},
   promptActions,
   suppressPluginComposerCustomizations = false,
-  zenMode = {},
+  editorLayout = "thread",
+  onCollapse,
   compact,
   containerCompactPlaceholder,
   heightAnimationKey,
@@ -1136,6 +1228,9 @@ export function PromptBoxInternal({
   const {
     isSubmitting = false,
     disabled: submitDisabled = false,
+    disabledReason: submitDisabledReason,
+    label: submitLabel,
+    icon: submitIcon,
     title: submitTitle = "Submit (Enter)",
     isRunning = false,
     onStop,
@@ -1143,19 +1238,24 @@ export function PromptBoxInternal({
   } = submission;
   const {
     triggers: mentionTriggerChars = DEFAULT_TYPEAHEAD_MENTION_TRIGGERS,
-    suggestions: mentionSuggestions,
+    results: mentionResults,
     isLoading: mentionLoading,
     isError: mentionError,
     onQueryChange: onMentionQueryChange,
     resolveLink: mentionResolveLink,
   } = typeahead.mention;
   const {
-    trigger: commandTriggerChar,
+    triggers: commandTriggerChars,
     suggestions: commandSuggestions,
     isLoading: commandLoading,
     isError: commandError,
     onQueryChange: onCommandQueryChange,
+    onEditorFocus: onCommandEditorFocus,
   } = typeahead.command;
+  const onCommandEditorFocusRef = useRef(onCommandEditorFocus);
+  useEffect(() => {
+    onCommandEditorFocusRef.current = onCommandEditorFocus;
+  }, [onCommandEditorFocus]);
   const {
     items: attachments = [],
     isAttaching = false,
@@ -1164,22 +1264,16 @@ export function PromptBoxInternal({
     onRemove: onRemoveAttachment,
     projectId: attachmentProjectId,
   } = attachmentConfig;
-  const {
-    layout: zenModeLayout = "thread",
-    storageKey: zenModeStorageKey,
-    resetKey: zenModeResetKey,
-    resetOnSubmit: resetZenModeOnSubmit = false,
-  } = zenMode;
   const isPointerCoarse = usePointerCoarse();
-  // Legacy iPads report an iPad platform; current iPadOS WebKit uses a
-  // desktop-like MacIntel platform with touch points distinguishing it from
-  // macOS. The value is stable for the lifetime of the page, so it does not
-  // need another media-query listener.
   const isIPadOSWebKitDevice = useMemo(isIPadOSWebKit, []);
   const editorEnterKeyHint = isPointerCoarse ? "enter" : "send";
-  // Passive text autofocus opens the soft keyboard on coarse-pointer devices.
-  const shouldAvoidSoftKeyboardAutofocus = isPointerCoarse;
+  const shouldAvoidSoftKeyboardAutofocus =
+    isPointerCoarse && !allowSoftKeyboardAutoFocus;
   const formRef = useRef<HTMLFormElement>(null);
+  const typeaheadMenuRef = useRef<HTMLDivElement>(null);
+  const reportQueuedEditorTypeaheadLayout = useContext(
+    QueuedEditorTypeaheadLayoutContext,
+  );
   const blurAfterPointerSubmitRef = useRef(false);
   const heightAnimationFromRef = useRef<number | null>(null);
   const capturePromptBoxHeight = useCallback(() => {
@@ -1211,7 +1305,7 @@ export function PromptBoxInternal({
   const mentionRangesRef = useRef<readonly PromptTextMention[]>(mentionRanges);
   const placeholderRef = useRef(placeholder);
   const skipEditorChangeRef = useRef(false);
-  const editorValueKeyRef = useRef("");
+  const lastSyncedEditorValueRef = useRef<PromptEditorValueKey | null>(null);
   const triggerKeyRef = useRef("");
   const handleEditorKeyDownRef = useRef<
     (event: KeyboardEvent, isOriginalIPadHardwareEnter?: boolean) => boolean
@@ -1219,11 +1313,6 @@ export function PromptBoxInternal({
   const compositionEndedAtRef = useRef(Number.NEGATIVE_INFINITY);
   const postCompositionKeyDownEvents = usePostCompositionKeyDownEvents();
   const dispatchAppCommandKey = useAppCommandKeyDispatch();
-  // The TipTap editor is created once; its `onUpdate`/`onSelectionUpdate`/click
-  // handlers close over the first `syncTriggerState`. `syncTriggerState`
-  // depends on the active trigger set, which changes when the thread's provider
-  // (command trigger) changes — so route those handlers through a ref kept
-  // pointed at the latest closure, mirroring `handleEditorKeyDownRef`.
   const syncTriggerStateRef = useRef<(editor: Editor) => void>(() => {});
   const onAttachFilesRef = useRef(onAttachFiles);
   const dismissedTriggerRef = useRef<DismissedTriggerRange | null>(null);
@@ -1231,7 +1320,9 @@ export function PromptBoxInternal({
   const [activeTrigger, setActiveTrigger] = useState<ActiveTrigger | null>(
     null,
   );
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedSuggestionKey, setSelectedSuggestionKey] = useState<
+    string | null
+  >(null);
   const [expandedImageIndex, setExpandedImageIndex] = useState<number | null>(
     null,
   );
@@ -1242,27 +1333,10 @@ export function PromptBoxInternal({
     useState<PromptDraftState | null>(null);
   const [recalledHistoryDraft, setRecalledHistoryDraft] =
     useState<PromptDraftState | null>(null);
-  const resolvedZenModeStorageKey =
-    zenModeStorageKey ?? ZEN_MODE_STORAGE_KEY[zenModeLayout];
-  const zenModeAtom = useMemo(
-    () =>
-      resolvedZenModeStorageKey
-        ? atomWithStorage<boolean>(
-            resolvedZenModeStorageKey,
-            false,
-            createJsonLocalStorage<boolean>(),
-            {
-              getOnInit: true,
-            },
-          )
-        : createTransientZenModeAtom(),
-    [resolvedZenModeStorageKey],
-  );
-  const [isZenMode, setIsZenMode] = useAtom(zenModeAtom);
+  const hasActiveHistorySessionRef = useRef(false);
   const isVoiceRecording = voice?.state === "recording";
   const isVoiceProcessing = voice?.state === "transcribing";
   const showVoiceActionGroup = isVoiceRecording || isVoiceProcessing;
-  const isVoiceBusy = showVoiceActionGroup;
   const voiceActionState = isVoiceRecording
     ? "recording"
     : isVoiceProcessing
@@ -1306,7 +1380,7 @@ export function PromptBoxInternal({
 
     if (showVoiceActionGroup) {
       setIsVoiceActionPresent(true);
-      if (wasVoiceActionShown || prefersReducedMotion()) {
+      if (wasVoiceActionShown || getMediaQuerySnapshot(REDUCED_MOTION_QUERY)) {
         setVoiceActionTransition("active");
         return;
       }
@@ -1323,7 +1397,7 @@ export function PromptBoxInternal({
       setIsVoiceActionPresent(false);
       return;
     }
-    if (prefersReducedMotion()) {
+    if (getMediaQuerySnapshot(REDUCED_MOTION_QUERY)) {
       setIsVoiceActionPresent(false);
       return;
     }
@@ -1382,9 +1456,8 @@ export function PromptBoxInternal({
     voiceCompletionPromiseRef.current = transition;
     return transition;
   }, []);
-  const showZenLayout = isZenMode;
   const showCompactLayout =
-    compact?.isCompact === true && !showVoiceActionGroup && !isZenMode;
+    compact?.isCompact === true && !showVoiceActionGroup;
   const effectivePlaceholder = showCompactLayout
     ? (compact.placeholder ?? placeholder)
     : placeholder;
@@ -1392,16 +1465,9 @@ export function PromptBoxInternal({
   const composerInputLocked = useComposerInputLock(
     pluginComposerHost?.textEffectKey ?? null,
   );
-  const composerLayout = showCompactLayout
-    ? "compact"
-    : showZenLayout
-      ? "zen"
-      : "expanded";
+  const composerLayout = showCompactLayout ? "compact" : "expanded";
   const localComposerView = usePluginComposerViewModel({
-    scope: pluginComposerHost?.scope ?? {
-      kind: "new-thread",
-      projectId: null,
-    },
+    scope: pluginComposerHost?.scope ?? DEFAULT_COMPOSER_SCOPE,
     layout: composerLayout,
     text: value,
     attachmentCount: attachments.length,
@@ -1513,35 +1579,37 @@ export function PromptBoxInternal({
     };
   }, []);
 
-  // Active trigger set: mention triggers are always watched; the provider's
-  // command trigger joins them when present.
   const triggers = useMemo<TypeaheadTrigger[]>(() => {
     const mentionTriggers = mentionTriggerChars.map((char) => ({
       char,
       kind: "mention" as const,
     }));
-    if (commandTriggerChar === null) {
+    if (commandTriggerChars.length === 0) {
       return mentionTriggers;
     }
-    return [...mentionTriggers, { char: commandTriggerChar, kind: "command" }];
-  }, [commandTriggerChar, mentionTriggerChars]);
+    return [
+      ...mentionTriggers,
+      ...commandTriggerChars.map((char) => ({
+        char,
+        kind: "command" as const,
+      })),
+    ];
+  }, [commandTriggerChars, mentionTriggerChars]);
 
-  // Fan the active query out to the matching data source and null the other,
-  // so switching from `@foo` to `/bar` (or vice versa) clears the stale query.
   const dispatchTriggerQuery = useCallback(
     (active: ActiveTrigger | null) => {
       if (active?.kind === "mention") {
         onMentionQueryChange(active.query, active.char);
-        onCommandQueryChange(null);
+        onCommandQueryChange(null, null);
         return;
       }
       if (active?.kind === "command") {
-        onCommandQueryChange(active.query);
+        onCommandQueryChange(active.query, active.char);
         onMentionQueryChange(null, null);
         return;
       }
       onMentionQueryChange(null, null);
-      onCommandQueryChange(null);
+      onCommandQueryChange(null, null);
     },
     [onCommandQueryChange, onMentionQueryChange],
   );
@@ -1549,11 +1617,21 @@ export function PromptBoxInternal({
   const syncTriggerState = useCallback(
     (editor: Editor) => {
       const caretPosition = editor.state.selection.from;
-      const dismissedTrigger = dismissedTriggerRef.current;
+      let dismissedTrigger = dismissedTriggerRef.current;
       const isRestoringAppliedMention =
         isRestoringAppliedMentionRef.current && dismissedTrigger !== null;
-
+      const detectedTrigger = findActiveTrigger(editor, triggers);
       if (dismissedTrigger && !isRestoringAppliedMention) {
+        if (
+          !dismissedTrigger.hasLeftRange &&
+          detectedTrigger?.from === dismissedTrigger.start
+        ) {
+          dismissedTrigger = {
+            ...dismissedTrigger,
+            end: Math.max(dismissedTrigger.end, caretPosition),
+          };
+          dismissedTriggerRef.current = dismissedTrigger;
+        }
         const isWithinDismissedRange =
           caretPosition >= dismissedTrigger.start &&
           caretPosition <= dismissedTrigger.end;
@@ -1576,15 +1654,13 @@ export function PromptBoxInternal({
             caretPosition <= dismissedTriggerRef.current.end)),
       );
 
-      const nextTrigger = shouldSuppressTrigger
-        ? null
-        : findActiveTrigger(editor, triggers);
+      const nextTrigger = shouldSuppressTrigger ? null : detectedTrigger;
       const nextKey = nextTrigger
         ? `${nextTrigger.kind}:${nextTrigger.from}:${nextTrigger.to}:${nextTrigger.query}`
         : "";
       if (nextKey !== triggerKeyRef.current) {
         triggerKeyRef.current = nextKey;
-        setSelectedIndex(0);
+        setSelectedSuggestionKey(null);
       }
       setActiveTrigger(nextTrigger);
 
@@ -1597,10 +1673,6 @@ export function PromptBoxInternal({
     syncTriggerStateRef.current = syncTriggerState;
   }, [syncTriggerState]);
 
-  // Markdown rich-text formatting (headings/lists/marks + their live input
-  // rules) is opt-in; the default-OFF preference keeps the prompt box plain
-  // text. Toggling rebuilds the editor (see the `[richTextEditing]` deps below)
-  // so the schema and input rules switch immediately.
   const [richTextEditing] = useRichTextEditingPreference();
   const editorExtensions = useMemo(
     () =>
@@ -1613,22 +1685,32 @@ export function PromptBoxInternal({
     [richTextEditing],
   );
 
+  const initialEditorContent = useMemo(() => {
+    const initialValue: PromptEditorValueKey = {
+      text: value,
+      mentions: mentionRanges,
+    };
+    return {
+      value: initialValue,
+      content: promptEditorContentFromValue(initialValue, {
+        richTextMarkdown: richTextEditing,
+      }),
+    };
+    // oxlint-disable-next-line react/exhaustive-deps -- value/mentionRanges are read once per editor instance on purpose (see above).
+  }, [richTextEditing]);
+
   const editor = useEditor(
     {
       extensions: editorExtensions,
-      content: promptEditorContentFromValue(
-        {
-          text: value,
-          mentions: mentionRanges,
-        },
-        { richTextMarkdown: richTextEditing },
-      ),
+      content: initialEditorContent.content,
       immediatelyRender: false,
       editorProps: {
         attributes: {
           "aria-label": effectivePlaceholder,
           "data-placeholder": effectivePlaceholder,
-          ...(onModifierSubmit ? { "aria-keyshortcuts": "Meta+Enter" } : {}),
+          ...(onModifierSubmit
+            ? { "aria-keyshortcuts": modifierSubmitShortcutAria() }
+            : {}),
           autocomplete: "off",
           class: cn(
             "min-h-full whitespace-pre-wrap break-words outline-none",
@@ -1644,6 +1726,10 @@ export function PromptBoxInternal({
           auxclick: (_view, event) => {
             return suppressPromptEditorAnchorActivation(event);
           },
+          focus: () => {
+            onCommandEditorFocusRef.current?.();
+            return false;
+          },
           blur: () => {
             triggerKeyRef.current = "";
             if (dismissedTriggerRef.current) {
@@ -1654,7 +1740,7 @@ export function PromptBoxInternal({
             }
             setActiveTrigger(null);
             onMentionQueryChange(null, null);
-            onCommandQueryChange(null);
+            onCommandQueryChange(null, null);
             return false;
           },
           cut: () => {
@@ -1666,10 +1752,6 @@ export function PromptBoxInternal({
             return false;
           },
           compositionend: (_view, event) => {
-            // ProseMirror records this timestamp only while it considers
-            // itself composing. Record it on the same condition, or a
-            // `compositionend` outside a composition would suppress a real
-            // Magic Keyboard Enter for the next 500 ms.
             if (!_view.composing) return false;
             compositionEndedAtRef.current = event.timeStamp;
             return false;
@@ -1686,10 +1768,6 @@ export function PromptBoxInternal({
               return false;
             }
 
-            // Match ProseMirror's Safari compositionend -> keydown safeguard.
-            // This custom DOM hook runs before ProseMirror's own keydown
-            // handler, so bypassing it here would otherwise submit an IME
-            // candidate confirmation.
             if (
               Math.abs(event.timeStamp - compositionEndedAtRef.current) <
               SAFARI_POST_COMPOSITION_KEYDOWN_WINDOW_MS
@@ -1699,20 +1777,6 @@ export function PromptBoxInternal({
               return false;
             }
 
-            // ProseMirror delays iOS Enter handling and later passes a
-            // synthetic Enter to handleKeyDown so the software keyboard can
-            // finish its DOM mutation. Only on the affected iPadOS WebKit path
-            // do we use the original event's physical code to handle a Magic
-            // Keyboard Enter before that fallback. Other platforms, including
-            // Android and coarse-pointer hybrids, stay entirely on
-            // ProseMirror's normal path.
-            //
-            // A handled event stops ProseMirror's own `keydown` handler, which
-            // is also where ProseMirror flushes its DOM observer. That is safe
-            // here: every deferred-flush path in ProseMirror needs either IE11
-            // or an active composition, and the composition check above already
-            // excludes the second one. So the observer has flushed already and
-            // the submit reads a current document.
             return handleEditorKeyDownRef.current(event, true);
           },
           click: (_view, event) => {
@@ -1739,7 +1803,6 @@ export function PromptBoxInternal({
           if (attachFiles && pastedFiles.length > 0) {
             event.preventDefault();
             void attachFiles(pastedFiles);
-            return true;
           }
 
           const plainText = event.clipboardData?.getData("text/plain") ?? "";
@@ -1758,12 +1821,17 @@ export function PromptBoxInternal({
               promptEditorContentFromValue(pastedValue, {
                 richTextMarkdown: richTextEditing,
               }).content ?? [];
-            currentEditor?.chain().focus().insertContent(pastedContent).run();
+            currentEditor
+              ?.chain()
+              .focus()
+              .insertContent(pastedContent)
+              .setMeta("uiEvent", "paste")
+              .run();
             if (currentEditor && !currentEditor.isDestroyed) {
               const nextValue = trimTrailingPromptNewlines(
                 promptEditorValueFromDoc(currentEditor.state.doc),
               );
-              editorValueKeyRef.current = promptEditorValueKey(nextValue);
+              lastSyncedEditorValueRef.current = nextValue;
               onChangeRef.current(nextValue.text, nextValue.mentions);
             }
             return true;
@@ -1773,7 +1841,9 @@ export function PromptBoxInternal({
             event.clipboardData ?? null,
             promptActions,
           );
-          if (pastedValue === null) return false;
+          if (pastedValue === null) {
+            return attachFiles !== undefined && pastedFiles.length > 0;
+          }
 
           event.preventDefault();
           if (pastedValue.text.length === 0) return true;
@@ -1782,39 +1852,55 @@ export function PromptBoxInternal({
             ?.chain()
             .focus()
             .insertContent(promptEditorInlineContentFromValue(pastedValue))
+            .setMeta("uiEvent", "paste")
             .run();
           return true;
         },
       },
       onCreate({ editor: createdEditor }) {
         editorRef.current = createdEditor;
-        editorValueKeyRef.current = promptEditorValueKey({
-          text: value,
-          mentions: mentionRanges,
-        });
+        lastSyncedEditorValueRef.current = initialEditorContent.value;
       },
-      onSelectionUpdate({ editor: updatedEditor }) {
+      onSelectionUpdate({ editor: updatedEditor, transaction }) {
+        if (transaction.docChanged) return;
         syncTriggerStateRef.current(updatedEditor);
         scheduleRevealEditorSelection();
       },
-      onUpdate({ editor: updatedEditor }) {
+      onUpdate({ editor: updatedEditor, transaction }) {
         if (skipEditorChangeRef.current) return;
+        const dismissedTrigger = dismissedTriggerRef.current;
+        if (
+          dismissedTrigger !== null &&
+          transaction.docChanged &&
+          !isRestoringAppliedMentionRef.current
+        ) {
+          const mappedStart = transaction.mapping.mapResult(
+            dismissedTrigger.start,
+            1,
+          );
+          dismissedTriggerRef.current = mappedStart.deleted
+            ? null
+            : {
+                ...dismissedTrigger,
+                start: mappedStart.pos,
+                end: transaction.mapping.map(dismissedTrigger.end, -1),
+              };
+        }
         const nextValue = promptEditorValueFromDoc(updatedEditor.state.doc);
-        editorValueKeyRef.current = promptEditorValueKey(nextValue);
+        lastSyncedEditorValueRef.current = nextValue;
         onChangeRef.current(nextValue.text, nextValue.mentions);
         syncTriggerStateRef.current(updatedEditor);
-        scheduleRevealEditorSelection();
+        if (transaction.getMeta("uiEvent") !== undefined) {
+          scheduleRevealEditorSelection();
+        }
       },
-      // Rebuild the editor when the rich-text preference toggles so the schema
-      // and input rules switch. The editor is otherwise created once; its
-      // handlers route through refs (above) to stay current without rebuilding.
     },
     [richTextEditing],
   );
 
   useEffect(() => {
     if (!editor || editor.isDestroyed) return;
-    const editable = !composerInputLocked && !isVoiceBusy;
+    const editable = !composerInputLocked && !showVoiceActionGroup;
     if (editor.isEditable !== editable) editor.setEditable(editable);
     editor.view.dom.tabIndex = editable ? 0 : -1;
     if (editable) {
@@ -1822,7 +1908,7 @@ export function PromptBoxInternal({
     } else {
       editor.view.dom.setAttribute("aria-readonly", "true");
     }
-  }, [composerInputLocked, editor, isVoiceBusy]);
+  }, [composerInputLocked, editor, showVoiceActionGroup]);
 
   useEffect(() => {
     editorRef.current = editor;
@@ -1901,10 +1987,14 @@ export function PromptBoxInternal({
       text: value,
       mentions: mentionRanges,
     };
-    const nextKey = promptEditorValueKey(nextValue);
-    if (nextKey === editorValueKeyRef.current) {
+    if (
+      arePromptEditorValuesEqual(lastSyncedEditorValueRef.current, nextValue)
+    ) {
       return;
     }
+
+    dismissedTriggerRef.current = null;
+    triggerKeyRef.current = "";
 
     try {
       skipEditorChangeRef.current = true;
@@ -1913,7 +2003,7 @@ export function PromptBoxInternal({
           richTextMarkdown: richTextEditing,
         }),
       );
-      editorValueKeyRef.current = nextKey;
+      lastSyncedEditorValueRef.current = nextValue;
     } finally {
       skipEditorChangeRef.current = false;
     }
@@ -1928,13 +2018,6 @@ export function PromptBoxInternal({
     value,
   ]);
 
-  // An explicit draft-restore action (e.g. editing a queued message) bumps
-  // `focusEndKey` so the caret lands at the END of the restored text. It is a
-  // layout effect defined AFTER the layout content-sync effect above, so the
-  // editor has already applied `setContent` for the new draft in the same
-  // commit. Mobile web deliberately does not take focus here: an action that
-  // opens or updates a composer must not summon the soft keyboard over the
-  // destination surface.
   const lastFocusEndKeyRef = useRef(focusEndKey);
   useLayoutEffect(() => {
     if (focusEndKey === undefined) return;
@@ -1949,20 +2032,13 @@ export function PromptBoxInternal({
     scheduleRevealEditorSelection();
   }, [editor, focusEndKey, isPointerCoarse, scheduleRevealEditorSelection]);
 
-  useEffect(() => {
-    if (zenModeResetKey === undefined) return;
-    if (resolvedZenModeStorageKey) {
-      setIsZenMode(RESET);
-      return;
-    }
-    setIsZenMode(false);
-  }, [resolvedZenModeStorageKey, setIsZenMode, zenModeResetKey]);
-
   useLayoutEffect(() => {
     scheduleRevealEditorSelection();
-  }, [isZenMode, minHeight, scheduleRevealEditorSelection]);
+  }, [minHeight, scheduleRevealEditorSelection]);
 
   const resetHistorySession = useCallback(() => {
+    if (!hasActiveHistorySessionRef.current) return;
+    hasActiveHistorySessionRef.current = false;
     setActiveHistoryIndex(null);
     setTemporaryHistoryDraft(null);
     setRecalledHistoryDraft(null);
@@ -2027,9 +2103,6 @@ export function PromptBoxInternal({
     }
     formElement.style.height = `${fromHeight}px`;
     formElement.getBoundingClientRect();
-    // The next layout is already mounted while the card still has its old
-    // height. Clip it for the whole tween so footer controls are revealed by
-    // the moving border instead of briefly painting outside the card.
     formElement.style.overflow = "hidden";
     formElement.style.willChange = "height";
     formElement.style.transition =
@@ -2055,7 +2128,7 @@ export function PromptBoxInternal({
     formElement.addEventListener("transitionend", handleTransitionEnd);
 
     return cleanup;
-  }, [heightAnimationKey, isZenMode, showCompactLayout, zenModeLayout]);
+  }, [heightAnimationKey, showCompactLayout]);
 
   const trimmedValue = value.trim();
   const hasAttachments = attachments.length > 0;
@@ -2072,26 +2145,29 @@ export function PromptBoxInternal({
       isError: commandError,
       isLoadingMore: commandIsLoadingMore,
     });
-  // Ranked against the query the user can actually see in the composer, so the
-  // exact-name match this ordering hoists is the one the caret spells out.
   const activeCommandQuery =
     activeTrigger?.kind === "command" ? activeTrigger.query : "";
   const orderedCommandSuggestions = useMemo(
     () => orderCommandSuggestions(commandSuggestions, activeCommandQuery),
     [activeCommandQuery, commandSuggestions],
   );
-  // The suggestion list driving keyboard nav + Enter/Tab apply for whichever
-  // trigger is active. Empty when no trigger is open. Memoized so the keyboard
-  // handler's useCallback identity is stable across renders.
   const activeSuggestions = useMemo<readonly TypeaheadSuggestion[]>(
     () =>
       activeTriggerKind === "command"
         ? orderedCommandSuggestions
         : activeTriggerKind === "mention"
-          ? mentionSuggestions
+          ? mentionResults.suggestions
           : [],
-    [activeTriggerKind, mentionSuggestions, orderedCommandSuggestions],
+    [activeTriggerKind, mentionResults.suggestions, orderedCommandSuggestions],
   );
+  const selectedSuggestionIndex = useMemo(() => {
+    if (selectedSuggestionKey === null) return -1;
+    return activeSuggestions.findIndex(
+      (suggestion) =>
+        typeaheadSuggestionKey(suggestion) === selectedSuggestionKey,
+    );
+  }, [activeSuggestions, selectedSuggestionKey]);
+  const selectedIndex = Math.max(0, selectedSuggestionIndex);
 
   const activeMentionQuery =
     activeTrigger?.kind === "mention" ? activeTrigger.query.trim() : "";
@@ -2102,7 +2178,7 @@ export function PromptBoxInternal({
         ? { kind: "loading" }
         : mentionError
           ? { kind: "error" }
-          : { kind: "results", suggestions: mentionSuggestions };
+          : { kind: "results", results: mentionResults };
 
   const commandMenuState: CommandMenuState = commandLoading
     ? { kind: "loading" }
@@ -2110,9 +2186,6 @@ export function PromptBoxInternal({
       ? { kind: "error" }
       : { kind: "results", suggestions: orderedCommandSuggestions };
 
-  // Loaded-empty suppression (§6): a command trigger with zero loaded results
-  // (not loading, not error) is literal text — never open the menu. Mention
-  // triggers always open (they have a hint / "no matches" state).
   const isCommandTriggerLiteral =
     activeTriggerKind === "command" &&
     !commandLoading &&
@@ -2123,7 +2196,7 @@ export function PromptBoxInternal({
     activeTrigger.char !== DEFAULT_PLUGIN_MENTION_TRIGGER &&
     activeMentionQuery.length === 0;
   const showTypeaheadMenu =
-    !isVoiceBusy &&
+    !showVoiceActionGroup &&
     activeTrigger !== null &&
     !isCommandTriggerLiteral &&
     !isBareNonDefaultMentionTrigger;
@@ -2133,15 +2206,37 @@ export function PromptBoxInternal({
       ? { trigger: "command", state: commandMenuState }
       : { trigger: "mention", state: mentionMenuState };
 
-  useEffect(() => {
-    if (activeSuggestions.length === 0) {
-      setSelectedIndex(0);
+  useLayoutEffect(() => {
+    if (reportQueuedEditorTypeaheadLayout === null) return;
+    const menu = typeaheadMenuRef.current;
+    if (!showTypeaheadMenu || menu === null) {
+      reportQueuedEditorTypeaheadLayout({ height: 0, isOpen: false });
       return;
     }
-    if (selectedIndex >= activeSuggestions.length) {
-      setSelectedIndex(0);
+
+    const reportOpenLayout = () => {
+      reportQueuedEditorTypeaheadLayout({
+        height: menu.getBoundingClientRect().height,
+        isOpen: true,
+      });
+    };
+    reportOpenLayout();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(reportOpenLayout);
+    resizeObserver?.observe(menu);
+    return () => {
+      resizeObserver?.disconnect();
+      reportQueuedEditorTypeaheadLayout({ height: 0, isOpen: false });
+    };
+  }, [reportQueuedEditorTypeaheadLayout, showTypeaheadMenu]);
+
+  useEffect(() => {
+    if (selectedSuggestionKey !== null && selectedSuggestionIndex === -1) {
+      setSelectedSuggestionKey(null);
     }
-  }, [activeSuggestions.length, selectedIndex]);
+  }, [selectedSuggestionIndex, selectedSuggestionKey]);
 
   useEffect(() => {
     if (
@@ -2163,14 +2258,10 @@ export function PromptBoxInternal({
     selectedIndex,
   ]);
 
-  // After applying any suggestion the editor content changed outside React's
-  // controlled flow; emit the controlled change, then re-focus, re-sync the
-  // trigger state, and reveal the caret on the next frame. Shared by the
-  // mention and command apply paths.
   const finishApply = useCallback(
     (appliedEditor: Editor) => {
       const nextValue = promptEditorValueFromDoc(appliedEditor.state.doc);
-      editorValueKeyRef.current = promptEditorValueKey(nextValue);
+      lastSyncedEditorValueRef.current = nextValue;
       onChangeRef.current(nextValue.text, nextValue.mentions);
 
       requestAnimationFrame(() => {
@@ -2188,116 +2279,141 @@ export function PromptBoxInternal({
     [scheduleRevealEditorSelection, syncTriggerState],
   );
 
+  const insertPromptMentionPill = useCallback(
+    ({
+      editor: targetEditor,
+      range,
+      resource,
+      serializedText,
+      trailingText,
+      dismissedTrigger,
+      clearQuery,
+    }: {
+      editor: Editor;
+      range: { from: number; to: number };
+      resource: PromptMentionResource;
+      serializedText: string;
+      trailingText: string;
+      dismissedTrigger: DismissedTriggerRange | null;
+      clearQuery: () => void;
+    }) => {
+      triggerKeyRef.current = "";
+      dismissedTriggerRef.current = dismissedTrigger;
+      isRestoringAppliedMentionRef.current = true;
+      setActiveTrigger(null);
+      setSelectedSuggestionKey(null);
+      clearQuery();
+
+      try {
+        skipEditorChangeRef.current = true;
+        targetEditor
+          .chain()
+          .focus()
+          .deleteRange(range)
+          .insertContent([
+            {
+              type: "mention",
+              attrs: {
+                resource,
+                serializedText,
+              },
+            },
+            ...(trailingText ? [{ type: "text", text: trailingText }] : []),
+          ])
+          .run();
+      } finally {
+        skipEditorChangeRef.current = false;
+      }
+      finishApply(targetEditor);
+    },
+    [finishApply],
+  );
+
+  useEffect(() => {
+    const element = formRef.current;
+    if (!element || !editor) return;
+    return registerThreadMentionDropTarget(element, {
+      accepts: () => editor.isEditable && !editor.isDestroyed,
+      insert: (thread, x, y) => {
+        const position =
+          editor.view.posAtCoords({ left: x, top: y })?.pos ??
+          editor.state.selection.to;
+        insertPromptMentionPill({
+          editor,
+          range: { from: position, to: position },
+          resource: {
+            kind: "thread",
+            threadId: thread.threadId,
+            label: thread.label,
+          },
+          serializedText: `@thread:${thread.threadId}`,
+          trailingText: mentionPillTrailingText(editor.state.doc, position),
+          dismissedTrigger: null,
+          clearQuery: () => onMentionQueryChange(null, null),
+        });
+      },
+    });
+  }, [editor, insertPromptMentionPill, onMentionQueryChange]);
+
   const applyMentionSuggestion = useCallback(
     (item: PromptMentionSuggestion) => {
       const currentEditor = editorRef.current;
       if (!currentEditor || activeTrigger?.kind !== "mention") return;
 
       const replacement = item.replacement.trim();
-      const serializedText = replacement.startsWith(activeTrigger.char)
-        ? replacement
-        : `${activeTrigger.char}${replacement}`;
-      const resource = promptMentionResourceFromSuggestion(item);
-      const trailingText = hasWhitespaceAfterPosition(
-        currentEditor.state.doc,
-        activeTrigger.to,
-      )
-        ? ""
-        : " ";
-      triggerKeyRef.current = "";
-      // Mention dismissed-range basis is node width: trigger char + the 1-wide
-      // pill atom in the post-replacement doc (`from` → `from + 2`). Do not
-      // change — pill re-trigger suppression depends on it.
-      dismissedTriggerRef.current = {
-        start: activeTrigger.from,
-        end: activeTrigger.from + 2,
-        hasLeftRange: false,
-      };
-      isRestoringAppliedMentionRef.current = true;
-      setActiveTrigger(null);
-      setSelectedIndex(0);
-      onMentionQueryChange(null, null);
-
-      try {
-        skipEditorChangeRef.current = true;
-        currentEditor
-          .chain()
-          .focus()
-          .deleteRange({ from: activeTrigger.from, to: activeTrigger.to })
-          .insertContent([
-            {
-              type: "mention",
-              attrs: {
-                resource,
-                serializedText,
-              },
-            },
-            ...(trailingText ? [{ type: "text", text: trailingText }] : []),
-          ])
-          .run();
-      } finally {
-        skipEditorChangeRef.current = false;
-      }
-      finishApply(currentEditor);
+      insertPromptMentionPill({
+        editor: currentEditor,
+        range: { from: activeTrigger.from, to: activeTrigger.to },
+        resource: promptMentionResourceFromSuggestion(item),
+        serializedText: replacement.startsWith(activeTrigger.char)
+          ? replacement
+          : `${activeTrigger.char}${replacement}`,
+        trailingText: mentionPillTrailingText(
+          currentEditor.state.doc,
+          activeTrigger.to,
+        ),
+        dismissedTrigger: {
+          start: activeTrigger.from,
+          end: activeTrigger.from + 2,
+          hasLeftRange: false,
+        },
+        clearQuery: () => onMentionQueryChange(null, null),
+      });
     },
-    [activeTrigger, finishApply, onMentionQueryChange],
+    [activeTrigger, insertPromptMentionPill, onMentionQueryChange],
   );
 
   const applyCommandSuggestion = useCallback(
     (item: ProviderCommandSuggestion) => {
       const currentEditor = editorRef.current;
       if (!currentEditor || activeTrigger === null) return;
-      if (activeTrigger.char !== "/") return;
+      if (activeTrigger.kind !== "command") return;
 
-      const serializedText = `${activeTrigger.char}${item.name}`;
-      const resource = promptCommandResourceFromSuggestion({
-        suggestion: item,
-        trigger: activeTrigger.char,
-      });
-      const trailingText = hasWhitespaceAfterPosition(
+      const trailingText = mentionPillTrailingText(
         currentEditor.state.doc,
         activeTrigger.to,
-      )
-        ? ""
-        : " ";
-      triggerKeyRef.current = "";
-      // Argument hints render as placeholder decorations, not editor text.
-      dismissedTriggerRef.current = {
-        start: activeTrigger.from,
-        end: commandPillDismissedRangeEnd({
-          triggerPosition: activeTrigger.from,
-          trailingText,
+      );
+      insertPromptMentionPill({
+        editor: currentEditor,
+        range: { from: activeTrigger.from, to: activeTrigger.to },
+        resource: promptCommandResourceFromSuggestion({
+          suggestion: item,
+          trigger: activeTrigger.char,
         }),
-        hasLeftRange: false,
-      };
-      isRestoringAppliedMentionRef.current = true;
-      setActiveTrigger(null);
-      setSelectedIndex(0);
-      onCommandQueryChange(null);
-
-      try {
-        skipEditorChangeRef.current = true;
-        currentEditor
-          .chain()
-          .focus()
-          .deleteRange({ from: activeTrigger.from, to: activeTrigger.to })
-          .insertContent([
-            {
-              type: "mention",
-              attrs: {
-                resource,
-                serializedText,
-              },
-            },
-            ...(trailingText ? [{ type: "text", text: trailingText }] : []),
-          ])
-          .run();
-      } finally {
-        skipEditorChangeRef.current = false;
-      }
-      finishApply(currentEditor);
+        serializedText: `${activeTrigger.char}${item.name}`,
+        trailingText,
+        dismissedTrigger: {
+          start: activeTrigger.from,
+          end: commandPillDismissedRangeEnd({
+            triggerPosition: activeTrigger.from,
+            trailingText,
+          }),
+          hasLeftRange: false,
+        },
+        clearQuery: () => onCommandQueryChange(null, null),
+      });
     },
-    [activeTrigger, finishApply, onCommandQueryChange],
+    [activeTrigger, insertPromptMentionPill, onCommandQueryChange],
   );
 
   const applyTrigger = useCallback(
@@ -2310,6 +2426,20 @@ export function PromptBoxInternal({
     },
     [applyCommandSuggestion, applyMentionSuggestion],
   );
+
+  const dismissActiveTrigger = useCallback(() => {
+    triggerKeyRef.current = "";
+    if (activeTrigger) {
+      dismissedTriggerRef.current = {
+        start: activeTrigger.from,
+        end: activeTrigger.to,
+        hasLeftRange: false,
+      };
+    }
+    setActiveTrigger(null);
+    onMentionQueryChange(null, null);
+    onCommandQueryChange(null, null);
+  }, [activeTrigger, onCommandQueryChange, onMentionQueryChange]);
 
   const focusEnd = useCallback(() => {
     if (isPointerCoarse) {
@@ -2438,45 +2568,24 @@ export function PromptBoxInternal({
       }
 
       if (commandAction) {
-        triggerKeyRef.current = "";
-        dismissedTriggerRef.current = null;
-        isRestoringAppliedMentionRef.current = true;
-        setActiveTrigger(null);
-        setSelectedIndex(0);
-        onCommandQueryChange(null);
-
-        try {
-          skipEditorChangeRef.current = true;
-          currentEditor
-            .chain()
-            .focus()
-            .deleteRange({ from: insertionRange.from, to: insertionRange.to })
-            .insertContent([
-              {
-                type: "mention",
-                attrs: {
-                  resource: promptCommandResourceFromSuggestion({
-                    suggestion: commandAction.suggestion,
-                    trigger: commandAction.trigger,
-                  }),
-                  serializedText: commandAction.serializedText,
-                },
-              },
-              ...(commandAction.trailingText
-                ? [{ type: "text", text: commandAction.trailingText }]
-                : []),
-            ])
-            .run();
-        } finally {
-          skipEditorChangeRef.current = false;
-        }
-        finishApply(currentEditor);
+        insertPromptMentionPill({
+          editor: currentEditor,
+          range: { from: insertionRange.from, to: insertionRange.to },
+          resource: promptCommandResourceFromSuggestion({
+            suggestion: commandAction.suggestion,
+            trigger: commandAction.trigger,
+          }),
+          serializedText: commandAction.serializedText,
+          trailingText: commandAction.trailingText,
+          dismissedTrigger: null,
+          clearQuery: () => onCommandQueryChange(null, null),
+        });
         return;
       }
 
       triggerKeyRef.current = "";
       dismissedTriggerRef.current = null;
-      setSelectedIndex(0);
+      setSelectedSuggestionKey(null);
       currentEditor
         .chain()
         .focus()
@@ -2488,6 +2597,7 @@ export function PromptBoxInternal({
     [
       finishApply,
       focusAfterPromptAction,
+      insertPromptMentionPill,
       onCommandQueryChange,
       promptActions,
       triggers,
@@ -2526,23 +2636,55 @@ export function PromptBoxInternal({
   );
 
   const canSubmit =
-    hasSubmittableInput && !isSubmitting && !submitDisabled && !isVoiceBusy;
-  const canModifierSubmit =
-    onModifierSubmit !== undefined &&
+    hasSubmittableInput &&
+    !isAttaching &&
     !isSubmitting &&
     !submitDisabled &&
-    !isVoiceBusy;
-  const showStop = Boolean(isRunning && onStop && !canSubmit && !isVoiceBusy);
+    !showVoiceActionGroup;
+  const canModifierSubmit =
+    onModifierSubmit !== undefined &&
+    !isAttaching &&
+    !isSubmitting &&
+    !submitDisabled &&
+    !showVoiceActionGroup;
+  const showStop = Boolean(
+    isRunning && onStop && !canSubmit && !isAttaching && !showVoiceActionGroup,
+  );
   const canStartVoiceInput =
     voice !== undefined && voice.isSupported && !isSubmitting;
   const showVoiceAsPrimaryAction =
-    isPointerCoarse && !hasSubmittableInput && canStartVoiceInput;
+    isPointerCoarse &&
+    !isAttaching &&
+    !hasSubmittableInput &&
+    canStartVoiceInput;
+  const showCompactVoiceAction =
+    showCompactLayout &&
+    canStartVoiceInput &&
+    (!showVoiceAsPrimaryAction || showStop);
+  const stopGestureButtonRef = useRef<HTMLButtonElement | null>(null);
+  const handleStopPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      if (event.button !== 0) return;
+      stopGestureButtonRef.current = event.currentTarget;
+    },
+    [],
+  );
+  const handleStopClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      const gestureButton = stopGestureButtonRef.current;
+      stopGestureButtonRef.current = null;
+      if (event.detail > 0 && gestureButton !== event.currentTarget) return;
+      onStop?.();
+    },
+    [onStop],
+  );
+  const voiceGestureButtonRef = useRef<HTMLButtonElement | null>(null);
   const handleVoicePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
-      if (!isPointerCoarse || event.button !== 0) return;
+      if (event.button !== 0) return;
+      voiceGestureButtonRef.current = event.currentTarget;
+      if (!isPointerCoarse) return;
 
-      // Keep mobile voice activation from focusing the button and expanding
-      // the follow-up composer before click can start recording.
       event.preventDefault();
     },
     [isPointerCoarse],
@@ -2556,6 +2698,15 @@ export function PromptBoxInternal({
     }
     void voice?.start();
   }, [isPointerCoarse, voice]);
+  const handleVoiceClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      const gestureButton = voiceGestureButtonRef.current;
+      voiceGestureButtonRef.current = null;
+      if (event.detail > 0 && gestureButton !== event.currentTarget) return;
+      startVoiceInput();
+    },
+    [startVoiceInput],
+  );
   const cancelVoiceInput = useCallback(() => {
     if (voiceActionRevealFrameRef.current !== null) {
       window.cancelAnimationFrame(voiceActionRevealFrameRef.current);
@@ -2564,9 +2715,12 @@ export function PromptBoxInternal({
     setVoiceActionTransition("exiting");
     voice?.cancel();
   }, [voice]);
-  const effectiveSubmitTitle = isZenMode
-    ? submitTitle.replace(/^Submit\s+/, "")
-    : submitTitle;
+  const attachmentUploadTitle = "Uploading attachments...";
+  const effectiveSubmitTitle = isAttaching
+    ? attachmentUploadTitle
+    : !canSubmit && submitDisabledReason
+      ? submitDisabledReason
+      : submitTitle;
 
   const emitAttachmentFiles = useCallback(
     (files: File[]) => {
@@ -2576,20 +2730,6 @@ export function PromptBoxInternal({
     [onAttachFiles],
   );
 
-  const resetZenModeAfterSubmit = useCallback(() => {
-    if (!resetZenModeOnSubmit || !isZenMode) return;
-    if (resolvedZenModeStorageKey) {
-      setIsZenMode(RESET);
-      return;
-    }
-    setIsZenMode(false);
-  }, [
-    isZenMode,
-    resetZenModeOnSubmit,
-    resolvedZenModeStorageKey,
-    setIsZenMode,
-  ]);
-
   const submitPrompt = useCallback(() => {
     const shouldBlurAfterSubmit = blurAfterPointerSubmitRef.current;
     blurAfterPointerSubmitRef.current = false;
@@ -2598,47 +2738,44 @@ export function PromptBoxInternal({
     if (shouldBlurAfterSubmit) {
       blurPromptEditor(editorRef.current);
     }
-    resetZenModeAfterSubmit();
-  }, [canSubmit, onSubmit, resetZenModeAfterSubmit]);
+  }, [canSubmit, onSubmit]);
 
   const handleSubmitClick = useCallback(
     (event: ReactMouseEvent<HTMLButtonElement>) => {
-      // Pointer-generated click events have a positive click count. Keyboard
-      // activation and programmatic clicks use detail=0, so hardware Enter
-      // submissions retain the caret for the next follow-up.
       blurAfterPointerSubmitRef.current =
         blurOnPointerSubmit && event.detail > 0;
     },
     [blurOnPointerSubmit],
   );
 
+  const handleTouchSubmit = useCallback(() => {
+    blurAfterPointerSubmitRef.current = blurOnPointerSubmit;
+    submitPrompt();
+  }, [blurOnPointerSubmit, submitPrompt]);
+
   const handleSubmitPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
       if (event.button !== 0) return;
+      if (isPointerCoarse) {
+        event.preventDefault();
+        return;
+      }
       const currentEditor = editorRef.current;
+      const editorElement = currentEditor?.view.dom;
+      const activeElement = editorElement?.ownerDocument.activeElement;
       if (
         !currentEditor ||
         currentEditor.isDestroyed ||
-        !currentEditor.isFocused
+        !editorElement?.contains(activeElement ?? null)
       ) {
         return;
       }
 
-      // Focus transfer happens before click. On iOS, moving focus from the
-      // editor to this button begins keyboard dismissal and resizes the app
-      // shell before the form can submit. Keep the editor focused; the click
-      // still owns the commit, while genuine outside focus dismisses normally.
       event.preventDefault();
     },
-    [],
+    [isPointerCoarse],
   );
 
-  // A no-argument built-in command (currently only `/compact`) is a complete
-  // action the moment it is selected, so applying it with Enter should also
-  // submit instead of leaving the pill parked for a second Enter. The submit is
-  // deferred to this effect — keyed on the flag — so `onSubmit` runs after the
-  // applied command mention has propagated into the parent draft (applying the
-  // pill updates the draft on the next render, not synchronously).
   const [pendingCommandSubmit, setPendingCommandSubmit] = useState(false);
   useEffect(() => {
     if (!pendingCommandSubmit) return;
@@ -2649,8 +2786,7 @@ export function PromptBoxInternal({
   const submitModifierPrompt = useCallback(() => {
     if (!canModifierSubmit || !onModifierSubmit) return;
     onModifierSubmit();
-    resetZenModeAfterSubmit();
-  }, [canModifierSubmit, onModifierSubmit, resetZenModeAfterSubmit]);
+  }, [canModifierSubmit, onModifierSubmit]);
 
   const applyHistoryDraft = useCallback(
     (draft: PromptDraftState) => {
@@ -2673,45 +2809,12 @@ export function PromptBoxInternal({
     [history, scheduleRevealEditorSelection, syncTriggerState],
   );
 
-  const focusEditorAfterSizeChange = useCallback(() => {
-    // Size changes on mobile web are presentation-only. Keeping focus where it
-    // is prevents the soft keyboard from covering the thread after a tap.
-    if (isPointerCoarse) return;
-    requestAnimationFrame(() => {
-      const currentEditor = editorRef.current;
-      if (!currentEditor || currentEditor.isDestroyed) return;
-
-      currentEditor.commands.focus();
-      scheduleRevealEditorSelection();
-    });
-  }, [isPointerCoarse, scheduleRevealEditorSelection]);
-
-  const exitZenMode = useCallback(() => {
+  const collapsePromptBox = useCallback(() => {
+    if (!onCollapse) return;
     capturePromptBoxHeight();
-    if (!isZenMode) return;
-    setIsZenMode(false);
-    focusEditorAfterSizeChange();
-  }, [
-    capturePromptBoxHeight,
-    focusEditorAfterSizeChange,
-    isZenMode,
-    setIsZenMode,
-  ]);
-
-  const enterZenMode = useCallback(() => {
-    capturePromptBoxHeight();
-    // Mobile follow-up composers expand by focus, not a manual size control.
-    if (compact) return;
-    if (isZenMode) return;
-    setIsZenMode(true);
-    focusEditorAfterSizeChange();
-  }, [
-    capturePromptBoxHeight,
-    focusEditorAfterSizeChange,
-    isZenMode,
-    compact,
-    setIsZenMode,
-  ]);
+    blurPromptEditor(editorRef.current);
+    onCollapse();
+  }, [capturePromptBoxHeight, onCollapse]);
 
   const handleAttachmentInputChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
@@ -2744,9 +2847,6 @@ export function PromptBoxInternal({
 
   const handleEditorKeyDown = useCallback(
     (event: KeyboardEvent, isOriginalIPadHardwareEnter = false): boolean => {
-      // An IME keystroke must reach neither an app chord nor a submit. The
-      // WeakSet carries the iPadOS hook's decision, because that hook runs
-      // before ProseMirror's own post-composition safeguard.
       if (
         event.isComposing ||
         event.keyCode === 229 ||
@@ -2754,10 +2854,6 @@ export function PromptBoxInternal({
       ) {
         return false;
       }
-      // App keybindings win over the editor's own keymap. TipTap cancels the
-      // chords it knows (Mod+Shift+B for a blockquote, Mod+B, Mod+Shift+7/8 for
-      // lists), and the window listener skips a canceled event — so without
-      // this an app chord silently did nothing while the composer had focus.
       if (dispatchAppCommandKey(event)) {
         return true;
       }
@@ -2810,7 +2906,11 @@ export function PromptBoxInternal({
             }
             return true;
           }
-          setSelectedIndex((prev) => (prev + 1) % activeSuggestions.length);
+          const nextIndex = (selectedIndex + 1) % activeSuggestions.length;
+          const nextSuggestion = activeSuggestions[nextIndex];
+          if (nextSuggestion) {
+            setSelectedSuggestionKey(typeaheadSuggestionKey(nextSuggestion));
+          }
           return true;
         }
         if (
@@ -2819,10 +2919,13 @@ export function PromptBoxInternal({
           activeSuggestions.length > 0
         ) {
           event.preventDefault();
-          setSelectedIndex(
-            (prev) =>
-              (prev + activeSuggestions.length - 1) % activeSuggestions.length,
-          );
+          const nextIndex =
+            (selectedIndex + activeSuggestions.length - 1) %
+            activeSuggestions.length;
+          const nextSuggestion = activeSuggestions[nextIndex];
+          if (nextSuggestion) {
+            setSelectedSuggestionKey(typeaheadSuggestionKey(nextSuggestion));
+          }
           return true;
         }
         if (
@@ -2834,9 +2937,6 @@ export function PromptBoxInternal({
             activeSuggestions[selectedIndex] ?? activeSuggestions[0];
           if (selected) {
             applyTrigger(selected);
-            // Built-in commands (e.g. `/compact`) take no arguments, so picking
-            // one with Enter both inserts the pill and submits. Tab still only
-            // inserts, and mention suggestions are unaffected.
             if (
               event.key === "Enter" &&
               selected.kind === "command" &&
@@ -2849,29 +2949,16 @@ export function PromptBoxInternal({
         }
         if (event.key === "Escape") {
           event.preventDefault();
-          triggerKeyRef.current = "";
-          if (activeTrigger) {
-            // Escape dismisses the typed token span for both kinds — re-trigger
-            // stays suppressed while the caret remains inside `[from, to]`.
-            dismissedTriggerRef.current = {
-              start: activeTrigger.from,
-              end: activeTrigger.to,
-              hasLeftRange: false,
-            };
-          }
-          setActiveTrigger(null);
-          onMentionQueryChange(null, null);
-          onCommandQueryChange(null);
+          dismissActiveTrigger();
           return true;
         }
       }
 
-      // Escape releases the composer so the keyboard can reach the rest of the
-      // app. Higher-priority Escape behavior still runs first: the typeahead
-      // menu above dismisses itself, and voice recording cancels from a window
-      // capture listener that stops the event before the editor sees it. A
-      // locked editor never reaches here — see the editor container below.
       if (event.key === "Escape") {
+        if (onEscape) {
+          onEscape();
+          return true;
+        }
         blurPromptEditor(currentEditor);
         return true;
       }
@@ -2887,6 +2974,7 @@ export function PromptBoxInternal({
             activeHistoryIndex === null
               ? 0
               : Math.min(activeHistoryIndex + 1, history.entries.length - 1);
+          hasActiveHistorySessionRef.current = true;
           if (activeHistoryIndex === null) {
             setTemporaryHistoryDraft(history.currentDraft);
           }
@@ -2920,13 +3008,7 @@ export function PromptBoxInternal({
         }
       }
 
-      const isModifierSubmitKey =
-        event.key === "Enter" &&
-        event.metaKey &&
-        !event.shiftKey &&
-        !event.altKey &&
-        !event.ctrlKey;
-      if (isModifierSubmitKey && onModifierSubmit) {
+      if (isModifierSubmitKeyEvent(event) && onModifierSubmit) {
         event.preventDefault();
         submitModifierPrompt();
         return true;
@@ -2962,7 +3044,7 @@ export function PromptBoxInternal({
         !event.metaKey &&
         !event.altKey &&
         !event.ctrlKey &&
-        (event.shiftKey || isZenMode || !canSubmitWithEnterKey);
+        (event.shiftKey || !canSubmitWithEnterKey);
       if (isPromptNewlineKey && currentEditor && exitHeading(currentEditor)) {
         event.preventDefault();
         return true;
@@ -2977,7 +3059,7 @@ export function PromptBoxInternal({
         return true;
       }
 
-      if (isZenMode || !canSubmitWithEnterKey) return false;
+      if (!canSubmitWithEnterKey) return false;
       const isSubmitKey = event.key === "Enter" && !event.shiftKey;
 
       if (!isSubmitKey) return false;
@@ -2988,7 +3070,6 @@ export function PromptBoxInternal({
     [
       activeHistoryIndex,
       activeSuggestions,
-      activeTrigger,
       activeTriggerKind,
       applyHistoryDraft,
       applyTrigger,
@@ -2997,12 +3078,11 @@ export function PromptBoxInternal({
       commandHasMore,
       commandIsLoadingMore,
       dispatchAppCommandKey,
+      dismissActiveTrigger,
       history,
       isPointerCoarse,
-      isZenMode,
       loadMoreCommands,
-      onCommandQueryChange,
-      onMentionQueryChange,
+      onEscape,
       onModifierSubmit,
       postCompositionKeyDownEvents,
       resetHistorySession,
@@ -3019,9 +3099,6 @@ export function PromptBoxInternal({
     handleEditorKeyDownRef.current = handleEditorKeyDown;
   }, [handleEditorKeyDown]);
 
-  // Capture phase + stopPropagation so Escape cancels the recording and wins
-  // over the composer's own Escape-to-dismiss (which would otherwise hide the
-  // whole box), instead of leaking to the collapsed editor.
   useEffect(() => {
     if (!showVoiceActionGroup || !voice) return;
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -3039,7 +3116,6 @@ export function PromptBoxInternal({
       ref={formRef}
       data-promptbox=""
       data-promptbox-compact={showCompactLayout ? "" : undefined}
-      data-promptbox-zen={showZenLayout ? "" : undefined}
       data-promptbox-voice-active={showVoiceActionGroup ? "" : undefined}
       onSubmit={handleSubmit}
       onMouseDown={handlePromptBoxMouseDown}
@@ -3057,12 +3133,6 @@ export function PromptBoxInternal({
       className={cn(
         "group/promptbox relative w-full rounded-xl border border-border bg-background shadow-lift",
         showCompactLayout && "overflow-hidden",
-        // Zen toggles only the *height* of the box; the inset padding stays
-        // identical so the placeholder/text doesn't jump when toggling.
-        // `flex flex-col` lets the editor's `flex-1` fill the dvh height.
-        showZenLayout && "flex flex-col",
-        showZenLayout && ZEN_MODE_HEIGHT_CLASS[zenModeLayout],
-        className,
       )}
     >
       <input
@@ -3072,39 +3142,52 @@ export function PromptBoxInternal({
         className="hidden"
         onChange={handleAttachmentInputChange}
       />
+      {modeHeader ? (
+        <div
+          inert={showVoiceActionGroup ? true : undefined}
+          className="px-3 pt-1.5"
+        >
+          {modeHeader}
+        </div>
+      ) : null}
       <div
         data-promptbox-layout=""
-        className={cn(COLLAPSING_GRID_CLASS, showZenLayout && "min-h-0 flex-1")}
+        className={cn(COLLAPSING_GRID_CLASS, showCompactLayout && "relative")}
         style={{ gridTemplateRows: "1fr" }}
       >
         <div
           data-promptbox-main=""
           className={cn(
             "min-h-0 overflow-hidden transition-opacity duration-[180ms] motion-reduce:transition-none",
-            isZenMode && "flex flex-col",
-            showCompactLayout && "relative h-12",
+            showCompactLayout && "relative flex h-12 items-center",
             showVoiceActionGroup && "pointer-events-none",
           )}
         >
           {header && !showCompactLayout ? (
-            // Left padding matches the editor's so the header content aligns
-            // with the placeholder column in both normal and zen modes (editor
-            // shifts from px-4 to px-6 when entering zen). Right padding leaves
-            // room for the zen-mode toggle button in the top-right corner. Zen
-            // mode also gets more top room since the card fills the viewport.
             <div
               data-promptbox-expanded-only=""
               inert={showVoiceActionGroup ? true : undefined}
-              className={cn("pl-4 pr-14 pt-3", compact && "pr-14")}
+              className="pl-4 pr-14 pt-3"
             >
               {header}
             </div>
+          ) : null}
+          {showCompactLayout ? (
+            <AttachmentPreview
+              compact
+              attachments={attachments}
+              attachmentProjectId={attachmentProjectId}
+              expandedImageIndex={expandedImageIndex}
+              onExpandedImageIndexChange={setExpandedImageIndex}
+              onRemoveAttachment={onRemoveAttachment}
+            />
           ) : null}
           <div
             data-promptbox-input-region=""
             className={cn(
               "relative",
-              isZenMode && "min-h-0 flex flex-1 flex-col",
+              showCompactLayout && "min-w-0 flex-1",
+              showCompactVoiceAction && "pr-9",
             )}
           >
             {!showCompactLayout ? (
@@ -3112,16 +3195,19 @@ export function PromptBoxInternal({
                 <div data-promptbox-expanded-only="">
                   <AppCommandShortcutHint
                     shortcut={focusComposerShortcut}
-                    className="absolute right-10 top-2 z-20 group-focus-within/promptbox:hidden"
+                    className={cn(
+                      "absolute top-2 z-20 group-focus-within/promptbox:hidden",
+                      onCollapse ? "right-10" : "right-2",
+                    )}
                   />
                 </div>
-                <div
-                  data-promptbox-expanded-only=""
-                  data-promptbox-standard-actions=""
-                  inert={showVoiceActionGroup ? true : undefined}
-                  className="absolute right-2 top-2 z-20 flex items-center gap-0.5"
-                >
-                  {isZenMode ? (
+                {onCollapse ? (
+                  <div
+                    data-promptbox-expanded-only=""
+                    data-promptbox-standard-actions=""
+                    inert={showVoiceActionGroup ? true : undefined}
+                    className="absolute right-[13px] top-2 z-20 flex items-center"
+                  >
                     <Button
                       type="button"
                       size="icon"
@@ -3129,73 +3215,47 @@ export function PromptBoxInternal({
                       onMouseDown={(event) => {
                         event.preventDefault();
                       }}
-                      onClick={exitZenMode}
-                      aria-label="Make prompt box smaller"
+                      onClick={collapsePromptBox}
+                      aria-label="Collapse prompt box"
                       className={cn(
-                        "text-subtle-foreground hover:text-muted-foreground",
+                        CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
                         COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS,
+                        PROMPT_STACK_EDGE_CARET_BUTTON_WIDTH_CLASS,
                       )}
                     >
-                      <Icon name="Minimize2" className="size-3" />
+                      <Icon name="ChevronDown" className="size-3.5" />
                     </Button>
-                  ) : null}
-                  {!isZenMode && !compact ? (
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      onMouseDown={(event) => {
-                        event.preventDefault();
-                      }}
-                      onClick={enterZenMode}
-                      aria-label="Make prompt box larger"
-                      className={cn(
-                        "text-subtle-foreground hover:text-muted-foreground",
-                        COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS,
-                      )}
-                    >
-                      <Icon name="Maximize2" className="size-3" />
-                    </Button>
-                  ) : null}
-                </div>
+                  </div>
+                ) : null}
               </>
             ) : null}
             <ComposerEditorSlot
               editor={editor}
               scrollContainerRef={editorScrollContainerRef}
               inputLocked={composerInputLocked}
-              isZenMode={isZenMode}
-              hasCompactControls={compact !== undefined}
               isCompactLayout={showCompactLayout}
               minHeight={minHeight}
-              layout={zenModeLayout}
+              layout={editorLayout}
               resolveMentionLink={mentionResolveLink}
             />
           </div>
 
           {showTypeaheadMenu ? (
             <div
+              ref={typeaheadMenuRef}
+              data-promptbox-typeahead-menu=""
               className={cn(
-                // Zen mode: menu floats inside the form, anchored just above
-                // the action footer so it stays visible. The form's pb-3 +
-                // ~36px button row sets the bottom offset.
-                // Normal mode: menu floats outside the form (above or below).
-                // -left-px / -right-px aligns the menu with the form's outer
-                // edge (form has a 1px border; left-0/right-0 would otherwise
-                // sit inside it, leaving the banner above peeking out 1px on
-                // each side).
                 "absolute -left-px -right-px z-20",
-                isZenMode
-                  ? "bottom-14 px-3"
-                  : mentionMenuPlacement === "top"
-                    ? "bottom-full mb-2"
-                    : "top-full mt-2",
+                mentionMenuPlacement === "top"
+                  ? "bottom-full mb-2"
+                  : "top-full mt-2",
               )}
             >
               <MentionMenu
                 state={typeaheadMenuState}
                 selectedIndex={selectedIndex}
                 onApply={applyTrigger}
+                onDismiss={isPointerCoarse ? dismissActiveTrigger : undefined}
                 onCommandLoadMore={
                   canLoadMoreCommands ? loadMoreCommands : undefined
                 }
@@ -3230,7 +3290,7 @@ export function PromptBoxInternal({
             <div
               data-promptbox-action-row=""
               className={cn(
-                "relative flex shrink-0 flex-row items-center gap-3 pb-2 pl-3.5 pr-2 pt-1.5",
+                "relative flex shrink-0 select-none flex-row items-center gap-3 pb-2 pl-3.5 pr-2 pt-1.5",
                 showCompactLayout && "absolute inset-y-0 right-2 gap-0 p-0",
               )}
             >
@@ -3299,26 +3359,32 @@ export function PromptBoxInternal({
                     !showCompactLayout && !suppressPluginComposerCustomizations
                   }
                 >
-                  {!showCompactLayout ? (
+                  {!showCompactLayout || showCompactVoiceAction ? (
                     <>
                       {voice &&
                       !showVoiceActionGroup &&
                       (!showVoiceAsPrimaryAction || showStop) ? (
                         <Button
-                          data-promptbox-expanded-only=""
+                          data-promptbox-expanded-only={
+                            showCompactLayout ? undefined : ""
+                          }
                           type="button"
                           size="icon"
                           variant="ghost"
                           aria-label={
                             !voice.isSupported
-                              ? "Voice input is not supported in this browser"
+                              ? voiceUnsupportedMessage(
+                                  voice.unsupportedReason ?? null,
+                                )
                               : "Start voice input"
                           }
                           disabled={!canStartVoiceInput}
                           onPointerDown={handleVoicePointerDown}
-                          onClick={startVoiceInput}
+                          onClick={handleVoiceClick}
                           className={
-                            COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS
+                            showCompactLayout
+                              ? COMPACT_PROMPT_ACTION_BUTTON_CLASS
+                              : COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS
                           }
                         >
                           <Icon name="Mic" className="size-4" />
@@ -3337,7 +3403,8 @@ export function PromptBoxInternal({
                         size="icon"
                         variant="secondary"
                         aria-label="Stop run"
-                        onClick={onStop}
+                        onPointerDown={handleStopPointerDown}
+                        onClick={handleStopClick}
                         className={
                           showCompactLayout
                             ? COMPACT_PROMPT_ACTION_BUTTON_CLASS
@@ -3357,7 +3424,7 @@ export function PromptBoxInternal({
                         variant="default"
                         aria-label="Start voice input"
                         onPointerDown={handleVoicePointerDown}
-                        onClick={startVoiceInput}
+                        onClick={handleVoiceClick}
                         className={cn(
                           showCompactLayout
                             ? COMPACT_PROMPT_ACTION_BUTTON_CLASS
@@ -3371,15 +3438,10 @@ export function PromptBoxInternal({
                         <Icon name="Mic" className="size-4" />
                       </Button>
                     ) : (
-                      <Button
-                        data-promptbox-submit-action=""
-                        type="submit"
-                        size={showCompactLayout ? "icon" : "sm"}
-                        variant="default"
-                        aria-label={effectiveSubmitTitle}
-                        disabled={!canSubmit}
-                        onPointerDown={handleSubmitPointerDown}
-                        onClick={handleSubmitClick}
+                      <PromptSubmitButton
+                        canSubmit={canSubmit}
+                        icon={submitIcon}
+                        label={submitLabel}
                         className={cn(
                           showCompactLayout
                             ? COMPACT_PROMPT_ACTION_BUTTON_CLASS
@@ -3387,24 +3449,22 @@ export function PromptBoxInternal({
                                 "ml-1",
                                 COARSE_POINTER_PROMPT_ACTION_BUTTON_CLASS,
                               ],
-                          // Container-driven compact layouts change the button's
-                          // width, padding, and margin at the breakpoint. Keep
-                          // those geometry changes instantaneous so the action
-                          // stays pinned while the prompt height animates.
                           "transition-colors",
                         )}
-                      >
-                        {isSubmitting ? (
-                          <Icon
-                            name="Spinner"
-                            className="size-4 animate-spin"
-                          />
-                        ) : isZenMode ? (
-                          <Icon name="ArrowUp" className="size-4" />
-                        ) : (
-                          <Icon name="CornerDownLeft" className="size-4" />
-                        )}
-                      </Button>
+                        disabledReason={
+                          !canSubmit
+                            ? isAttaching
+                              ? attachmentUploadTitle
+                              : submitDisabledReason
+                            : undefined
+                        }
+                        isBusy={isSubmitting || isAttaching}
+                        isCompact={showCompactLayout}
+                        onPointerDown={handleSubmitPointerDown}
+                        onClick={handleSubmitClick}
+                        onTouchSubmit={handleTouchSubmit}
+                        title={effectiveSubmitTitle}
+                      />
                     )}
                   </div>
                 </ComposerActionsSlot>

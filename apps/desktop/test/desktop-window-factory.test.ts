@@ -50,8 +50,6 @@ class FakeDesktopWindowWebContents implements DesktopWindowWebContents {
   public devToolsOpenCount = 0;
   public id: number;
   public readonly addedDictionaryWords: string[] = [];
-  public readonly sentMessages: Array<{ channel: string; payload: unknown }> =
-    [];
   public readonly spellCheckerEnabledValues: boolean[] = [];
   public readonly session: DesktopContextMenuWebContents["session"] = {
     addWordToSpellCheckerDictionary: (word) => {
@@ -65,8 +63,6 @@ class FakeDesktopWindowWebContents implements DesktopWindowWebContents {
   public readonly contextMenuListeners: Parameters<
     DesktopContextMenuWebContents["on"]
   >[1][] = [];
-  public readonly executedScripts: string[] = [];
-  public readonly insertedTexts: string[] = [];
   public readonly replacedMisspellings: string[] = [];
   public windowOpenHandler: DesktopWindowOpenHandler | null = null;
   public readonly zoomFactors: number[] = [];
@@ -79,19 +75,6 @@ class FakeDesktopWindowWebContents implements DesktopWindowWebContents {
     if (options.mode === "detach") {
       this.devToolsOpenCount += 1;
     }
-  }
-
-  executeJavaScript(script: string): Promise<unknown> {
-    this.executedScripts.push(script);
-    return Promise.resolve(null);
-  }
-
-  insertText(text: string): void {
-    this.insertedTexts.push(text);
-  }
-
-  send(channel: string, payload: unknown): void {
-    this.sentMessages.push({ channel, payload });
   }
 
   on(...args: Parameters<DesktopContextMenuWebContents["on"]>): void {
@@ -119,7 +102,6 @@ class FakeDesktopWindow implements DesktopBrowserWindow {
   public readonly loadedUrls: string[] = [];
   public readonly options: BrowserWindowConstructorOptions;
   public readonly webContents: FakeDesktopWindowWebContents;
-  public focused = false;
   public fullScreen = false;
   public maximized = false;
   public minimized = false;
@@ -159,9 +141,7 @@ class FakeDesktopWindow implements DesktopBrowserWindow {
     this.readyToShowListener?.();
   }
 
-  focus(): void {
-    this.focused = true;
-  }
+  focus(): void {}
 
   getBounds(): WindowBounds {
     return this.bounds;
@@ -173,10 +153,6 @@ class FakeDesktopWindow implements DesktopBrowserWindow {
 
   isFullScreen(): boolean {
     return this.fullScreen;
-  }
-
-  isFocused(): boolean {
-    return this.focused;
   }
 
   isMaximized(): boolean {
@@ -251,6 +227,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -279,8 +257,6 @@ describe("desktop window factory", () => {
     expect(createdWindows[0]?.webContents.spellCheckerEnabledValues).toEqual([
       true,
     ]);
-    // Equal x/y inset places the traffic lights on a 45° diagonal from the
-    // window's top-left corner (see MACOS_TRAFFIC_LIGHT_DIAGONAL_INSET).
     expect(createdWindows[0]?.options.trafficLightPosition).toEqual({
       x: 18,
       y: 18,
@@ -346,6 +322,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -404,6 +382,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -434,181 +414,6 @@ describe("desktop window factory", () => {
     expect(result).toEqual({ action: "deny" });
   });
 
-  it("loads and focuses an existing first window when navigating by URL", async () => {
-    const tempDir = await createTempDir();
-    const createdWindows: FakeDesktopWindow[] = [];
-    const browserWindowCreator: DesktopBrowserWindowCreator = {
-      create(options) {
-        const browserWindow = new FakeDesktopWindow({ options });
-        createdWindows.push(browserWindow);
-        return browserWindow;
-      },
-    };
-    const factory = createDesktopWindowFactory({
-      browserWindowCreator,
-      createWindowStateKey() {
-        return "window-navigation-test";
-      },
-      displayWorkAreas: [
-        {
-          height: 900,
-          width: 1440,
-          x: 0,
-          y: 0,
-        },
-      ],
-      icon: undefined,
-      isMac: true,
-      isQuitting() {
-        return false;
-      },
-      openExternalUrl() {},
-      preloadPath: "/tmp/preload.cjs",
-      userDataPath: tempDir.path,
-    });
-    const initialUrl = "http://127.0.0.1:38886";
-    const threadUrl = "http://127.0.0.1:38886/projects/proj_a/threads/thr_a";
-
-    expect(await factory.loadUrlInFirstWindow({ url: threadUrl })).toBe(false);
-
-    await factory.createWindow({
-      initialUrl,
-      stateKey: null,
-    });
-    const browserWindow = createdWindows[0];
-    if (browserWindow === undefined) {
-      throw new Error("Expected desktop window");
-    }
-    browserWindow.minimized = true;
-
-    await expect(
-      factory.loadUrlInFirstWindow({ url: threadUrl }),
-    ).resolves.toBe(true);
-
-    expect(browserWindow.loadedUrls).toEqual([initialUrl, threadUrl]);
-    expect(browserWindow.minimized).toBe(false);
-    expect(browserWindow.focused).toBe(true);
-    expect(createdWindows).toHaveLength(1);
-  });
-
-  it("sends a renderer message to the first open window without reloading it", async () => {
-    const tempDir = await createTempDir();
-    const createdWindows: FakeDesktopWindow[] = [];
-    const browserWindowCreator: DesktopBrowserWindowCreator = {
-      create(options) {
-        const browserWindow = new FakeDesktopWindow({ options });
-        createdWindows.push(browserWindow);
-        return browserWindow;
-      },
-    };
-    const factory = createDesktopWindowFactory({
-      browserWindowCreator,
-      createWindowStateKey() {
-        return "window-send-test";
-      },
-      displayWorkAreas: [
-        {
-          height: 900,
-          width: 1440,
-          x: 0,
-          y: 0,
-        },
-      ],
-      icon: undefined,
-      isMac: true,
-      isQuitting() {
-        return false;
-      },
-      openExternalUrl() {},
-      preloadPath: "/tmp/preload.cjs",
-      userDataPath: tempDir.path,
-    });
-
-    expect(
-      factory.sendToFirstWindow("bb:test", { path: "/threads/thr_a" }),
-    ).toBe(false);
-
-    await factory.createWindow({
-      initialUrl: "http://127.0.0.1:38886",
-      stateKey: null,
-    });
-    const browserWindow = createdWindows[0];
-    if (browserWindow === undefined) {
-      throw new Error("Expected desktop window");
-    }
-
-    expect(
-      factory.sendToFirstWindow("bb:test", { path: "/threads/thr_a" }),
-    ).toBe(true);
-    expect(browserWindow.webContents.sentMessages).toEqual([
-      { channel: "bb:test", payload: { path: "/threads/thr_a" } },
-    ]);
-    expect(browserWindow.loadedUrls).toEqual(["http://127.0.0.1:38886"]);
-    expect(browserWindow.focused).toBe(true);
-  });
-
-  it("sends a renderer message to the focused window when available", async () => {
-    const tempDir = await createTempDir();
-    const createdWindows: FakeDesktopWindow[] = [];
-    const generatedStateKeys: WindowStateKey[] = [
-      "focused-window-first",
-      "focused-window-second",
-    ];
-    const browserWindowCreator: DesktopBrowserWindowCreator = {
-      create(options) {
-        const browserWindow = new FakeDesktopWindow({ options });
-        createdWindows.push(browserWindow);
-        return browserWindow;
-      },
-    };
-    const factory = createDesktopWindowFactory({
-      browserWindowCreator,
-      createWindowStateKey() {
-        return generatedStateKeys.shift() ?? "focused-window-fallback";
-      },
-      displayWorkAreas: [
-        {
-          height: 900,
-          width: 1440,
-          x: 0,
-          y: 0,
-        },
-      ],
-      icon: undefined,
-      isMac: true,
-      isQuitting() {
-        return false;
-      },
-      openExternalUrl() {},
-      preloadPath: "/tmp/preload.cjs",
-      userDataPath: tempDir.path,
-    });
-
-    await factory.createWindow({
-      initialUrl: "http://127.0.0.1:38886",
-      stateKey: null,
-    });
-    await factory.createWindow({
-      initialUrl: "http://127.0.0.1:38886",
-      stateKey: null,
-    });
-    const firstWindow = createdWindows[0];
-    const secondWindow = createdWindows[1];
-    if (firstWindow === undefined || secondWindow === undefined) {
-      throw new Error("Expected desktop windows");
-    }
-    secondWindow.focused = true;
-
-    expect(factory.sendToFocusedWindow("bb:test", { action: "new-tab" })).toBe(
-      true,
-    );
-
-    expect(firstWindow.webContents.sentMessages).toEqual([]);
-    expect(secondWindow.webContents.sentMessages).toEqual([
-      { channel: "bb:test", payload: { action: "new-tab" } },
-    ]);
-  });
-
   it("uses the native window frame on Linux", async () => {
     const tempDir = await createTempDir();
     const createdWindows: FakeDesktopWindow[] = [];
@@ -634,6 +439,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: false,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -645,6 +452,85 @@ describe("desktop window factory", () => {
     await factory.createWindow({ initialUrl: null, stateKey: null });
 
     expect(createdWindows[0]?.options).not.toHaveProperty("frame");
+    expect(createdWindows[0]?.options).not.toHaveProperty("titleBarStyle");
+    expect(createdWindows[0]?.options).not.toHaveProperty(
+      "trafficLightPosition",
+    );
+  });
+
+  it("enables transparent Linux windows when requested", async () => {
+    const tempDir = await createTempDir();
+    const createdWindows: FakeDesktopWindow[] = [];
+    const browserWindowCreator: DesktopBrowserWindowCreator = {
+      create(options) {
+        const browserWindow = new FakeDesktopWindow({ options });
+        createdWindows.push(browserWindow);
+        return browserWindow;
+      },
+    };
+    const factory = createDesktopWindowFactory({
+      browserWindowCreator,
+      createWindowStateKey() {
+        return "transparent-linux-window";
+      },
+      displayWorkAreas: [{ height: 900, width: 1440, x: 0, y: 0 }],
+      icon: undefined,
+      isLinuxTransparent: true,
+      isMac: false,
+      isLinuxFrameless: false,
+      isQuitting() {
+        return false;
+      },
+      openExternalUrl() {},
+      preloadPath: "/tmp/preload.cjs",
+      userDataPath: tempDir.path,
+    });
+
+    await factory.createWindow({ initialUrl: null, stateKey: null });
+
+    expect(createdWindows[0]?.options.transparent).toBe(true);
+    expect(createdWindows[0]?.options.backgroundColor).toBe("#00000000");
+    expect(createdWindows[0]?.options).not.toHaveProperty("frame");
+  });
+
+  it("removes the native window frame when requested on Linux", async () => {
+    const tempDir = await createTempDir();
+    const createdWindows: FakeDesktopWindow[] = [];
+    const browserWindowCreator: DesktopBrowserWindowCreator = {
+      create(options) {
+        const browserWindow = new FakeDesktopWindow({ options });
+        createdWindows.push(browserWindow);
+        return browserWindow;
+      },
+    };
+    const factory = createDesktopWindowFactory({
+      browserWindowCreator,
+      createWindowStateKey() {
+        return "frameless-linux-window";
+      },
+      displayWorkAreas: [
+        {
+          height: 900,
+          width: 1440,
+          x: 0,
+          y: 0,
+        },
+      ],
+      icon: undefined,
+      isMac: false,
+      isLinuxTransparent: false,
+      isLinuxFrameless: true,
+      isQuitting() {
+        return false;
+      },
+      openExternalUrl() {},
+      preloadPath: "/tmp/preload.cjs",
+      userDataPath: tempDir.path,
+    });
+
+    await factory.createWindow({ initialUrl: null, stateKey: null });
+
+    expect(createdWindows[0]?.options.frame).toBe(false);
     expect(createdWindows[0]?.options).not.toHaveProperty("titleBarStyle");
     expect(createdWindows[0]?.options).not.toHaveProperty(
       "trafficLightPosition",

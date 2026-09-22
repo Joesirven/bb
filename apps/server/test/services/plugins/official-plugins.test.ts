@@ -7,17 +7,18 @@ import {
   createConnection,
   getInstalledPluginRegistration,
   migrate,
+  upsertInstalledPlugin,
   type DbConnection,
 } from "@bb/db";
 import type { Logger } from "@bb/logger";
 import { derivePluginId } from "@bb/domain";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
   type PluginService,
 } from "../../../src/services/plugins/plugin-service.js";
 import {
   BUNDLED_PLUGINS,
-  PLUGIN_CATALOG_CATEGORIES,
   listBundledPluginRegistrations,
   type BundledPluginRegistration,
 } from "../../../src/services/plugins/builtin-registry.js";
@@ -49,7 +50,6 @@ function officialEntry(
     pluginId: "builtin-fixture",
     autoInstall: false,
     defaultEnabled: true,
-    category: "Productivity",
     rootDir: fixtureRoot,
     ...overrides,
   };
@@ -61,6 +61,7 @@ function createService(args: {
   bundled: BundledPluginRegistration[];
 }): PluginService {
   return createPluginService({
+    aiServices: createAiServiceRegistry(),
     telemetry: createNoopTelemetryService(),
     db: args.db,
     hub: {
@@ -86,42 +87,10 @@ describe("official plugin registry invariants", () => {
     }
   });
 
-  it("assigns every bundled plugin to one curated store category", () => {
-    const expectedCategories = {
-      "ask-user-question": "Agent interaction",
-      automations: "Workflow management",
-      connect: "Host access",
-      "custom-instructions": "Context & knowledge",
-      docs: "Context & knowledge",
-      github: "Developer tools",
-      "inline-vis": "Interface",
-      "keep-awake": "Host access",
-      memory: "Context & knowledge",
-      "provider-acp": "Agent interaction",
-      "provider-claude-code": "Agent interaction",
-      "provider-codex": "Agent interaction",
-      "provider-pi": "Agent interaction",
-      "provider-retry": "Agent interaction",
-      secrets: "Developer tools",
-      "side-chat": "Agent interaction",
-      tasks: "Workflow management",
-      workflows: "Workflow management",
-    };
-
+  it("uses one unique bundled name for each plugin", () => {
     expect(new Set(BUNDLED_PLUGINS.map((plugin) => plugin.name)).size).toBe(
       BUNDLED_PLUGINS.length,
     );
-    expect(
-      Object.fromEntries(
-        BUNDLED_PLUGINS.map((plugin) => [plugin.name, plugin.category]),
-      ),
-    ).toEqual(expectedCategories);
-    const validCategories = new Set<string>(PLUGIN_CATALOG_CATEGORIES);
-    expect(
-      BUNDLED_PLUGINS.every((plugin) =>
-        validCategories.has(plugin.category ?? ""),
-      ),
-    ).toBe(true);
   });
 });
 
@@ -180,7 +149,6 @@ describe("store-installed official plugins", () => {
       },
     );
 
-    // A restart reconciles the existing registration instead of dropping it.
     await service.stop();
     service = createService({
       db,
@@ -192,6 +160,58 @@ describe("store-installed official plugins", () => {
       { id: "builtin-fixture", provenance: "catalog", status: "running" },
     ]);
   });
+
+  it.each([true, false])(
+    "moves old BB Community provenance to BB Official when autoInstall is %s",
+    async (autoInstall) => {
+      upsertInstalledPlugin(db, {
+        id: "builtin-fixture",
+        source: "builtin:fixture",
+        provenance: {
+          kind: "catalog",
+          marketplace: "bb-community",
+          entryId: "fixture",
+        },
+        sourceIntent: { kind: "builtin", name: "fixture" },
+        exactResolution: { kind: "builtin" },
+        updateState: {
+          lastCheckAt: null,
+          availableCompatibleVersion: null,
+          newestIncompatibleVersion: null,
+          statusDetail: null,
+        },
+        activeArtifactId: null,
+        rootDir: fixtureRoot,
+        version: "0.1.0",
+        enabled: true,
+      });
+      service = createService({
+        db,
+        dataDir: join(workDir, "data"),
+        bundled: [officialEntry({ autoInstall })],
+      });
+
+      await service.start();
+
+      expect(
+        getInstalledPluginRegistration(db, "builtin-fixture"),
+      ).toMatchObject({
+        provenance: "catalog",
+        catalogEntryId: "fixture",
+        catalogMarketplaceName: "bb-official",
+      });
+      expect(service.list()).toMatchObject([
+        {
+          id: "builtin-fixture",
+          provenance: "catalog",
+          catalogEntryId: "fixture",
+          catalogMarketplaceName: "bb-official",
+          publisherLabel: "BB Official",
+          status: "running",
+        },
+      ]);
+    },
+  );
 
   it("re-points an installed official plugin when the bundled copy changes", async () => {
     const mutableRoot = join(workDir, "bb-plugin-builtin-fixture");
@@ -246,7 +266,6 @@ describe("store-installed official plugins", () => {
     await service.start();
     expect(service.list()).toEqual([]);
 
-    // Reinstalling from the store clears the tombstone.
     await expect(
       service.installOfficialPlugin("fixture"),
     ).resolves.toMatchObject({ id: "builtin-fixture", status: "running" });
@@ -272,6 +291,34 @@ describe("store-installed official plugins", () => {
     await service.start();
     expect(service.list()).toMatchObject([
       { id: "builtin-fixture", provenance: "catalog" },
+    ]);
+  });
+
+  it("explicitly installs a missing included plugin with its builtin provenance", async () => {
+    service = createService({
+      db,
+      dataDir: join(workDir, "data"),
+      bundled: [officialEntry({ autoInstall: true, defaultEnabled: false })],
+    });
+    expect(service.list()).toEqual([]);
+
+    await expect(
+      service.installOfficialPlugin("fixture"),
+    ).resolves.toMatchObject({
+      id: "builtin-fixture",
+      source: "builtin:fixture",
+      provenance: "builtin",
+      enabled: true,
+      status: "running",
+    });
+    await service.start();
+    expect(service.list()).toMatchObject([
+      {
+        id: "builtin-fixture",
+        provenance: "builtin",
+        enabled: true,
+        status: "running",
+      },
     ]);
   });
 

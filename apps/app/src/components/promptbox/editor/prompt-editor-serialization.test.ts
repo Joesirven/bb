@@ -14,8 +14,6 @@ import {
   type PromptEditorValue,
 } from "./prompt-editor-serialization";
 
-// Mirror the editor's StarterKit disables so the schema used in tests matches
-// production (see PromptBoxInternal.tsx useEditor extensions).
 const schema = getSchema([
   StarterKit.configure({
     blockquote: {},
@@ -108,7 +106,6 @@ describe("prompt editor serialization round-trip", () => {
   });
 
   it("preserves a mention's offsets in a reply after a quote", () => {
-    // "> a\n\nhey @thread done" — the mention "@thread" sits in the reply line.
     const prefix = "> a\n\nhey ";
     const mentionText = "@thread";
     const text = `${prefix}${mentionText} done`;
@@ -247,6 +244,18 @@ describe("prompt editor rich markdown restore", () => {
   it("treats emphasis markers inside inline code as literal text", () => {
     const value: PromptEditorValue = {
       text: "`**literal**` and `a ** b ** c`",
+      mentions: [],
+    };
+
+    expect(roundTripRichMarkdown(value)).toEqual(value);
+  });
+
+  it("round-trips a large single line with thousands of Markdown delimiters", () => {
+    const value: PromptEditorValue = {
+      text: Array.from(
+        { length: 4_000 },
+        (_, index) => `const v${index}=\`value_${index}\`;`,
+      ).join(""),
       mentions: [],
     };
 
@@ -521,7 +530,6 @@ describe("prompt editor markdown serialization (doc -> markdown text)", () => {
         ],
       },
     ]);
-    // "## see @thr" -> mention spans the "@thr" token after the "## see " prefix.
     expect(result.text).toBe("## see @thr");
     expect(result.mentions).toHaveLength(1);
     expect(

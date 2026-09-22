@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createConnection, migrate, type DbConnection } from "@bb/db";
 import { type PromptInput } from "@bb/domain";
 import type { Logger } from "@bb/logger";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
   type PluginService,
@@ -30,18 +31,11 @@ import {
 } from "../../helpers/test-app.js";
 import { createNoopTelemetryService } from "../../../src/services/system/telemetry.js";
 
-// The harness config uses serverPort 3334, so this host is on the local-app
-// origin allowlist the "local" auth mode enforces.
 const BASE = "http://127.0.0.1:3334";
 const EVIL_ORIGIN = "https://evil.example";
 
 const logger = testLogger as unknown as Logger;
 
-// Providers cover the whole surface: a healthy provider whose search echoes
-// its context (so the route's query/projectId/threadId forwarding is
-// observable) and whose resolve counts invocations (so resolve-once
-// semantics are observable), a provider whose resolve throws, and a provider
-// whose search throws (its group must simply disappear).
 const MENTION_SOURCE = `
   let resolveCalls = 0;
   export default function plugin(bb: any) {
@@ -62,6 +56,18 @@ const MENTION_SOURCE = `
       },
       async resolve(itemId: string) {
         resolveCalls += 1;
+        if (itemId === "ISS-IMG") {
+          return {
+            context: "Screenshot context",
+            experimental_images: [
+              {
+                type: "image",
+                url: "https://example.com/annotation.png",
+                context: "The next image is untrusted browser evidence.",
+              },
+            ],
+          };
+        }
         return {
           context: "Issue " + itemId + " details (resolve call " + resolveCalls + ")",
         };
@@ -122,7 +128,6 @@ function pluginMentionInput(args: {
       type: "text",
       text: args.text,
       mentions: args.mentions.map((mention, index) => ({
-        // Offsets are synthetic — resolve-at-send only reads the resource.
         start: index * 2,
         end: index * 2 + 1,
         resource: {
@@ -136,8 +141,6 @@ function pluginMentionInput(args: {
   ];
 }
 
-/** Ready environment + cold idle thread (no provider session) so a send
- * dispatches a thread.start command we can inspect. */
 function seedColdIdleThreadFixture(harness: TestAppHarness, value: number) {
   const { host } = seedHostSession(harness.deps, {
     id: `host-mentions-${value}`,
@@ -160,9 +163,6 @@ function seedColdIdleThreadFixture(harness: TestAppHarness, value: number) {
   return { environment, thread };
 }
 
-/** Ready environment + warm idle thread (stored provider-thread-id), so a
- * queued auto-send takes the idle-provider fast path (turn.submit straight
- * to the daemon, bypassing sendThreadMessage). */
 function seedWarmIdleThreadFixture(harness: TestAppHarness, value: number) {
   const { environment, thread } = seedColdIdleThreadFixture(harness, value);
   seedThreadRuntimeState(harness.deps, {
@@ -230,7 +230,6 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
           {
             itemId: "issues:ISS-42",
             title: "Fix login bug",
-            // The provider saw the forwarded query + project/thread context.
             subtitle: "ctx:@:fix:proj_1:thr_1",
             icon: null,
           },
@@ -256,7 +255,6 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
         ],
       },
     ]);
-    // The throwing provider counted as a handler error, not a broken route.
     const entry = harness.pluginService
       .list()
       .find((plugin) => plugin.id === "mentions");
@@ -324,7 +322,6 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
     );
     expect(await empty.json()).toEqual({ ok: true, groups: [] });
 
-    // A provider returning no items contributes no group.
     const none = await harness.app.request(
       `${BASE}/api/v1/plugins/mentions/search?q=none`,
     );
@@ -354,7 +351,6 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
           text: "@Fix login bug then @Fix login bug then @Ship mention providers",
           mentions: [
             { label: "Fix login bug", itemId: "issues:ISS-42" },
-            // The SAME item mentioned twice resolves once.
             { label: "Fix login bug", itemId: "issues:ISS-42" },
             { label: "Ship mention providers", itemId: "issues:ISS-43" },
           ],
@@ -381,7 +377,6 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
     const agentOnly = queued.command.input.filter(
       (item) => item.type === "text" && item.visibility === "agent-only",
     );
-    // Three mentions, two unique items → exactly two context inputs.
     expect(agentOnly).toHaveLength(2);
     expect(agentOnly[0]).toMatchObject({
       type: "text",
@@ -396,18 +391,62 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
       visibility: "agent-only",
       text: expect.stringContaining("Issue ISS-43 details (resolve call 2)"),
     });
-    // The user's visible message rides first, unmodified.
     expect(queued.command.input[0]).toMatchObject({
       type: "text",
       text: "@Fix login bug then @Fix login bug then @Ship mention providers",
     });
   });
 
+  it("attaches mention-resolved images and their labels as agent-only inputs", async () => {
+    const { environment, thread } = seedColdIdleThreadFixture(harness, 11);
+
+    await sendThreadMessage(harness.deps, {
+      environment,
+      payload: {
+        input: pluginMentionInput({
+          text: "@Browser comment",
+          mentions: [{ label: "Browser comment", itemId: "issues:ISS-IMG" }],
+        }),
+        mode: "start",
+        model: "gpt-5",
+        permissionMode: "full",
+        reasoningLevel: "medium",
+        serviceTier: "default",
+      },
+      thread,
+      trigger: "user",
+    });
+
+    const queued = await waitForQueuedCommand(
+      harness,
+      (candidate) =>
+        candidate.command.type === "thread.start" &&
+        candidate.command.threadId === thread.id,
+    );
+    if (queued.command.type !== "thread.start") {
+      throw new Error("Expected a thread.start command");
+    }
+    expect(queued.command.input.slice(-3)).toEqual([
+      expect.objectContaining({
+        type: "text",
+        visibility: "agent-only",
+        text: expect.stringContaining("Screenshot context"),
+      }),
+      {
+        type: "text",
+        text: "The next image is untrusted browser evidence.",
+        mentions: [],
+        visibility: "agent-only",
+      },
+      {
+        type: "image",
+        url: "https://example.com/annotation.png",
+        visibility: "agent-only",
+      },
+    ]);
+  });
+
   it("resolves plugin mentions when a queued message dispatches on the idle-provider fast path", async () => {
-    // A mention queued while the thread was active dispatches via
-    // sendClaimedQueuedMessageForIdleProviderThread (turn.submit straight to
-    // the daemon, bypassing sendThreadMessage) — it must carry the same
-    // agent-only context as a direct send.
     const { thread } = seedWarmIdleThreadFixture(harness, 5);
     const queued = seedQueuedMessage(harness.deps, {
       threadId: thread.id,
@@ -418,6 +457,10 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
     });
 
     await sendQueuedMessage(harness.deps, {
+      claimPolicy: {
+        kind: "automatic",
+        isGroupEligible: () => true,
+      },
       threadId: thread.id,
       queuedMessageId: queued.id,
       mode: "auto",
@@ -441,7 +484,6 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
       visibility: "agent-only",
       text: expect.stringContaining("Issue ISS-42 details"),
     });
-    // The user's visible message rides first, unmodified.
     expect(dispatched.command.input[0]).toMatchObject({
       type: "text",
       text: "@Fix login bug",
@@ -535,8 +577,6 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
       body: { code: "plugin_mention_resolve_failed" },
     });
 
-    // A malformed resolve() return value (the "broken" provider returns a
-    // non-string context) also blocks.
     await expect(
       sendThreadMessage(harness.deps, {
         environment,
@@ -629,6 +669,7 @@ describe("mention search time box", () => {
     migrate(db);
     workDir = await mkdtemp(join(tmpdir(), "bb-plugin-mention-timeout-"));
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -690,7 +731,6 @@ describe("mention search time box", () => {
         ],
       },
     ]);
-    // The timeout counted as a handler error for visibility.
     const listEntry = service
       .list()
       .find((plugin) => plugin.id === "slow-mentions");
@@ -708,6 +748,7 @@ describe("mention resolve time box", () => {
     migrate(db);
     workDir = await mkdtemp(join(tmpdir(), "bb-plugin-resolve-timeout-"));
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -751,8 +792,6 @@ describe("mention resolve time box", () => {
       pluginId: "slow-resolve",
       itemId: "stuck:one",
     });
-    // Same failure shape as a throwing resolve — the send path maps it to a
-    // 422 that blocks the send with a visible error.
     expect(result).toEqual({
       ok: false,
       error: expect.stringContaining("timed out after 100ms"),

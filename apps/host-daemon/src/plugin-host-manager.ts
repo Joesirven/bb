@@ -1,3 +1,4 @@
+import { operationEnvironment } from "./operation-environment.js";
 import { fork, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -18,6 +19,7 @@ import {
 } from "@bb/process-utils";
 import type { HostDaemonLogger } from "./logger.js";
 import { ensureCachedPluginHostArtifact } from "./plugin-host-artifact-cache.js";
+import { runInSerialLane } from "./serial-lane.js";
 
 type PluginHostCallCommand = Extract<
   HostDaemonOnlineRpcCommand,
@@ -49,7 +51,6 @@ interface WorkerState {
   readyAtMs: number | null;
   child: ChildProcess;
   closed: Promise<void>;
-  dataDir: string;
   tempDir: string;
   pending: Map<string, PendingCall>;
   ready: Promise<void>;
@@ -88,7 +89,7 @@ interface ActiveCallAdmission {
   inputByteLength: number;
 }
 
-export interface PluginHostManagerOptions {
+interface PluginHostManagerOptions {
   dataDir: string;
   logger: Pick<HostDaemonLogger, "debug" | "info" | "warn">;
   fetchArtifact: (args: {
@@ -103,18 +104,11 @@ export interface PluginHostManagerOptions {
     signal: string;
     payload: JsonValue;
   }) => void;
-  workerEntryPath?: string;
-  /** User shell additions used for executable discovery by host plugins. */
   shellEnv?: () => NodeJS.ProcessEnv;
-  /** Native path observation shared by core and host plugins. */
   hostWatcher?: Pick<HostWatcher, "watchPathRoot">;
-  /** Test override for the daemon-owned worker idle timeout. */
   workerIdleTimeoutMs?: number;
-  /** Test override for the grace period before force-killing a worker. */
   workerStopGraceMs?: number;
-  /** Test override for the per-plugin active-call admission count. */
   maxActiveCallsPerPlugin?: number;
-  /** Test override for the per-plugin active-call input-byte budget. */
   maxActiveCallInputBytesPerPlugin?: number;
 }
 
@@ -155,11 +149,18 @@ function workerLogContext(worker: WorkerState): Record<string, unknown> {
 }
 
 function defaultWorkerEntryPath(): string {
-  const compiled = fileURLToPath(
-    new URL("./plugin-host-worker.js", import.meta.url),
+  const candidates = [
+    "./bb-plugin-host-worker.mjs",
+    "./plugin-host-worker.js",
+    "./plugin-host-worker.ts",
+  ];
+  for (const candidate of candidates) {
+    const candidatePath = fileURLToPath(new URL(candidate, import.meta.url));
+    if (existsSync(candidatePath)) return candidatePath;
+  }
+  throw new Error(
+    `host plugin worker entry not found beside ${fileURLToPath(import.meta.url)} (looked for ${candidates.join(", ")})`,
   );
-  if (existsSync(compiled)) return compiled;
-  return fileURLToPath(new URL("./plugin-host-worker.ts", import.meta.url));
 }
 
 function errorMessage(error: unknown): string {
@@ -215,7 +216,6 @@ function observeBoundedStderr(
   source.on("end", emit);
 }
 
-/** Keep an expected teardown race from becoming an unhandled IPC error. */
 function sendToWorker(child: ChildProcess, message: object): boolean {
   if (!child.connected) return false;
   try {
@@ -297,6 +297,10 @@ export class PluginHostManager {
             callId: command.callId,
             method: command.method,
             input: command.input,
+            envVars: operationEnvironment(
+              command.contributedEnv,
+              this.options.shellEnv?.() ?? {},
+            ),
           })
         ) {
           worker.pending.delete(command.callId);
@@ -366,7 +370,6 @@ export class PluginHostManager {
     );
   }
 
-  /** Retire workers missing from the server's authoritative reconnect snapshot. */
   async reconcileGenerations(
     activeGenerations: readonly {
       pluginId: string;
@@ -451,11 +454,9 @@ export class PluginHostManager {
     let child: ChildProcess;
     try {
       child = fork(
-        this.options.workerEntryPath ?? defaultWorkerEntryPath(),
+        defaultWorkerEntryPath(),
         [artifactPath, command.pluginId, command.generation, dataDir, tempDir],
         {
-          // Same answer every daemon-spawned child gets, plus the user's
-          // login-shell PATH so a host plugin can find their executables.
           env: sanitizeInheritedChildProcessEnv({
             env: process.env,
             ...(shellPath !== undefined ? { shellPath } : {}),
@@ -499,7 +500,6 @@ export class PluginHostManager {
       readyAtMs: null,
       child,
       closed,
-      dataDir,
       tempDir,
       pending: new Map(),
       ready,
@@ -547,7 +547,11 @@ export class PluginHostManager {
     if (child.stderr !== null) {
       observeBoundedStderr(child.stderr, (line) => {
         this.options.logger.warn(
-          { pluginId: worker.pluginId, origin: "host", stderr: line },
+          {
+            pluginId: worker.pluginId,
+            origin: "host",
+            stderr: line,
+          },
           "Host plugin stderr",
         );
       });
@@ -964,7 +968,6 @@ export class PluginHostManager {
     });
   }
 
-
   private async stopWorker(worker: WorkerState, reason: string): Promise<void> {
     if (worker.disposing) return worker.closed;
     worker.disposing = true;
@@ -1139,20 +1142,7 @@ export class PluginHostManager {
     pluginId: string,
     work: () => Promise<T>,
   ): Promise<T> {
-    const previous =
-      this.workerMutationTails.get(pluginId) ?? Promise.resolve();
-    const next = previous.then(work, work);
-    const tail = next.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.workerMutationTails.set(pluginId, tail);
-    void tail.then(() => {
-      if (this.workerMutationTails.get(pluginId) === tail) {
-        this.workerMutationTails.delete(pluginId);
-      }
-    });
-    return next;
+    return runInSerialLane(this.workerMutationTails, pluginId, work);
   }
 
   private retireGeneration(pluginId: string, generation: string): void {

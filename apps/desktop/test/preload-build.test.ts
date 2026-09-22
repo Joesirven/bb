@@ -11,7 +11,7 @@ import {
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { describe, expect, it } from "vitest";
@@ -127,10 +127,12 @@ async function startDesktopSmokeServer(
           pluginThemes: [],
           dataDir: args.dataDir,
           experiments: {
-            claudeCodeMockCliTraffic: false,
-            editMessages: false,
-            newOnboarding: false,
-            providerSessionReaping: false,
+            changelogPreview: false,
+            mobileApp: false,
+            multiMachinePicker: false,
+            serverMove: false,
+            sidebarProgressiveDisclosure: false,
+            timelineWindowing: false,
           },
           featureFlags: {
             placeholder: false,
@@ -314,15 +316,6 @@ async function readDesktopPackageVersion(): Promise<string> {
   return desktopPackageJsonSchema.parse(JSON.parse(packageJsonText)).version;
 }
 
-// The desktop bundle has shape requirements electron-builder and the runtime
-// rely on but the typechecker can't see: main must be CJS (electron-universal
-// builds the entry asar around it), the preload must have the desktop version
-// baked in at build time (not read from `process.env` at runtime, which is
-// empty in packaged builds), the bb-app bridge must be ESM (it imports
-// `bb-app/dist/bb-app.js`), every entry needs its source map alongside it
-// for crash-symbolication in shipped builds, and the compiled Electron entry
-// must launch far enough for the preload bridge to answer from a real window.
-// One smoke test asserts all of those artifact-level contracts.
 describe("desktop build", () => {
   it("emits package-compatible Electron entries", async () => {
     const desktopVersion = await readDesktopPackageVersion();
@@ -344,22 +337,15 @@ describe("desktop build", () => {
       "utf8",
     );
 
-    // main.js must be CJS — no top-level ESM imports — so electron-universal
-    // can wrap it in the entry asar.
     expect(mainSource).toContain('"use strict";');
     expect(mainSource).not.toMatch(/^import\s/mu);
 
-    // The preload reads its version at *build* time. In a packaged build the
-    // env vars are empty, so any residual `process.env.BB_DESKTOP_VERSION`
-    // lookup would surface as "undefined" in the title bar / about dialog.
     expect(preloadSource).toContain(desktopVersion);
     expect(preloadSource).not.toContain("BB_DESKTOP_VERSION");
     expect(preloadSource).not.toContain("getDesktopVersion(process.env");
 
-    // The bridge must stay ESM — it pulls bb-app via the package's ESM entry.
     expect(bridgeSource).toContain('import "bb-app/dist/bb-app.js"');
 
-    // Source maps must ship for every entry so crash reports symbolicate.
     for (const mapPath of [
       "main.js.map",
       "preload.cjs.map",
@@ -434,10 +420,58 @@ describe("desktop build", () => {
           stdout,
         })}`,
       ).toBeNull();
+
+      for (const scenario of ["custom", "connect", "fatal"]) {
+        const retryProfile = join(smokeRoot, `retry-${scenario}`);
+        await mkdir(retryProfile);
+        let reportReady: (result: PreloadReadyResult) => void = () => {};
+        const retryReady = new Promise<PreloadReadyResult>((resolvePromise) => {
+          reportReady = resolvePromise;
+        });
+        const retry = spawn(
+          electronBinary,
+          [
+            `--user-data-dir=${retryProfile}`,
+            resolve(
+              desktopPackageRoot,
+              "test/fixtures/startup-retry-smoke.cjs",
+            ),
+          ],
+          {
+            cwd: desktopPackageRoot,
+            env: {
+              ...childEnv,
+              BB_STARTUP_SMOKE_APP_PATH: desktopPackageRoot,
+              BB_STARTUP_SMOKE_SCENARIO: scenario,
+            },
+          },
+        );
+        const retryStdout: string[] = [];
+        const retryStderr: string[] = [];
+        retry.stdout.on("data", (chunk) => {
+          retryStdout.push(String(chunk));
+          if (retryStdout.join("").includes("STARTUP_RETRY_SMOKE_OK")) {
+            reportReady({ ok: true, reason: "" });
+          }
+        });
+        retry.stderr.on("data", (chunk) => retryStderr.push(String(chunk)));
+        try {
+          const result = await waitForPreloadReady({
+            child: retry,
+            preloadReady: retryReady,
+            stdout: retryStdout,
+            stderr: retryStderr,
+            timeoutMs: ELECTRON_STARTUP_TIMEOUT_MS,
+          });
+          expect(result).toEqual({ ok: true, reason: "" });
+        } finally {
+          await stopElectron(retry);
+        }
+      }
     } finally {
       await stopElectron(child);
       await smokeServer.close();
       await rm(smokeRoot, { force: true, recursive: true });
     }
-  }, 30_000);
+  }, 90_000);
 });

@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import {
@@ -31,10 +32,16 @@ import {
   definePluginApp,
   useBbNavigate,
   useComposerView,
+  useRealtime,
+  useRealtimeConnectionState,
   useRpc,
   type PluginMessageDirectiveProps,
   type PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk/app";
+import {
+  WORKFLOW_RUNS_REALTIME_CHANNEL,
+  workflowRunsSignalThreadId,
+} from "./realtime-channel.js";
 import type { workflowUiRpcContract } from "./ui-contract.js";
 import type { WorkflowCallView, WorkflowRunView } from "./ui-contract.js";
 
@@ -125,8 +132,6 @@ function settledAgentCount(agents: readonly WorkflowProgressAgent[]): number {
   ).length;
 }
 
-// A running workflow shows no pill: the shimmering header, phase strip, and
-// per-agent spinners already say it is live.
 function runPillState(
   status: WorkflowRunView["status"],
 ): WorkflowStatusPillState | null {
@@ -175,7 +180,6 @@ function formatDuration(startedAt: number | null, finishedAt: number | null) {
     .join(" ");
 }
 
-/** Matches the native workflow card's one-second-delayed live duration. */
 function WorkflowDuration({ startedAt }: { startedAt: number }) {
   const [elapsed, setElapsed] = useState(() => Date.now() - startedAt);
   useEffect(() => {
@@ -331,6 +335,18 @@ function buildSharedWorkflowView(run: WorkflowRunView): SharedWorkflowView {
   };
 }
 
+function activateWorkflowAgent(
+  agent: WorkflowProgressAgent,
+  callsById: ReadonlyMap<string, WorkflowCallView>,
+  toThread: (threadId: string) => void,
+): void {
+  const childThreadId =
+    agent.id === undefined
+      ? null
+      : (callsById.get(agent.id)?.childThreadId ?? null);
+  if (childThreadId !== null) toThread(childThreadId);
+}
+
 function useWorkflowRun(
   threadId: string,
   runId: string | null,
@@ -369,8 +385,60 @@ function useWorkflowRun(
   const shouldPoll =
     state.status === "error" ||
     (state.status === "ready" && state.run !== null && isRunActive(state.run));
+  useVisibleActivePolling(refresh, shouldPoll);
+
+  return { state, refresh };
+}
+
+function subscribeDocumentVisibility(onChange: () => void): () => void {
+  document.addEventListener("visibilitychange", onChange);
+  return () => document.removeEventListener("visibilitychange", onChange);
+}
+
+function readDocumentVisible(): boolean {
+  return document.visibilityState !== "hidden";
+}
+
+function useDocumentVisible(): boolean {
+  return useSyncExternalStore(
+    subscribeDocumentVisibility,
+    readDocumentVisible,
+    () => true,
+  );
+}
+
+function useVisibleActivePolling(
+  refresh: () => Promise<void>,
+  active: boolean,
+): void {
+  const visible = useDocumentVisible();
+  const connection = useRealtimeConnectionState();
+  const wasHidden = useRef(false);
+  const wasDisconnected = useRef(false);
+
   useEffect(() => {
-    if (!shouldPoll) return;
+    if (!visible) {
+      wasHidden.current = true;
+      return;
+    }
+    if (!wasHidden.current) return;
+    wasHidden.current = false;
+    void refresh();
+  }, [refresh, visible]);
+
+  useEffect(() => {
+    if (connection !== "connected") {
+      wasDisconnected.current = true;
+      return;
+    }
+    if (!wasDisconnected.current) return;
+    wasDisconnected.current = false;
+    void refresh();
+  }, [connection, refresh]);
+
+  const enabled = active && visible;
+  useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     let timeout: number | null = null;
     const schedule = () => {
@@ -385,15 +453,10 @@ function useWorkflowRun(
       cancelled = true;
       if (timeout !== null) window.clearTimeout(timeout);
     };
-  }, [refresh, shouldPoll]);
-
-  return { state, refresh };
+  }, [enabled, refresh]);
 }
 
-function useActiveWorkflowRuns(threadId: string): {
-  state: ActiveRunsLoadState;
-  setRuns: (update: (runs: WorkflowRunView[]) => WorkflowRunView[]) => void;
-} {
+function useActiveWorkflowRuns(threadId: string): ActiveRunsLoadState {
   const rpc = useRpc<typeof workflowUiRpcContract>();
   const [state, setState] = useState<ActiveRunsLoadState>({
     status: "loading",
@@ -420,59 +483,38 @@ function useActiveWorkflowRuns(threadId: string): {
     };
   }, [refresh]);
 
-  useEffect(() => {
-    let cancelled = false;
-    let timeout: number | null = null;
-    const schedule = () => {
-      timeout = window.setTimeout(() => {
-        void refresh().finally(() => {
-          if (!cancelled) schedule();
-        });
-      }, ACTIVE_POLL_INTERVAL_MS);
-    };
-    schedule();
-    return () => {
-      cancelled = true;
-      if (timeout !== null) window.clearTimeout(timeout);
-    };
-  }, [refresh]);
+  useRealtime(WORKFLOW_RUNS_REALTIME_CHANNEL, (payload) => {
+    if (workflowRunsSignalThreadId(payload) === threadId) void refresh();
+  });
 
-  const setRuns = useCallback(
-    (update: (runs: WorkflowRunView[]) => WorkflowRunView[]) => {
-      setState((current) =>
-        current.status === "ready"
-          ? { status: "ready", runs: update(current.runs) }
-          : current,
-      );
-    },
-    [],
-  );
+  const shouldPoll =
+    state.status === "error" ||
+    (state.status === "ready" && state.runs.some(isRunActive));
+  useVisibleActivePolling(refresh, shouldPoll);
 
-  return { state, setRuns };
+  return state;
 }
 
-function EmptyOrError({ children }: { children: ReactNode }) {
+export function EmptyOrError({ children }: { children: ReactNode }) {
   return (
-    <div
-      role="alert"
-      className="my-2 rounded-md border border-border bg-muted px-3 py-2 text-sm text-muted-foreground"
-    >
+    <div role="alert" className="text-sm text-muted-foreground">
       {children}
     </div>
   );
 }
 
-function LoadingPreview() {
+export function LoadingPreview() {
   return (
-    <div
-      className="my-2 space-y-2 rounded-lg border border-border p-3"
-      aria-busy="true"
-    >
+    <div className="space-y-2" aria-busy="true">
       <Skeleton className="h-3.5 w-44 rounded-sm" />
       <Skeleton className="h-3 w-2/3 rounded-sm" />
       <Skeleton className="h-3 w-1/2 rounded-sm" />
     </div>
   );
+}
+
+export function WorkflowRunPanelState({ children }: { children: ReactNode }) {
+  return <div className="p-4">{children}</div>;
 }
 
 function RefreshWarning({ message }: { message: string }) {
@@ -609,7 +651,7 @@ function WorkflowComposerCard({ run }: { run: WorkflowRunView }) {
 }
 
 function WorkflowStatusBannerLoaded({ threadId }: { threadId: string }) {
-  const { state } = useActiveWorkflowRuns(threadId);
+  const state = useActiveWorkflowRuns(threadId);
 
   if (state.status !== "ready" || state.runs.length === 0) return null;
 
@@ -768,6 +810,11 @@ function WorkflowPreviewLoaded({
               collapsiblePhases
               currentPhaseIndex={shared.currentPhaseIndex}
               terminalState={runTerminalState(run)}
+              onAgentActivate={(agent) =>
+                activateWorkflowAgent(agent, shared.callsById, (threadId) =>
+                  navigate.toThread(threadId),
+                )
+              }
             />
           </div>
         </div>
@@ -802,14 +849,19 @@ function WorkflowPreviewLoaded({
 
 function WorkflowRunPanel({ threadId, params }: PluginThreadPanelProps) {
   const runId = panelRunId(params);
-  if (runId === undefined) {
-    return (
-      <EmptyOrError>
-        This workflow panel has invalid run parameters.
-      </EmptyOrError>
-    );
-  }
-  return <WorkflowRunPanelLoaded threadId={threadId} runId={runId} />;
+  return (
+    <div className="h-full min-h-0 flex-1 bg-border">
+      {runId === undefined ? (
+        <WorkflowRunPanelState>
+          <EmptyOrError>
+            This workflow panel has invalid run parameters.
+          </EmptyOrError>
+        </WorkflowRunPanelState>
+      ) : (
+        <WorkflowRunPanelLoaded threadId={threadId} runId={runId} />
+      )}
+    </div>
+  );
 }
 
 function WorkflowRunPanelLoaded({
@@ -829,13 +881,27 @@ function WorkflowRunPanelLoaded({
     () => (run === null ? null : buildSharedWorkflowView(run)),
     [run],
   );
-  if (state.status === "loading") return <LoadingPreview />;
+  if (state.status === "loading") {
+    return (
+      <WorkflowRunPanelState>
+        <LoadingPreview />
+      </WorkflowRunPanelState>
+    );
+  }
   if (state.status === "error") {
-    return <EmptyOrError>{state.message}</EmptyOrError>;
+    return (
+      <WorkflowRunPanelState>
+        <EmptyOrError>{state.message}</EmptyOrError>
+      </WorkflowRunPanelState>
+    );
   }
   if (run === null || shared === null) {
     return (
-      <EmptyOrError>No workflow runs were found for this thread.</EmptyOrError>
+      <WorkflowRunPanelState>
+        <EmptyOrError>
+          No workflow runs were found for this thread.
+        </EmptyOrError>
+      </WorkflowRunPanelState>
     );
   }
   const pillState = runPillState(run.status);
@@ -860,10 +926,10 @@ function WorkflowRunPanelLoaded({
     }
   };
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    <div className="flex h-full min-h-0 flex-col bg-border">
       <div
         data-detail-scroll-area="workflow-panel"
-        className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
+        className="min-h-0 flex-1 overflow-y-auto p-4"
       >
         <div className="flex items-start gap-2">
           <div className="min-w-0 flex-1">
@@ -918,13 +984,11 @@ function WorkflowRunPanelLoaded({
             collapsiblePhases
             currentPhaseIndex={shared.currentPhaseIndex}
             terminalState={runTerminalState(run)}
-            onAgentActivate={(agent) => {
-              const childThreadId =
-                agent.id === undefined
-                  ? null
-                  : (shared.callsById.get(agent.id)?.childThreadId ?? null);
-              if (childThreadId !== null) navigate.toThread(childThreadId);
-            }}
+            onAgentActivate={(agent) =>
+              activateWorkflowAgent(agent, shared.callsById, (threadId) =>
+                navigate.toThread(threadId),
+              )
+            }
           />
         </div>
         <div className="my-4 h-px bg-border-seam" />
@@ -985,5 +1049,6 @@ export default definePluginApp((app) => {
     title: "Workflow run",
     icon: "Workflow",
     component: WorkflowRunPanel,
+    layout: "flush",
   });
 });

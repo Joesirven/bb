@@ -1,3 +1,4 @@
+import { resolveHostEnvironment } from "../hosts/host-environment.js";
 import { randomUUID } from "node:crypto";
 import { listPublicHosts } from "@bb/db";
 import type {
@@ -12,7 +13,7 @@ import { callHostOnlineRpc } from "../hosts/online-rpc.js";
 import type { PluginHostArtifactSnapshot } from "./plugin-service-internal.js";
 
 const HOST_RPC_TRANSPORT_GRACE_MS = 6_000;
-const HOST_RPC_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024;
+const HOST_RPC_PAYLOAD_MAX_BYTES = 32 * 1024 * 1024;
 
 async function validateValue(
   schema: StandardSchemaV1,
@@ -66,6 +67,7 @@ export async function callPluginHostRpc(
     input: unknown;
     hostId: string;
     signal?: AbortSignal;
+    timeoutMs?: number;
     artifact: PluginHostArtifactSnapshot;
   },
 ): Promise<unknown> {
@@ -79,11 +81,16 @@ export async function callPluginHostRpc(
     `host rpc input for ${args.method}`,
   );
   const callId = randomUUID();
+  const timeoutMs = args.timeoutMs ?? COMMAND_TIMEOUT_MS;
   const rpc = callHostOnlineRpc(deps, {
     hostId: args.hostId,
-    timeoutMs: COMMAND_TIMEOUT_MS + HOST_RPC_TRANSPORT_GRACE_MS,
+    timeoutMs: timeoutMs + HOST_RPC_TRANSPORT_GRACE_MS,
     command: {
       type: "plugin.host.call",
+      contributedEnv: await resolveHostEnvironment(deps, {
+        hostId: args.hostId,
+        projectId: null,
+      }),
       pluginId: args.pluginId,
       generation: args.artifact.generation,
       artifact: {
@@ -93,7 +100,7 @@ export async function callPluginHostRpc(
       callId,
       method: args.method,
       input,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs,
     },
   });
   const signal = args.signal;
@@ -102,6 +109,7 @@ export async function callPluginHostRpc(
       ? await rpc
       : await new Promise<Awaited<typeof rpc>>((resolve, reject) => {
           let settled = false;
+          let aborted = false;
           const finish = (fn: () => void): void => {
             if (settled) return;
             settled = true;
@@ -109,6 +117,7 @@ export async function callPluginHostRpc(
             fn();
           };
           const onAbort = (): void => {
+            aborted = true;
             void callHostOnlineRpc(deps, {
               hostId: args.hostId,
               timeoutMs: HOST_RPC_TRANSPORT_GRACE_MS,
@@ -119,19 +128,16 @@ export async function callPluginHostRpc(
                 callId,
               },
             }).catch(() => undefined);
-            finish(() => reject(abortError()));
           };
           signal.addEventListener("abort", onAbort, { once: true });
           if (signal.aborted) onAbort();
           rpc.then(
-            (value) => finish(() => resolve(value)),
-            (error) => finish(() => reject(error)),
+            (value) =>
+              finish(() => (aborted ? reject(abortError()) : resolve(value))),
+            (error) => finish(() => reject(aborted ? abortError() : error)),
           );
         });
   const output = await validateValue(method.output, result.output, "output");
-  // The daemon already returned JSON. This second validation is the server
-  // side of the contract and may intentionally transform that wire value into
-  // the schema's typed output (for example, a Date). Return it as-is.
   return output;
 }
 

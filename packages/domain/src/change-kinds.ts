@@ -4,6 +4,11 @@ import {
   threadEventTypeValues,
   type ThreadEventType,
 } from "./provider-event.js";
+import {
+  threadActivityStateSchema,
+  threadRuntimeStateSchema,
+  threadStatusSchema,
+} from "./thread.js";
 
 export const THREAD_CHANGE_KINDS = [
   "thread-created",
@@ -49,12 +54,17 @@ export type EnvironmentChangeKind = (typeof ENVIRONMENT_CHANGE_KINDS)[number];
 export const HOST_CHANGE_KINDS = [
   "host-connected",
   "host-disconnected",
+  "provider-model-catalog-changed",
 ] as const;
 export type HostChangeKind = (typeof HOST_CHANGE_KINDS)[number];
 
 export const SYSTEM_CHANGE_KINDS = [
   "config-changed",
   "plugins-changed",
+  "provider-registrations-changed",
+  "ui-preferences-changed",
+  "environment-availability-changed",
+  "server-move-changed",
 ] as const;
 export type SystemChangeKind = (typeof SYSTEM_CHANGE_KINDS)[number];
 
@@ -119,23 +129,40 @@ export type RealtimeSubscriptionTarget = z.infer<
   typeof realtimeSubscriptionTargetSchema
 >;
 
-export const subscribeMessageSchema = z.object({
+const subscribeMessageSchema = z.object({
   type: z.literal("subscribe"),
   target: realtimeSubscriptionTargetSchema,
 });
 export type SubscribeMessage = z.infer<typeof subscribeMessageSchema>;
 
-export const unsubscribeMessageSchema = z.object({
+const unsubscribeMessageSchema = z.object({
   type: z.literal("unsubscribe"),
   target: realtimeSubscriptionTargetSchema,
 });
 export type UnsubscribeMessage = z.infer<typeof unsubscribeMessageSchema>;
 
+export const pingMessageSchema = z.object({
+  type: z.literal("ping"),
+});
+export type PingMessage = z.infer<typeof pingMessageSchema>;
+
 export const clientMessageSchema = z.discriminatedUnion("type", [
   subscribeMessageSchema,
   unsubscribeMessageSchema,
+  pingMessageSchema,
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
+
+export const pongMessageSchema = z
+  .object({
+    type: z.literal("pong"),
+  })
+  .strict();
+export type PongMessage = z.infer<typeof pongMessageSchema>;
+
+export const pongMessageLenientSchema = z.object({
+  type: z.literal("pong"),
+});
 
 function assertUnhandledRealtimeSubscriptionTarget(target: never): never {
   throw new Error(`Unhandled realtime subscription target: ${target}`);
@@ -168,26 +195,30 @@ export function realtimeSubscriptionTargetKey(
   }
 }
 
+export const threadStatusChangeMetadataSchema = z
+  .object({
+    status: threadStatusSchema,
+    runtime: threadRuntimeStateSchema,
+    activity: threadActivityStateSchema,
+    latestAttentionAt: z.number(),
+    updatedAt: z.number(),
+  })
+  .strict();
+export type ThreadStatusChangeMetadata = z.infer<
+  typeof threadStatusChangeMetadataSchema
+>;
+
 export const threadChangeMetadataSchema = z
   .object({
     backgroundActivityChanged: z.boolean().optional(),
     eventTypes: z.array(threadEventTypeSchema).readonly().optional(),
     hasPendingInteraction: z.boolean().optional(),
     projectId: z.string().optional(),
+    statusChange: threadStatusChangeMetadataSchema.optional(),
   })
   .strict();
 export type ThreadChangeMetadata = z.infer<typeof threadChangeMetadataSchema>;
 
-/**
- * Strict changed-message schemas validate the server's OUTGOING broadcasts —
- * the producer is in-repo, so unknown fields or kinds there are bugs and must
- * fail loudly. Message types are derived from these schemas (z.infer) so the
- * contract cannot drift from the validators.
- *
- * Clients must NOT parse inbound traffic with these: a long-lived tab or an
- * older installed SDK talking to a newer server would drop entire messages
- * over an additive change. Inbound parsing uses the lenient schemas below.
- */
 export const threadChangedMessageSchema = z
   .object({
     type: z.literal("changed"),
@@ -249,14 +280,6 @@ export const changedMessageSchema = z.discriminatedUnion("entity", [
 ]);
 export type ChangedMessage = z.infer<typeof changedMessageSchema>;
 
-/**
- * Lenient changed-message schemas parse INBOUND broadcasts on clients (SDK
- * consumers and the web app). They tolerate version skew against a newer
- * server: unknown fields are stripped and unknown change kinds are filtered
- * out instead of rejecting the whole message, so a stale client keeps
- * receiving the kinds it understands. Their output remains assignable to the
- * strict message types — dispatch sites enforce that at compile time.
- */
 function lenientKinds<TKind extends string>(kinds: readonly TKind[]) {
   const known: ReadonlySet<string> = new Set(kinds);
   return z
@@ -282,6 +305,7 @@ const threadChangeMetadataLenientSchema = z.object({
     .optional(),
   hasPendingInteraction: z.boolean().optional(),
   projectId: z.string().optional(),
+  statusChange: threadStatusChangeMetadataSchema.optional().catch(undefined),
 });
 
 const threadChangedMessageLenientSchema = z.object({

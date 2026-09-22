@@ -1,16 +1,19 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import type {
   Environment,
+  Host,
   PermissionMode,
   PromptMentionResource,
   PromptTextMention,
   ThreadQueuedMessage,
   WorkspaceStatus,
 } from "@bb/domain";
+import { makeThreadQueuedMessage } from "@bb/test-helpers/domain-fixtures";
 import {
   formatEnvironmentDisplay,
   type EnvironmentDisplayHostContext,
 } from "@bb/core-ui";
+import { EMPTY_ORDERED_MENTION_SUGGESTIONS } from "@bb/client-core";
 import type {
   SystemExecutionOptionsModelLoadError,
   ThreadContextWindowUsage,
@@ -23,7 +26,10 @@ import {
   getFollowUpPromptPlaceholder,
   getCompactFollowUpPromptPlaceholder,
 } from "@/components/promptbox/follow-up-placeholder";
-import { getEnvironmentWorkspaceLabelIconName } from "@/lib/environment-workspace-display";
+import {
+  findEnvironmentDisplayProvider,
+  getEnvironmentSummaryChrome,
+} from "@/lib/environment-workspace-display";
 import {
   INERT_TYPEAHEAD_COMMAND_CONFIG,
   type AttachmentsConfig,
@@ -48,13 +54,13 @@ import {
 import type { PickerOption } from "@/components/pickers/OptionPicker";
 import { selectWorkspaceChangedFilesSection } from "@/components/workspace/workspace-change-summary";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
+import { ModelPickerStoryQueryProvider } from "../../../.ladle/model-picker-query-provider";
 import {
   makeEnvironment,
   makeExecutionControlsProps,
-  STORY_CLAUDE_CODE_MORE_MODELS,
-  STORY_CLAUDE_CODE_MODELS,
-  STORY_CLAUDE_REASONING,
-  STORY_CODEX_MODELS,
+  useInteractiveExecutionControls,
+  STORY_ENVIRONMENT_PROVIDERS,
+  PROJECT_NAMES,
   STORY_PROVIDER_OPTIONS,
 } from "../../../.ladle/story-fixtures";
 import type {
@@ -62,8 +68,8 @@ import type {
   ExecutionPermissionConfig,
 } from "@/components/promptbox/ExecutionControls";
 import { PageShell } from "@/components/ui/page-shell.js";
-import { promptDraftToInput, type PromptDraftState } from "@/lib/prompt-draft";
-import { queuedInputToDraft } from "@/views/thread-detail/threadQueuedMessages";
+import { promptDraftToInput, type PromptDraftState } from "@bb/client-core";
+import { queuedInputToDraft } from "@bb/client-core";
 
 export default {
   title: "promptbox/Follow Up Prompt Box",
@@ -72,42 +78,11 @@ export default {
 const noop = () => {};
 const STORY_BRANCH_NAME = "bb/design-system-polish";
 
-// FollowUp commits the provider — omit `onChange` so the picker renders the
-// provider segment as locked, and pass `displayName` so the static label
-// shows even without a selectedId lookup.
 const baseExecution = makeExecutionControlsProps({
   provider: {
     options: STORY_PROVIDER_OPTIONS,
     selectedId: "codex",
     hasMultiple: true,
-    displayName: "Codex",
-  },
-});
-const claudePlanExecution = makeExecutionControlsProps({
-  provider: {
-    options: STORY_PROVIDER_OPTIONS,
-    selectedId: "claude-code",
-    hasMultiple: true,
-    displayName: "Claude Code",
-  },
-  model: {
-    active: { model: "claude-sonnet-5" },
-    selected: "claude-sonnet-5",
-    options: STORY_CLAUDE_CODE_MODELS,
-    moreOptions: STORY_CLAUDE_CODE_MORE_MODELS,
-    isLoading: false,
-    loadFailed: false,
-    onChange: noop,
-  },
-  serviceTier: {
-    value: undefined,
-    onChange: noop,
-    supported: false,
-  },
-  reasoning: {
-    value: "medium",
-    options: STORY_CLAUDE_REASONING,
-    onChange: noop,
   },
 });
 const codexModelLoadError = {
@@ -144,65 +119,46 @@ const promptActions: readonly PromptBoxAction[] = [
   CREATE_PLUGIN_PROMPT_ACTION,
 ];
 
-// Fully read-only footer example: renders the SAME model/reasoning and
-// permission pickers the main thread does, just disabled via the
-// FollowUpPromptBox `readOnly` flag so labels and positions match exactly.
-// The configs carry real onChange handlers (they never fire while disabled).
-const readOnlyExecution = makeExecutionControlsProps({
-  provider: {
-    options: STORY_PROVIDER_OPTIONS,
-    selectedId: "codex",
-    onChange: noop,
-    hasMultiple: false,
-  },
-  model: {
-    active: { model: "gpt-5.5" },
-    selected: "gpt-5.5",
-    options: STORY_CODEX_MODELS,
-    moreOptions: [],
-    isLoading: false,
-    loadFailed: false,
-    onChange: noop,
-  },
-});
-
-const readOnlyPermission: ExecutionPermissionConfig = {
-  value: "accept-edits",
-  options: permissionModeOptions,
-  onChange: noop,
-  supported: true,
-};
-
-// ---------------------------------------------------------------------------
-// Environment summary slot.
-//
-// Derived the SAME way production does it (ThreadDetailView): start from a real
-// `Environment` and run it through `formatEnvironmentDisplay` +
-// `getEnvironmentWorkspaceLabelIconName`. The story must never hand-write label
-// strings like "Working locally" — that decouples it from the real derivation
-// and lets the story render states the code cannot produce (e.g. "Working
-// locally" while provisioning). Feeding the formatter keeps the story honest:
-// changing the label logic changes these rows automatically.
-// ---------------------------------------------------------------------------
-
 interface EnvironmentSummaryArgs {
   environment: Environment;
   host: EnvironmentDisplayHostContext;
+  projectName?: string | null;
+  machineName?: string;
+  hasMultipleMachines?: boolean;
+  hostType?: Host["type"];
   branchName?: string;
   environmentCheckout?: WorkspaceCheckoutDisplay;
-  onCreateNewThreadInWorktree?: () => void;
 }
 
 function makeEnvironmentSummary({
   environment,
   host,
+  projectName = PROJECT_NAMES.bb,
+  machineName,
+  hasMultipleMachines = false,
+  hostType = "persistent",
   branchName,
   environmentCheckout,
-  onCreateNewThreadInWorktree,
 }: EnvironmentSummaryArgs): ReactNode {
+  const providerLookup = findEnvironmentDisplayProvider(
+    STORY_ENVIRONMENT_PROVIDERS,
+    environment.environmentProviderId,
+  );
   const display = formatEnvironmentDisplay({
     environment,
     host,
+    providerLookup,
+  });
+  const chrome = getEnvironmentSummaryChrome({
+    display,
+    providerLookup,
+    environmentName: environment.name,
+    hasMultipleMachines,
+    host:
+      machineName === undefined
+        ? null
+        : { name: machineName, type: hostType, machineProviderId: null },
+    machineProviders: undefined,
   });
   const checkoutDisplay =
     environmentCheckout ??
@@ -217,13 +173,19 @@ function makeEnvironmentSummary({
       : undefined);
   return (
     <ThreadEnvironmentSummary
-      environmentLabel={display.modeLabel}
-      environmentCompactLabel={display.compactModeLabel}
-      environmentIcon={getEnvironmentWorkspaceLabelIconName(
-        display.workspaceDisplayKind,
-      )}
+      projectName={projectName ?? undefined}
+      environmentLabel={chrome.environmentLabel}
+      environmentCompactLabel={chrome.environmentCompactLabel}
+      environmentIcon={chrome.environmentIcon}
+      environmentProviderName={chrome.environmentProviderName}
+      environmentHost={chrome.environmentHost}
+      environmentMachineProvider={chrome.environmentMachineProvider}
       environmentCheckout={checkoutDisplay}
-      onCreateNewThreadInWorktree={onCreateNewThreadInWorktree}
+      onCreateNewThreadInEnvironment={
+        environment.status === "ready" && environment.path !== null
+          ? noop
+          : undefined
+      }
     />
   );
 }
@@ -240,67 +202,81 @@ const remoteEnvironmentDisplayHost: EnvironmentDisplayHostContext = {
 
 const localEnvironmentSummary: ReactNode = makeEnvironmentSummary({
   environment: makeEnvironment({
-    managed: false,
-    isWorktree: false,
-    workspaceProvisionType: "unmanaged",
     status: "ready",
   }),
   host: localEnvironmentDisplayHost,
   branchName: STORY_BRANCH_NAME,
 });
 
-const remoteEnvironmentSummary: ReactNode = makeEnvironmentSummary({
+const multiMachineEnvironmentSummary: ReactNode = makeEnvironmentSummary({
   environment: makeEnvironment({
-    managed: false,
-    isWorktree: false,
-    workspaceProvisionType: "unmanaged",
+    status: "ready",
+  }),
+  host: localEnvironmentDisplayHost,
+  machineName: "Build Mac mini",
+  hasMultipleMachines: true,
+  branchName: STORY_BRANCH_NAME,
+});
+
+const sandboxWorktreeEnvironmentSummary: ReactNode = makeEnvironmentSummary({
+  environment: makeEnvironment({
+    environmentProviderId: "git-worktree",
     status: "ready",
   }),
   host: remoteEnvironmentDisplayHost,
+  machineName: "Modal sandbox",
+  hostType: "ephemeral",
   branchName: STORY_BRANCH_NAME,
 });
 
-const worktreeEnvironmentSummary: ReactNode = makeEnvironmentSummary({
+const namedLocalEnvironmentSummary: ReactNode = makeEnvironmentSummary({
   environment: makeEnvironment({
-    isWorktree: true,
-    workspaceProvisionType: "managed-worktree",
+    name: "Linked review tree",
     status: "ready",
   }),
   host: localEnvironmentDisplayHost,
+  machineName: "Bersabel's MacBook Pro",
+  hasMultipleMachines: true,
   branchName: STORY_BRANCH_NAME,
-  // Worktree threads expose a "new thread in this worktree" affordance —
-  // production wires it to the new-thread route. The story just needs a
-  // non-null handler so the MessageSquarePlus icon renders.
-  onCreateNewThreadInWorktree: noop,
 });
 
 const detachedWorktreeEnvironmentSummary: ReactNode = makeEnvironmentSummary({
   environment: makeEnvironment({
-    isWorktree: true,
-    workspaceProvisionType: "managed-worktree",
+    environmentProviderId: "git-worktree",
     status: "ready",
   }),
   host: localEnvironmentDisplayHost,
+  machineName: "Bersabel's MacBook Pro",
   environmentCheckout: formatWorkspaceCheckoutDisplay({
     checkout: {
       kind: "detached",
       headSha: "abcdef1234567890",
     },
   }),
-  onCreateNewThreadInWorktree: noop,
 });
 
-// A freshly-created worktree can briefly sit in the prepared metadata-inference
-// stage: the environment row is attached and marked ready for lifecycle
-// bookkeeping, but no workspace path or discovered worktree properties exist
-// yet. The formatter should still report the setup lifecycle ("Provisioning")
-// instead of guessing a direct workspace mode, and there is no branch chip.
 const provisioningEnvironmentSummary: ReactNode = makeEnvironmentSummary({
   environment: makeEnvironment({
     path: null,
-    isWorktree: false,
-    workspaceProvisionType: "managed-worktree",
+    status: "provisioning",
+  }),
+  host: localEnvironmentDisplayHost,
+});
+
+const personalEnvironmentSummary: ReactNode = makeEnvironmentSummary({
+  environment: makeEnvironment({
+    environmentProviderId: "personal-workspace",
+    branchName: null,
     status: "ready",
+  }),
+  host: localEnvironmentDisplayHost,
+  projectName: null,
+});
+
+const destroyedEnvironmentSummary: ReactNode = makeEnvironmentSummary({
+  environment: makeEnvironment({
+    path: null,
+    status: "destroyed",
   }),
   host: localEnvironmentDisplayHost,
 });
@@ -311,13 +287,9 @@ const usage: ThreadContextWindowUsage = {
   estimated: false,
 };
 
-// ---------------------------------------------------------------------------
-// Mentions + attachments + history (mostly empty fixtures)
-// ---------------------------------------------------------------------------
-
 const typeaheadBase: TypeaheadConfig = {
   mention: {
-    suggestions: [],
+    results: EMPTY_ORDERED_MENTION_SUGGESTIONS,
     isLoading: false,
     isError: false,
     onQueryChange: noop,
@@ -414,11 +386,6 @@ const stackedCardsWithPillsMentions = buildStoryMentions(
   ],
 );
 
-// ---------------------------------------------------------------------------
-// Stack slot fixtures — ThreadPromptContextBanner + QueuedMessagesList stack
-// above the prompt input. The caller composes them as a single ReactNode.
-// ---------------------------------------------------------------------------
-
 const dirtyWorkspaceStatus: WorkspaceStatus = {
   workingTree: {
     state: "dirty_uncommitted",
@@ -513,17 +480,11 @@ const environmentGoneContextBannerElement: ReactNode = (
 );
 
 function makeStoryQueuedMessage(id: string, text: string): ThreadQueuedMessage {
-  return {
+  return makeThreadQueuedMessage({
     id,
+    threadId: "thr_prompt_pills",
     content: [{ type: "text", text, mentions: [] }],
-    model: "gpt-5.5",
-    reasoningLevel: "medium",
-    permissionMode: "auto",
-    serviceTier: "default",
-    groupWithNext: false,
-    createdAt: 0,
-    updatedAt: 0,
-  };
+  });
 }
 
 const queuedMessages: readonly ThreadQueuedMessage[] = [
@@ -543,10 +504,6 @@ const queuedMessages: readonly ThreadQueuedMessage[] = [
   makeStoryQueuedMessage("q_8", "Capture the final interaction states."),
 ];
 
-// ---------------------------------------------------------------------------
-// Per-row component
-// ---------------------------------------------------------------------------
-
 type RowPermission = Parameters<typeof FollowUpPromptBox>[0]["permission"];
 
 interface RowConfig {
@@ -560,17 +517,13 @@ interface RowConfig {
   contextWindowUsage?: ThreadContextWindowUsage | null;
   stack?: ReactNode | null;
   queuedMessages?: readonly ThreadQueuedMessage[];
-  zenModeResetKey?: string;
+  collapseResetKey?: string;
   hideComposer?: boolean;
-  /** Defaults to the editable execution controls; override to show the read-only model/provider config. */
   execution?: ExecutionControlsProps;
-  /** Defaults to the editable permission picker; override to show the read-only permission config. */
   permission?: RowPermission;
-  /** Active provider prompt mode banner state; used to lock plan-mode controls. */
   activePromptMode?: Parameters<
     typeof FollowUpPromptBox
   >[0]["activePromptMode"];
-  /** Render the footer pickers disabled (side chat). The same controls, non-interactive. */
   readOnly?: boolean;
 }
 
@@ -578,9 +531,6 @@ type FollowUpComposerRuntimeStatus = NonNullable<
   Parameters<typeof FollowUpPromptBox>[0]["composer"]
 >["threadRuntimeDisplayStatus"];
 
-// Match production: ThreadTimelinePane renders FollowUpPromptBox through
-// PageShell's actual footer path. The story hides the timeline scroll area so
-// the row stays compact, but the prompt/below-prompt shell itself is real.
 function PromptStage({ children }: { children: ReactNode }) {
   return (
     <div className="w-full min-w-0 bg-background">
@@ -602,16 +552,12 @@ function Row({
   submitMode,
   isFollowUpSubmitting = false,
   threadRuntimeDisplayStatus = "idle",
-  // Default placeholder derives from threadRuntimeDisplayStatus the same way
-  // production's `getFollowUpPromptPlaceholder` does, so the story tracks
-  // copy changes without per-row updates. Rows that need explicit copy
-  // (e.g. "blocked: pending interaction") still pass it through.
   promptPlaceholder,
   environmentSummary = localEnvironmentSummary,
   contextWindowUsage = null,
   stack = null,
   queuedMessages: initialQueuedMessages,
-  zenModeResetKey = "thr_demo",
+  collapseResetKey = "thr_demo",
   hideComposer = false,
   execution = baseExecution,
   permission = basePermission,
@@ -726,7 +672,7 @@ function Row({
                 permissionReadOnly
                 promptActions={promptActions}
                 typeahead={typeaheadBase}
-                zenModeResetKey={`${zenModeResetKey}:queued-message`}
+                collapseResetKey={`${collapseResetKey}:queued-message`}
                 isPrimaryComposer={false}
                 showScrollToBottomButton={false}
               />
@@ -744,19 +690,21 @@ function Row({
       resolvedCompactPlaceholder,
       resolvedPlaceholder,
       threadRuntimeDisplayStatus,
-      zenModeResetKey,
+      collapseResetKey,
     ],
   );
   const queueElement =
     initialQueuedMessages === undefined ? null : (
       <QueuedMessagesList
+        attachedToComposer={true}
         queuedMessages={storyQueuedMessages}
         inlineEditor={inlineEditor}
+        sendAction="send-now"
         sendDisabled={false}
         actionDisabled={false}
         processingMessageId={null}
         processingAction={null}
-        onSendImmediately={(id) =>
+        onSend={(id) =>
           setStoryQueuedMessages((current) =>
             current.filter((message) => message.id !== id),
           )
@@ -817,9 +765,10 @@ function Row({
         permission={permission}
         activePromptMode={activePromptMode}
         promptActions={promptActions}
-        readOnly={readOnly}
+        executionReadOnly={readOnly}
+        permissionReadOnly={readOnly}
         typeahead={typeaheadBase}
-        zenModeResetKey={zenModeResetKey}
+        collapseResetKey={collapseResetKey}
       />
     </PromptStage>
   );
@@ -835,61 +784,28 @@ function StackedCardsWithPillsRow() {
       stack={contextBannerElement}
       queuedMessages={queuedMessages}
       contextWindowUsage={usage}
+      environmentSummary={multiMachineEnvironmentSummary}
     />
+  );
+}
+
+function InteractiveRow() {
+  const execution = useInteractiveExecutionControls(baseExecution);
+  return (
+    <ModelPickerStoryQueryProvider>
+      <Row submitMode={{ kind: "ready" }} execution={execution} />
+    </ModelPickerStoryQueryProvider>
   );
 }
 
 export function Overview() {
   return (
     <StoryCard>
-      <StoryRow label="ready" hint="idle thread — submit normally; no stop">
-        <Row submitMode={{ kind: "ready" }} />
-      </StoryRow>
       <StoryRow
-        label="queue"
-        hint="active runtime — submit queues; stop button visible"
+        label="ready"
+        hint="interactive provider, model, reasoning, and fast mode"
       >
-        <Row
-          submitMode={{ kind: "queue", onStop: noop }}
-          threadRuntimeDisplayStatus="active"
-          contextWindowUsage={usage}
-        />
-      </StoryRow>
-      <StoryRow
-        label="stop-only"
-        hint="host-reconnecting — composer locked; only Stop available"
-      >
-        <Row
-          submitMode={{ kind: "stop-only", onStop: noop }}
-          threadRuntimeDisplayStatus="host-reconnecting"
-        />
-      </StoryRow>
-      <StoryRow
-        label="blocked: pending interaction"
-        hint="agent is waiting on a tool decision — composer locked"
-      >
-        <Row submitMode={{ kind: "blocked", reason: "pending-interaction" }} />
-      </StoryRow>
-      <StoryRow
-        label="stop-only: starting"
-        hint="environment still spinning up — follow-up locked; only Stop available"
-      >
-        <Row
-          submitMode={{ kind: "stop-only", onStop: noop }}
-          threadRuntimeDisplayStatus="starting"
-          environmentSummary={provisioningEnvironmentSummary}
-        />
-      </StoryRow>
-      <StoryRow
-        label="submitting"
-        hint="send mutation in flight; submitMode separately tells stop visibility"
-      >
-        <Row
-          submitMode={{ kind: "queue", onStop: noop }}
-          isFollowUpSubmitting
-          threadRuntimeDisplayStatus="active"
-          initialMessage="And confirm the new env summary renders correctly."
-        />
+        <InteractiveRow />
       </StoryRow>
       <StoryRow
         label="loading models"
@@ -908,6 +824,7 @@ export function Overview() {
               loadFailed: false,
             },
           }}
+          environmentSummary={namedLocalEnvironmentSummary}
         />
       </StoryRow>
       <StoryRow
@@ -928,6 +845,7 @@ export function Overview() {
               loadError: codexModelLoadError,
             },
           }}
+          environmentSummary={multiMachineEnvironmentSummary}
         />
       </StoryRow>
       <StoryRow label="no models" hint="locked provider with empty catalog">
@@ -945,36 +863,14 @@ export function Overview() {
               loadError: null,
             },
           }}
-        />
-      </StoryRow>
-      <StoryRow
-        label="with queued messages"
-        hint="drag the queue header up; Edit moves this real composer inline"
-      >
-        <Row
-          submitMode={{ kind: "queue", onStop: noop }}
-          threadRuntimeDisplayStatus="active"
-          queuedMessages={queuedMessages}
-          contextWindowUsage={usage}
+          environmentSummary={detachedWorktreeEnvironmentSummary}
         />
       </StoryRow>
       <StoryRow label="with promptbox context banner">
-        <Row submitMode={{ kind: "ready" }} stack={contextBannerElement} />
-      </StoryRow>
-      <StoryRow
-        label="plan mode: permission locked"
-        hint="active Claude Code plan mode shows Plan Mode and disables the dropdown"
-      >
         <Row
-          submitMode={{ kind: "queue", onStop: noop }}
-          threadRuntimeDisplayStatus="active"
-          execution={claudePlanExecution}
-          permission={{ ...basePermission, value: "full" }}
-          activePromptMode={{
-            mode: "plan",
-            providerId: "claude-code",
-            prompt: "inspect the failing command before making changes",
-          }}
+          submitMode={{ kind: "ready" }}
+          stack={contextBannerElement}
+          environmentSummary={localEnvironmentSummary}
         />
       </StoryRow>
       <StoryRow
@@ -989,7 +885,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="environment gone: composer hidden"
-        hint="same prompt context banner path for destroyed/destroying environments"
+        hint="destroyed environment uses the prompt context banner path"
       >
         <Row
           submitMode={{ kind: "blocked", reason: "pending-interaction" }}
@@ -998,82 +894,69 @@ export function Overview() {
         />
       </StoryRow>
       <StoryRow
-        label="stacked cards"
-        hint="banner + queued messages composed in the same stack slot"
-      >
-        <Row
-          submitMode={{ kind: "queue", onStop: noop }}
-          threadRuntimeDisplayStatus="active"
-          stack={contextBannerElement}
-          queuedMessages={queuedMessages}
-          contextWindowUsage={usage}
-        />
-      </StoryRow>
-      <StoryRow
         label="stacked cards with Markdown + pills"
         hint="collapse on mobile to verify the quoted prompt and pills truncate to one line"
       >
         <StackedCardsWithPillsRow />
       </StoryRow>
-      <StoryRow label="env: worktree" hint="managed worktree label + icon">
-        <Row
-          submitMode={{ kind: "ready" }}
-          environmentSummary={worktreeEnvironmentSummary}
-        />
-      </StoryRow>
-      <StoryRow label="env: detached" hint="detached checkout label">
-        <Row
-          submitMode={{ kind: "ready" }}
-          environmentSummary={detachedWorktreeEnvironmentSummary}
-        />
-      </StoryRow>
-      <StoryRow label="env: remote direct" hint="remote label + icon">
-        <Row
-          submitMode={{ kind: "ready" }}
-          environmentSummary={remoteEnvironmentSummary}
-        />
-      </StoryRow>
       <StoryRow
-        label="read-only footer"
-        hint="same model & permission pickers as the main thread, just disabled"
-      >
-        <Row
-          submitMode={{ kind: "ready" }}
-          execution={readOnlyExecution}
-          permission={readOnlyPermission}
-          readOnly
-        />
-      </StoryRow>
-    </StoryCard>
-  );
-}
-
-export function StackedCardsWithPills() {
-  return (
-    <StoryCard>
-      <StoryRow
-        label="stacked cards with pills"
-        hint="banner + queued messages above a composer seeded with mention pills"
-      >
-        <StackedCardsWithPillsRow />
-      </StoryRow>
-    </StoryCard>
-  );
-}
-
-export function QueuedWorkspace() {
-  return (
-    <StoryCard>
-      <StoryRow
-        label="eight queued follow-ups"
-        hint="the centered handle stays quiet; hover the header to reveal the right-aligned caret"
+        label="provisioning"
+        hint="runtime loading icon + lifecycle label"
       >
         <Row
           submitMode={{ kind: "queue", onStop: noop }}
-          threadRuntimeDisplayStatus="active"
-          queuedMessages={queuedMessages}
-          contextWindowUsage={usage}
+          threadRuntimeDisplayStatus="starting"
+          environmentSummary={provisioningEnvironmentSummary}
         />
+      </StoryRow>
+    </StoryCard>
+  );
+}
+
+export function EnvironmentSummary() {
+  return (
+    <StoryCard>
+      <StoryRow
+        label="ready · one machine"
+        hint="provider name; the machine is unambiguous so it stays hidden"
+      >
+        {localEnvironmentSummary}
+      </StoryRow>
+      <StoryRow
+        label="ready · personal workspace"
+        hint="no project chip, no branch; the provider names the environment"
+      >
+        {personalEnvironmentSummary}
+      </StoryRow>
+      <StoryRow
+        label="ready · second machine"
+        hint="machine name once more than one machine exists"
+      >
+        {multiMachineEnvironmentSummary}
+      </StoryRow>
+      <StoryRow
+        label="ready · worktree on a sandbox"
+        hint="an ephemeral host is ambiguous, so it is named"
+      >
+        {sandboxWorktreeEnvironmentSummary}
+      </StoryRow>
+      <StoryRow
+        label="ready · named environment"
+        hint="a custom name wins over both machine and provider"
+      >
+        {namedLocalEnvironmentSummary}
+      </StoryRow>
+      <StoryRow
+        label="ready · detached worktree"
+        hint="provider icon · detached commit checkout"
+      >
+        {detachedWorktreeEnvironmentSummary}
+      </StoryRow>
+      <StoryRow
+        label="destroyed environment"
+        hint="lifecycle label replaces the provider name"
+      >
+        {destroyedEnvironmentSummary}
       </StoryRow>
     </StoryCard>
   );

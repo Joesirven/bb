@@ -1,5 +1,7 @@
+import { findProviderEnvironmentContainingPath } from "@bb/db";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { isBbManagedWorkspacePath } from "../threads/worktree-paths.js";
+import { isBbManagedWorkspacePath } from "../threads/workspace-paths.js";
 import {
   getInstalledPlugin,
   getInstalledPluginRegistration,
@@ -19,8 +21,13 @@ import {
   builtinPluginSource,
   type BundledPluginRegistration,
 } from "./builtin-registry.js";
-import { CURATED_MARKETPLACE_NAME } from "../plugin-catalog/marketplace-manifest.js";
-import type { PluginSourceSelection } from "@bb/server-contract";
+import { BUNDLED_MARKETPLACE_NAME } from "../plugin-catalog/marketplace-manifest.js";
+import {
+  CURATED_PLUGIN_MARKETPLACE_NAME,
+  type InstalledPlugin,
+  type PluginRuntimeStatus,
+  type PluginSourceSelection,
+} from "@bb/server-contract";
 import type { TelemetryEvent } from "../system/telemetry.js";
 import { resolveSelectedSubdirectory } from "./collection-manifest.js";
 import {
@@ -32,15 +39,12 @@ import {
 } from "./install-sources.js";
 import { gitRefNameForRow, gitSelectorForRow } from "./git-source-intent.js";
 import { readPluginManifest, type PluginManifest } from "./manifest.js";
+import { forgetMutableRoot } from "./plugin-runtime.js";
 import type {
-  InstallContext,
   InstallRegistrationIdentity,
   RegisterInstalledArgs,
 } from "./managed-plugin-artifacts.js";
-import type {
-  PluginListEntry,
-  PluginServiceDeps,
-} from "./plugin-service-internal.js";
+import type { PluginServiceDeps } from "./plugin-service-internal.js";
 import {
   gitResolvedVersion,
   resolveGitRef,
@@ -49,13 +53,6 @@ import {
   type PluginResolvedUpdateVersion,
 } from "./update-resolver.js";
 
-/**
- * The anonymous install event. Only public plugins report names: bundled
- * builtins and entries of the curated `bb-community` marketplace. A direct
- * install or a third-party catalog (a local `path:` or private git
- * marketplace) can name private code, so it reports only the shape of the
- * install.
- */
 export function pluginInstalledTelemetryEvent(
   pluginId: string,
   provenance: PluginProvenance,
@@ -64,7 +61,8 @@ export function pluginInstalledTelemetryEvent(
   const isPublic =
     provenance.kind === "builtin" ||
     (provenance.kind === "catalog" &&
-      provenance.marketplace === CURATED_MARKETPLACE_NAME);
+      (provenance.marketplace === CURATED_PLUGIN_MARKETPLACE_NAME ||
+        provenance.marketplace === BUNDLED_MARKETPLACE_NAME));
   return {
     name: "plugin_installed",
     properties: {
@@ -79,18 +77,22 @@ export function pluginInstalledTelemetryEvent(
   };
 }
 
-export interface PluginRegistrationContext {
+interface PluginRegistrationContext {
   deps: PluginServiceDeps;
   bundledPlugins: readonly BundledPluginRegistration[];
   withLifecycleLock: <T>(id: string, fn: () => Promise<T>) => Promise<T>;
   disposeOne: (id: string) => Promise<void>;
-  loadOne: (row: InstalledPluginRow) => Promise<void>;
+  loadOne: (row: InstalledPluginRow) => Promise<string | null>;
+  statuses: ReadonlyMap<
+    string,
+    { status: PluginRuntimeStatus; detail: string | null }
+  >;
   validateInstallDir: (args: RegisterInstalledArgs) => Promise<PluginManifest>;
   checkEngineRange: (manifest: PluginManifest) => string | undefined;
   checkPluginSdkRange: (manifest: PluginManifest) => string | undefined;
   syncCliSkill: () => Promise<void>;
   notifyPluginsChanged: () => void;
-  list: () => PluginListEntry[];
+  list: () => InstalledPlugin[];
 }
 
 export function createPluginRegistration(context: PluginRegistrationContext) {
@@ -100,6 +102,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     withLifecycleLock,
     disposeOne,
     loadOne,
+    statuses,
     validateInstallDir,
     checkEngineRange,
     checkPluginSdkRange,
@@ -109,10 +112,6 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
   } = context;
   const logger = deps.logger;
 
-  /**
-   * Shared install tail: validate the materialized files (unless the caller
-   * already validated them in a staging dir), upsert the row, and (re)load.
-   */
   const bundledPluginNamesById = new Map<string, string>(
     BUNDLED_PLUGINS.map((plugin) => [plugin.pluginId, plugin.name]),
   );
@@ -169,8 +168,6 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     ) {
       return false;
     }
-    // The resolved tag of a range install moves with every update, so the
-    // range and its prefix are the identity, not what they point at today.
     if (selector.kind === "ref") {
       return (
         intent.selector.kind === "ref" &&
@@ -241,6 +238,44 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     });
   }
 
+  function pathSourceMoveFrom(
+    existing: InstalledPluginRow | undefined,
+    identity: InstallRegistrationIdentity,
+  ): InstalledPluginRow | undefined {
+    if (
+      existing === undefined ||
+      existing.provenance !== "direct" ||
+      existing.sourceKind !== "path" ||
+      identity.provenance.kind !== "direct" ||
+      identity.sourceIntent.kind !== "path" ||
+      existing.sourcePath === identity.sourceIntent.canonicalPath
+    ) {
+      return undefined;
+    }
+    return existing;
+  }
+
+  function moveStartFailure(pluginId: string): string | null {
+    const runtime = statuses.get(pluginId);
+    if (runtime === undefined) return "plugin reported no status";
+    if (
+      runtime.status === "running" ||
+      runtime.status === "disabled" ||
+      runtime.status === "needs-configuration"
+    ) {
+      return null;
+    }
+    return runtime.detail ?? `plugin status is ${runtime.status}`;
+  }
+
+  function sameDirectory(a: string, b: string): boolean {
+    try {
+      return realpathSync(a) === realpathSync(b);
+    } catch {
+      return a === b;
+    }
+  }
+
   function assertInstallRegistrationAvailable(
     existing: InstalledPluginRow | undefined,
     identity: InstallRegistrationIdentity,
@@ -252,7 +287,8 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
         existing,
         identity.provenance,
         identity.sourceIntent,
-      )
+      ) &&
+      pathSourceMoveFrom(existing, identity) === undefined
     ) {
       throw new Error(
         `plugin id "${pluginId}" is already installed from ${existing.source}; remove it first`,
@@ -271,7 +307,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
 
   async function registerInstalled(
     args: RegisterInstalledArgs,
-  ): Promise<PluginListEntry> {
+  ): Promise<InstalledPlugin> {
     const initialManifest =
       args.preparedManifest ?? (await readPluginManifest(args.rootDir));
     assertInstallRegistrationAvailable(
@@ -285,12 +321,6 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     ) {
       refuseBuiltinShadow(initialManifest.id);
     }
-    // Compatibility is decided here, at the one chokepoint every managed
-    // registration passes through. `validateInstallDir` runs the same checks,
-    // but a cache hit registers with `validated: true` and skips it — and a
-    // cached artifact this bb accepted before can fail its own range after a
-    // bb or SDK version change. The plugin's package.json is the only source
-    // of truth for compatibility, so read it on every path.
     if (args.refuseEngineMismatch) {
       const engineProblem =
         checkEngineRange(initialManifest) ??
@@ -307,6 +337,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     await withLifecycleLock(manifest.id, async () => {
       const existing = getInstalledPlugin(deps.db, manifest.id);
       assertInstallRegistrationAvailable(existing, args, manifest.id);
+      const movedFrom = pathSourceMoveFrom(existing, args);
       await disposeOne(manifest.id);
       try {
         await args.beforePersist?.();
@@ -320,18 +351,38 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
           activeArtifactId: args.activeArtifactId ?? null,
           rootDir: args.rootDir,
           version: manifest.version,
-          enabled: true,
+          enabled: movedFrom?.enabled ?? true,
         });
         const row = getInstalledPlugin(deps.db, manifest.id);
         if (row) {
           await loadOne(row);
         }
+        if (movedFrom !== undefined) {
+          const failure = moveStartFailure(manifest.id);
+          if (failure !== null) {
+            throw new Error(
+              `plugin "${manifest.id}" failed to start from ${args.source}: ${failure}; the install at ${movedFrom.source} was kept`,
+            );
+          }
+        }
       } catch (error) {
+        if (movedFrom !== undefined) {
+          await disposeOne(manifest.id);
+          restoreRegistration(movedFrom);
+        }
         const previous = getInstalledPlugin(deps.db, manifest.id);
         if (previous) {
           await loadOne(previous);
         }
         throw error;
+      }
+      if (movedFrom !== undefined) {
+        if (!sameDirectory(movedFrom.rootDir, args.rootDir)) {
+          forgetMutableRoot(movedFrom.rootDir);
+        }
+        logger.info(
+          `plugin ${manifest.id} source moved from ${movedFrom.source} to ${args.source}; settings, secrets, and schedules were kept`,
+        );
       }
     });
     await syncCliSkill();
@@ -348,23 +399,16 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     return entry;
   }
 
-  const directInstallContext: InstallContext = {
-    provenance: { kind: "direct" },
-  };
-
   async function installPathSource(
     path: string,
     selection: PluginSourceSelection,
-    context: InstallContext = directInstallContext,
-  ): Promise<PluginListEntry> {
+  ): Promise<InstalledPlugin> {
     const checkoutDir = resolve(path);
     const subdirectory = await resolveSelectedSubdirectory({
       checkoutDir,
       selection,
       sourceLabel: checkoutDir,
     });
-    // A local repository is the author's own directory, so the selected plugin
-    // is recorded by its resolved path; symlink containment still applies.
     const rootDir =
       subdirectory === null
         ? checkoutDir
@@ -373,7 +417,10 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
             pluginRootDir(checkoutDir, subdirectory),
             "plugin subdirectory",
           );
-    if (isBbManagedWorkspacePath({ dataDir: deps.dataDir, path: rootDir })) {
+    if (
+      isBbManagedWorkspacePath({ dataDir: deps.dataDir, path: rootDir }) ||
+      findProviderEnvironmentContainingPath(deps.db, rootDir) !== null
+    ) {
       logger.warn(
         `plugin "${rootDir}" is installed from inside a bb-managed workspace; ` +
           "its source will be deleted when that environment is destroyed (e.g. when the owning thread is archived). " +
@@ -383,7 +430,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     return registerInstalled({
       rootDir,
       source: `path:${rootDir}`,
-      provenance: context.provenance,
+      provenance: { kind: "direct" },
       sourceIntent: { kind: "path", canonicalPath: rootDir },
       exactResolution: { kind: "path" },
       refuseEngineMismatch: false,
@@ -460,12 +507,8 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     return { version: row.version, display: row.source };
   }
 
-  /**
-   * Rows written before marketplaces were named all came from the official
-   * catalog, so a missing name reads as `bb-community` rather than as corrupt.
-   */
   function catalogMarketplaceOf(row: InstalledPluginRow): string {
-    return row.catalogMarketplaceName ?? CURATED_MARKETPLACE_NAME;
+    return row.catalogMarketplaceName ?? CURATED_PLUGIN_MARKETPLACE_NAME;
   }
 
   function provenanceForRow(row: InstalledPluginRow): PluginProvenance {
@@ -554,21 +597,31 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
 
   function bundledPluginProvenance(
     plugin: BundledPluginRegistration,
+    existing?: InstalledPluginRow,
   ): PluginProvenance {
-    // Auto-installed builtins are provenance "builtin"; store-only officials
-    // record the user's opt-in as a catalog install of the bundled entry.
+    if (
+      existing?.provenance === "catalog" &&
+      (catalogMarketplaceOf(existing) === CURATED_PLUGIN_MARKETPLACE_NAME ||
+        catalogMarketplaceOf(existing) === BUNDLED_MARKETPLACE_NAME)
+    ) {
+      return {
+        kind: "catalog",
+        marketplace: BUNDLED_MARKETPLACE_NAME,
+        entryId: plugin.name,
+      };
+    }
     return plugin.autoInstall
       ? { kind: "builtin" }
       : {
           kind: "catalog",
-          marketplace: CURATED_MARKETPLACE_NAME,
+          marketplace: BUNDLED_MARKETPLACE_NAME,
           entryId: plugin.name,
         };
   }
 
   async function installBuiltinSource(
     parsed: Extract<ReturnType<typeof parsePluginSource>, { kind: "builtin" }>,
-  ): Promise<PluginListEntry> {
+  ): Promise<InstalledPlugin> {
     const bundled = findBundledPlugin(parsed.name);
     if (!bundled) {
       throw new Error(`unknown builtin plugin "${parsed.name}"`);
@@ -587,7 +640,6 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
   async function reconcileBundled(): Promise<void> {
     for (const bundled of bundledPlugins) {
       const source = builtinPluginSource(bundled.name);
-      const provenance = bundledPluginProvenance(bundled);
       let manifest: PluginManifest;
       try {
         manifest = await readPluginManifest(bundled.rootDir);
@@ -600,11 +652,10 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
         continue;
       }
       const existing = getInstalledPluginRegistration(deps.db, manifest.id);
+      const provenance = bundledPluginProvenance(bundled, existing);
       if (existing?.removedAt !== null && existing?.removedAt !== undefined) {
         continue;
       }
-      // Store-only plugins install on demand; reconcile only refreshes
-      // registrations the user already opted into.
       if (!bundled.autoInstall && existing === undefined) {
         continue;
       }
@@ -677,18 +728,13 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
           integrity: null,
         };
       } else {
-        // Legacy rows predate range installs: every one of them stored a
-        // literal ref spec.
         const ref =
           parsed.selector.kind === "range" ? parsed.spec : parsed.selector.ref;
         let refKind: GitRefKind | null = isCommitSha(ref) ? "commit" : null;
         try {
           const remote = await resolveGitRef({ url: parsed.url, ref });
           if (remote.outcome === "resolved") refKind = remote.refKind;
-        } catch {
-          // Preserve startup for an offline legacy install. Keep the kind
-          // unknown because guessing branch can bypass moved-tag detection.
-        }
+        } catch {}
         sourceIntent = {
           kind: "git",
           url: parsed.url,
@@ -703,10 +749,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
             "rev-parse",
             "HEAD",
           ]);
-        } catch {
-          // A legacy registration may point at missing files. Preserve its
-          // load behavior and retain the requested pin when it is a SHA.
-        }
+        } catch {}
         exactResolution = { kind: "git", commit };
       }
       normalizeInstalledPluginRegistration(deps.db, {
@@ -734,7 +777,6 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     registrationMatchesForActivation,
     refuseBuiltinShadow,
     restoreRegistration,
-    rowMatchesInstallSource,
     sourceFingerprint,
   };
 }

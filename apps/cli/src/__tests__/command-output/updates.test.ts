@@ -16,6 +16,14 @@ const hosts: Host[] = [
     name: "workstation",
     type: "persistent",
     status: "connected",
+    machineProviderId: null,
+    lifecycle: {
+      phase: "active",
+      suspendedAt: null,
+      message: null,
+      pendingLog: "",
+      teardown: null,
+    },
     maxPermissionMode: "full",
     lastSeenAt: 1_700_000_000_000,
     lastRejectedProtocolVersion: null,
@@ -27,6 +35,14 @@ const hosts: Host[] = [
     name: "laptop",
     type: "persistent",
     status: "disconnected",
+    machineProviderId: null,
+    lifecycle: {
+      phase: "active",
+      suspendedAt: null,
+      message: null,
+      pendingLog: "",
+      teardown: null,
+    },
     maxPermissionMode: "full",
     lastSeenAt: null,
     lastRejectedProtocolVersion: null,
@@ -68,12 +84,11 @@ function providerStatus(args: {
         ? {
             kind: "update" as const,
             label: "Update" as const,
-            commandKind: "exec" as const,
             command: "codex update",
           }
         : null,
     },
-    claudeCode: {
+    "claude-code": {
       ...base,
       displayName: "Claude Code",
       executableName: "claude",
@@ -82,7 +97,7 @@ function providerStatus(args: {
       needsUpdate: false,
       installAction: null,
     },
-    cursor: {
+    "acp-cursor": {
       ...base,
       displayName: "Cursor",
       executableName: "agent",
@@ -115,11 +130,11 @@ describe("bb updates command output", () => {
     const output = collectLogPayloads(vi.mocked(console.log)).join("\n");
     expect(output).toContain("bb-app");
     expect(output).toContain("0.0.32 -> 0.0.33");
-    expect(output).toContain("update available (run: npx bb-app@latest)");
+    expect(output).toContain("Update available (run: npx bb-app@latest)");
     expect(output).toContain("workstation · Codex");
     expect(output).toContain("0.140.0 -> 0.141.0");
     expect(output).toContain("workstation · Claude Code");
-    expect(output).toContain("up to date");
+    expect(output).toContain("Up to date");
     expect(output).toContain("laptop");
     expect(output).toContain("offline");
   });
@@ -208,7 +223,7 @@ describe("bb updates command output", () => {
 
     await runCommand(["updates"], register);
     expect(collectLogPayloads(vi.mocked(console.log)).join("\n")).toContain(
-      "update manually",
+      "Update in terminal",
     );
 
     vi.mocked(console.log).mockClear();

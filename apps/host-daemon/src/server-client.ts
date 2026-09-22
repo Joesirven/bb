@@ -1,10 +1,12 @@
 import pRetry, { AbortError } from "p-retry";
+import { z } from "zod";
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
+  SERVER_MOVED_ERROR_CODE,
+  serverMovedErrorDetailsSchema,
   hostDaemonEventBatchResponseSchema,
   hostDaemonInteractiveInterruptResponseSchema,
   hostDaemonInteractiveRequestResponseSchema,
-  hostDaemonRuntimePolicySchema,
   hostDaemonSessionOpenResponseSchema,
   hostDaemonSkillTreeSchema,
   hostDaemonToolCallResponseSchema,
@@ -17,7 +19,6 @@ import {
   type HostDaemonInteractiveInterruptRequest,
   type HostDaemonInteractiveRequest,
   type HostDaemonLoadedEnvironment,
-  type HostDaemonRuntimePolicy,
   type HostDaemonProjectAttachmentContentQuery,
   type HostDaemonSessionOpenRequest,
   type HostDaemonSessionOpenResponse,
@@ -40,11 +41,23 @@ interface JsonRecord {
   readonly [key: string]: unknown;
 }
 
+const serverMovedResponseDetailsSchema = z.object({
+  serverUrl: serverMovedErrorDetailsSchema.shape.serverUrl,
+  toHostName: serverMovedErrorDetailsSchema.shape.toHostName,
+  movedAt: serverMovedErrorDetailsSchema.shape.movedAt,
+  headers: z.record(z.string(), z.string()).optional(),
+});
+
+export type ServerMovedResponseDetails = z.infer<
+  typeof serverMovedResponseDetailsSchema
+>;
+
 interface ApiErrorResponseBody {
   code: string;
   message: string;
   protocolUpdateRetryRequested: boolean;
   retryable?: boolean;
+  serverMoved: ServerMovedResponseDetails | null;
 }
 
 interface ServerResponseErrorArgs {
@@ -53,6 +66,7 @@ interface ServerResponseErrorArgs {
   code: string | null;
   protocolUpdateRetryRequested?: boolean;
   retryable: boolean;
+  serverMoved?: ServerMovedResponseDetails | null;
   status: number;
   statusText: string;
 }
@@ -63,6 +77,7 @@ export class ServerResponseError extends Error {
   readonly code: string | null;
   readonly protocolUpdateRetryRequested: boolean;
   readonly retryable: boolean;
+  readonly serverMoved: ServerMovedResponseDetails | null;
   readonly status: number;
   readonly statusText: string;
 
@@ -78,6 +93,7 @@ export class ServerResponseError extends Error {
     this.protocolUpdateRetryRequested =
       args.protocolUpdateRetryRequested ?? false;
     this.retryable = args.retryable;
+    this.serverMoved = args.serverMoved ?? null;
     this.status = args.status;
     this.statusText = args.statusText;
   }
@@ -114,6 +130,10 @@ function parseApiErrorResponseBody(text: string): ApiErrorResponseBody | null {
 
   const details = toJsonRecord(record.details);
   const protocolUpdateRetryRequested = details?.retryUpdate === true;
+  const serverMoved =
+    record.code === SERVER_MOVED_ERROR_CODE
+      ? (serverMovedResponseDetailsSchema.safeParse(details).data ?? null)
+      : null;
 
   if (typeof record.retryable === "boolean") {
     return {
@@ -121,6 +141,7 @@ function parseApiErrorResponseBody(text: string): ApiErrorResponseBody | null {
       message: record.message,
       protocolUpdateRetryRequested,
       retryable: record.retryable,
+      serverMoved,
     };
   }
 
@@ -128,6 +149,7 @@ function parseApiErrorResponseBody(text: string): ApiErrorResponseBody | null {
     code: record.code,
     message: record.message,
     protocolUpdateRetryRequested,
+    serverMoved,
   };
 }
 
@@ -149,9 +171,6 @@ function toRetryControlError(error: ServerResponseError): Error {
   return error.retryable ? error : new AbortError(error);
 }
 
-// The client only ever calls fetchFn(url, init); it never uses fetch.preconnect.
-// Typing the dependency as fetch's call signature (not `typeof fetch`) keeps it
-// precise and lets plain function / vi.fn mocks satisfy it.
 export type FetchFn = (
   ...args: Parameters<typeof fetch>
 ) => ReturnType<typeof fetch>;
@@ -160,20 +179,18 @@ interface CreateServerClientOptions {
   serverUrl: string;
   hostKey: string;
   logger: HostDaemonLogger;
-  machineCredential?: string;
+  serverHeaders?: Record<string, string>;
   getSessionId: () => string;
-  /** Runs before each POST attempt so retryable ordering preconditions can be repaired. */
   beforeInteractiveRequestRegistrationAttempt?: () => Promise<void>;
   fetchFn?: FetchFn;
 }
 
 interface OpenSessionArgs {
-  connectMachineId?: string;
   hostId: string;
   hostName: string;
-  hostType: HostDaemonSessionOpenRequest["hostType"];
   dataDir: string;
   instanceId: string;
+  localApiPort: number | null;
   activeThreads: HostDaemonActiveThread[] | Promise<HostDaemonActiveThread[]>;
   loadedEnvironments:
     | HostDaemonLoadedEnvironment[]
@@ -181,7 +198,6 @@ interface OpenSessionArgs {
 }
 
 export interface ServerClient {
-  getRuntimePolicy(): Promise<HostDaemonRuntimePolicy>;
   openSession(args: OpenSessionArgs): Promise<HostDaemonSessionOpenResponse>;
   fetchProjectAttachment(
     args: FetchProjectAttachmentArgs,
@@ -193,7 +209,10 @@ export interface ServerClient {
     expectedByteLength: number;
   }): Promise<Uint8Array>;
   postEvents(events: HostDaemonEventEnvelope[]): Promise<EventPostResult>;
-  callTool(request: ToolCallRequest): Promise<HostDaemonToolCallResponse>;
+  callTool(
+    request: ToolCallRequest,
+    signal?: AbortSignal,
+  ): Promise<HostDaemonToolCallResponse>;
   registerInteractiveRequest(
     request: PendingInteractionCreate,
   ): Promise<HostDaemonInteractiveRequestResponse>;
@@ -316,7 +335,6 @@ function validateHostArtifactPartialByteLength(
   }
 }
 
-/** A declared content-length that disagrees is refused before a byte is read. */
 function assertHostArtifactContentLength(
   response: Response,
   expectedByteLength: number,
@@ -339,15 +357,6 @@ function assertHostArtifactContentLength(
   }
 }
 
-/**
- * Read an executable artifact response — a plugin host bundle or a provider
- * bridge bundle — enforcing the declared length and the absolute ceiling as
- * the stream arrives, so a server that lies about either is cut off mid-body
- * instead of after the daemon has allocated it.
- *
- * `maxBytes` is an internal seam for exercising the limit without allocating
- * the production cap.
- */
 export async function readHostArtifactBytes(
   response: Response,
   expectedByteLength: number,
@@ -410,9 +419,7 @@ export function createServerClient(
     return {
       authorization: `Bearer ${options.hostKey}`,
       "content-type": "application/json",
-      ...(options.machineCredential !== undefined
-        ? { "x-bb-connect-machine": options.machineCredential }
-        : {}),
+      ...options.serverHeaders,
     };
   }
 
@@ -442,23 +449,13 @@ export function createServerClient(
       code: body?.code ?? null,
       protocolUpdateRetryRequested: body?.protocolUpdateRetryRequested ?? false,
       retryable: body?.retryable ?? defaultRetryableForStatus(response.status),
+      serverMoved: body?.serverMoved ?? null,
       status: response.status,
       statusText: response.statusText,
     });
   }
 
   return {
-    async getRuntimePolicy(): Promise<HostDaemonRuntimePolicy> {
-      const response = await fetchFn(buildInternalUrl("/runtime-policy"), {
-        method: "GET",
-        headers: headers(),
-      });
-      if (!response.ok) {
-        throw await createResponseError("get runtime policy", response);
-      }
-      return hostDaemonRuntimePolicySchema.parse(await response.json());
-    },
-
     async openSession(
       args: OpenSessionArgs,
     ): Promise<HostDaemonSessionOpenResponse> {
@@ -466,15 +463,12 @@ export function createServerClient(
         hostId: args.hostId,
         instanceId: args.instanceId,
         hostName: args.hostName,
-        hostType: args.hostType,
-        ...(args.connectMachineId !== undefined
-          ? { connectMachineId: args.connectMachineId }
-          : {}),
-        hasMachineCredential:
-          options.machineCredential !== undefined &&
-          options.machineCredential.trim().length > 0,
+        hasMachineCredential: Boolean(
+          options.serverHeaders?.["x-bb-connect-machine"]?.trim(),
+        ),
         platform: resolveHostPlatform(),
         dataDir: args.dataDir,
+        localApiPort: args.localApiPort,
         protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
         activeThreads: await args.activeThreads,
         loadedEnvironments: await args.loadedEnvironments,
@@ -533,10 +527,6 @@ export function createServerClient(
     },
 
     async fetchSkillTree(treeHash: string): Promise<HostDaemonSkillTree> {
-      // Skill trees ride the same authenticated transport as the rest of the
-      // daemon protocol and are hash-verified after download. For a trusted-LAN
-      // setup, that declared network is the boundary even when it uses HTTP.
-      // Attachments and self-update intentionally retain stricter guards.
       const response = await fetchFn(
         buildInternalUrl(`/skills/tree/${encodeURIComponent(treeHash)}`),
         { method: "GET", headers: headers() },
@@ -566,7 +556,6 @@ export function createServerClient(
       return readHostArtifactBytes(response, args.expectedByteLength);
     },
 
-
     async postEvents(
       events: HostDaemonEventEnvelope[],
     ): Promise<EventPostResult> {
@@ -588,13 +577,13 @@ export function createServerClient(
       const parsed = hostDaemonEventBatchResponseSchema.parse(json);
       return {
         acceptedEvents: parsed.acceptedEvents,
-        kind: "accepted",
         rejectedEvents: parsed.rejectedEvents,
       };
     },
 
     async callTool(
       request: ToolCallRequest,
+      signal?: AbortSignal,
     ): Promise<HostDaemonToolCallResponse> {
       const payload: HostDaemonToolCallRequest = {
         threadId: request.threadId,
@@ -608,6 +597,7 @@ export function createServerClient(
         sessionId: requireSessionId(),
       };
       const response = await fetchFn(buildInternalUrl("/session/tool-call"), {
+        signal,
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),

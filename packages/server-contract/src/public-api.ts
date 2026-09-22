@@ -1,9 +1,47 @@
+import {
+  machineEnvironmentSetSchema,
+  machineEnvironmentDeleteSchema,
+  type MachineEnvironmentSet,
+  type MachineEnvironmentDelete,
+  type ProjectMachineEnvironmentList,
+  type MachineEnvironmentList,
+} from "./api/machine-environment.js";
+import {
+  machineEnvironmentReplaceSchema,
+  type MachineEnvironmentReplace,
+} from "./api/system.js";
+import {
+  desktopBrowserHostRequestSchema,
+  desktopBrowserScopeSchema,
+  desktopBrowserCreateRequestSchema,
+  desktopBrowserAcquireRequestSchema,
+  desktopBrowserLeaseRequestSchema,
+  desktopBrowserTabRequestSchema,
+  type ExperimentalDesktopBrowserHostRequest,
+  type ExperimentalDesktopBrowserScope,
+  type ExperimentalDesktopBrowserCreateInput,
+  type ExperimentalDesktopBrowserAcquireInput,
+  type ExperimentalDesktopBrowserLeaseRequest,
+  type ExperimentalDesktopBrowserTabRequest,
+  type ExperimentalDesktopBrowserInstances,
+  type ExperimentalDesktopBrowserTabs,
+  type ExperimentalDesktopBrowserCreated,
+  type ExperimentalDesktopBrowserLease,
+  type ExperimentalDesktopBrowserConnection,
+  type ExperimentalDesktopBrowserCapture,
+  desktopBrowserInstanceRequestSchema,
+  desktopBrowserImportCookiesRequestSchema,
+  type ExperimentalDesktopBrowserInstanceRequest,
+  type ExperimentalDesktopBrowserImportCookiesInput,
+  type ExperimentalDesktopBrowserImportSources,
+  type ExperimentalDesktopBrowserImportOutcome,
+} from "./api/desktop-browsers.js";
 import type { Hono } from "hono";
-import { hc, type ClientRequestOptions } from "hono/client";
 import type {
   AppTheme,
   AppThemeSelection,
   AppSettings,
+  AppSettingsUpdate,
   AppKeybindingOverrides,
   Environment,
   Experiments,
@@ -16,15 +54,12 @@ import type {
   ThreadQueuedMessage,
 } from "@bb/domain";
 import {
-  appSettingsSchema,
+  appSettingsUpdateSchema,
   appKeybindingOverridesSchema,
   appThemeSelectionSchema,
   experimentsSchema,
 } from "@bb/domain";
-import type {
-  DiscoverReposResult,
-  ProviderUsageResponse,
-} from "@bb/host-daemon-contract";
+import type { ProviderUsageResponse } from "@bb/host-daemon-contract";
 import {
   binaryResponse,
   defineRoute,
@@ -36,9 +71,9 @@ import {
   queryRequest,
   textResponse,
   type ApiSchemaFromRouteDescriptors,
+  type EmptyInput,
 } from "@bb/hono-typed-routes";
 import type {
-  EmptyInput,
   PathId,
   PathProjectId,
   PathPreviewAndFilePath,
@@ -50,10 +85,9 @@ import type {
   CloseTerminalRequest,
   CommandListResponse,
   CopyProjectAttachmentsRequest,
-  ContinueAfterProviderRateLimitRequest,
-  ContinueAfterProviderRateLimitResponse,
   CreateHostJoinCodeRequest,
   CreateHostJoinCodeResponse,
+  CreateMachineRequest,
   CreateTerminalRequest,
   CreateProjectRequest,
   CreateProjectSourceRequest,
@@ -85,6 +119,9 @@ import type {
   EnvironmentStatusResponse,
   HostDirectoryListing,
   HostDirectoryQuery,
+  HostEnrollmentCommandResponse,
+  HostListQuery,
+  HostActionResponse,
   HostCloneDefaultPathQuery,
   HostCloneDefaultPathResponse,
   HostFileListRequest,
@@ -141,6 +178,9 @@ import type {
   ResolveThreadMentionsResponse,
   RespondPluginInteractionRequest,
   SendMessageRequest,
+  RetryTurnRequest,
+  RetryTurnResponse,
+  SendMessageResponse,
   SetQueuedMessageGroupBoundaryRequest,
   SendQueuedMessageRequest,
   SendQueuedMessageResponse,
@@ -154,11 +194,12 @@ import type {
   SystemInstallCliSkillsResponse,
   SystemExecutionOptionsQuery,
   SystemExecutionOptionsResponse,
+  SystemEnvironmentProvidersQuery,
+  SystemEnvironmentProvidersResponse,
+  SystemMachineProvidersResponse,
   SystemProviderInfo,
   SystemProvidersQuery,
-  OnboardingAgentOverview,
-  OnboardingTelemetryEvent,
-  SystemOnboardingReposQuery,
+  SystemProviderStatesResponse,
   SystemUsageLimitsQuery,
   SystemVersionQuery,
   SystemVersionResponse,
@@ -181,6 +222,8 @@ import type {
   ThreadFilesRawQuery,
   ThreadGetQuery,
   ThreadHostFileContentQuery,
+  ThreadCountQuery,
+  ThreadCountResponse,
   ThreadListQuery,
   ThreadListResponse,
   ThreadConversationOutlineResponse,
@@ -188,22 +231,28 @@ import type {
   ThreadOpenResponse,
   ThreadPaneActionRequest,
   ThreadPaneActionResponse,
-  ProviderRateLimitRecoveryStatus,
   ThreadPendingInteractionsResponse,
+  ThreadRunningResponse,
+  QueuedMessageListQuery,
   ThreadQueuedMessageListResponse,
   ThreadResponse,
+  ThreadPluginMetadataQuery,
+  ThreadPluginMetadataResponse,
   ThreadSearchQuery,
   ThreadSearchResponse,
   ThreadStorageContentQuery,
   ThreadStorageFileListResponse,
   ThreadStorageFilesQuery,
+  ThreadStorageLocationResponse,
   ThreadStoragePathListResponse,
   ThreadStoragePathsQuery,
   ThreadTimelineQuery,
   ThreadTimelineResponse,
+  ThreadContextResponse,
   ThreadWithIncludesResponse,
   TimelineTurnSummaryDetailsQuery,
   TimelineTurnSummaryDetailsResponse,
+  ListEnvironmentsQuery,
   UpdateEnvironmentRequest,
   UpdateThreadSectionRequest,
   UpdateTerminalRequest,
@@ -211,6 +260,7 @@ import type {
   UpdateHostPermissionCeilingRequest,
   UpdateProjectRequest,
   UpdateProjectSourceRequest,
+  UpdateThreadPluginMetadataRequest,
   UpdateThreadRequest,
   UpdateQueuedMessageRequest,
   UploadedPromptAttachment,
@@ -218,14 +268,20 @@ import type {
   WorkspacePathListResponse,
 } from "./api-types.js";
 import type {
-  ThreadTabsResponse,
+  ThreadTabsWireResponse,
   UpdateThreadTabsRequest,
 } from "./api/thread-tabs.js";
 import { updateThreadTabsRequestSchema } from "./api/thread-tabs.js";
+import type {
+  PathUiPreferenceKey,
+  UiPreferenceResponse,
+  UiPreferencesResponse,
+  UpdateUiPreferenceRequest,
+} from "./api/ui-preferences.js";
+import { updateUiPreferenceRequestSchema } from "./api/ui-preferences.js";
 import {
   closeTerminalRequestSchema,
   copyProjectAttachmentsRequestSchema,
-  continueAfterProviderRateLimitRequestSchema,
   createFilePreviewRequestSchema,
   createThreadSectionRequestSchema,
   deleteThreadSectionRequestSchema,
@@ -233,11 +289,15 @@ import {
   restartTerminalRequestSchema,
   createProjectRequestSchema,
   createHostJoinCodeRequestSchema,
+  createMachineRequestSchema,
   createProjectSourceRequestSchema,
   createQueuedMessageRequestSchema,
+  queuedMessageListQuerySchema,
   updateQueuedMessageRequestSchema,
   createThreadRequestSchema,
   forkThreadRequestSchema,
+  updateThreadPluginMetadataRequestSchema,
+  threadPluginMetadataQuerySchema,
   deleteThreadRequestSchema,
   environmentActionRequestSchema,
   environmentDiffBranchesQuerySchema,
@@ -247,6 +307,7 @@ import {
   environmentPathsQuerySchema,
   environmentStatusQuerySchema,
   hostDirectoryQuerySchema,
+  hostListQuerySchema,
   hostCloneDefaultPathQuerySchema,
   hostFileListRequestSchema,
   hostFileReadRequestSchema,
@@ -278,14 +339,14 @@ import {
   resolvePendingInteractionRequestSchema,
   resolveThreadMentionsRequestSchema,
   respondPluginInteractionRequestSchema,
+  retryTurnRequestSchema,
   sendMessageRequestSchema,
   editMessageRequestSchema,
   setQueuedMessageGroupBoundaryRequestSchema,
   sendQueuedMessageRequestSchema,
   systemExecutionOptionsQuerySchema,
+  systemEnvironmentProvidersQuerySchema,
   systemProvidersQuerySchema,
-  onboardingTelemetryEventSchema,
-  systemOnboardingReposQuerySchema,
   systemUsageLimitsQuerySchema,
   systemVersionQuerySchema,
   threadEventWaitQuerySchema,
@@ -293,6 +354,7 @@ import {
   threadFilesRawQuerySchema,
   threadGetQuerySchema,
   threadHostFileContentQuerySchema,
+  threadCountQuerySchema,
   threadListQuerySchema,
   threadOpenRequestSchema,
   threadPaneActionRequestSchema,
@@ -308,6 +370,7 @@ import {
   systemCliSkillsStatusQuerySchema,
   systemInstallCliSkillsRequestSchema,
   timelineTurnSummaryDetailsQuerySchema,
+  listEnvironmentsQuerySchema,
   updateEnvironmentRequestSchema,
   updateHostRequestSchema,
   updateHostPermissionCeilingRequestSchema,
@@ -317,6 +380,16 @@ import {
   updateProjectSourceRequestSchema,
   updateThreadRequestSchema,
 } from "./api-types.js";
+import {
+  serverMoveCheckRequestSchema,
+  serverMoveStartRequestSchema,
+  type DeleteOldServerCopyResponse,
+  type ServerMoveCheckRequest,
+  type ServerMoveCheckResponse,
+  type ServerMoveStartRequest,
+  type ServerMoveStatus,
+  type ServerMoveStatusResponse,
+} from "./api/server-move.js";
 import type { ApiError } from "./errors.js";
 
 type PathProjectSourceId = { param: { id: string; sourceId: string } };
@@ -326,6 +399,37 @@ type PathThreadInteractionId = {
 
 export const publicApiRoutes = {
   projects: {
+    machineEnvironment: defineRoute({
+      path: "/projects/:id/machine-environment",
+      method: "get",
+      request: noRequest<PathProjectId>(),
+      response: jsonResponse<ProjectMachineEnvironmentList>(),
+    }),
+    replaceMachineEnvironment: defineRoute({
+      path: "/projects/:id/machine-environment",
+      method: "put",
+      request: jsonRequest<PathProjectId, MachineEnvironmentReplace>(
+        machineEnvironmentReplaceSchema,
+      ),
+      response: jsonResponse<ProjectMachineEnvironmentList>(),
+    }),
+    setMachineEnvironmentVariable: defineRoute({
+      path: "/projects/:id/machine-environment",
+      method: "post",
+      request: jsonRequest<PathProjectId, MachineEnvironmentSet>(
+        machineEnvironmentSetSchema,
+      ),
+      response: jsonResponse<ProjectMachineEnvironmentList>(),
+    }),
+    deleteMachineEnvironmentVariable: defineRoute({
+      path: "/projects/:id/machine-environment",
+      method: "delete",
+      request: jsonRequest<PathProjectId, MachineEnvironmentDelete>(
+        machineEnvironmentDeleteSchema,
+      ),
+      response: jsonResponse<ProjectMachineEnvironmentList>(),
+    }),
+
     list: defineRoute({
       path: "/projects",
       method: "get",
@@ -496,6 +600,14 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<ProjectBranchesResponse>(),
     }),
+    branchOptions: defineRoute({
+      path: "/projects/:id/branch-options",
+      method: "get",
+      request: queryRequest<PathProjectId, ProjectBranchesQuery>(
+        projectBranchesQuerySchema,
+      ),
+      response: jsonResponse<ProjectBranchesResponse>(),
+    }),
     uploadAttachment: defineRoute({
       path: "/projects/:id/attachments",
       method: "post",
@@ -596,7 +708,108 @@ export const publicApiRoutes = {
     }),
   },
 
+  desktopBrowsers: {
+    listInstances: defineRoute({
+      path: "/desktop-browsers/instances",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserHostRequest>(
+        desktopBrowserHostRequestSchema,
+      ),
+      response: jsonResponse<ExperimentalDesktopBrowserInstances>(),
+    }),
+    listTabs: defineRoute({
+      path: "/desktop-browsers/tabs",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserScope>(
+        desktopBrowserScopeSchema,
+      ),
+      response: jsonResponse<ExperimentalDesktopBrowserTabs>(),
+    }),
+    createTab: defineRoute({
+      path: "/desktop-browsers/create",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserCreateInput>(
+        desktopBrowserCreateRequestSchema,
+      ),
+      response: jsonResponse<ExperimentalDesktopBrowserCreated>(),
+    }),
+    acquireControl: defineRoute({
+      path: "/desktop-browsers/acquire",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserAcquireInput>(
+        desktopBrowserAcquireRequestSchema,
+      ),
+      response: jsonResponse<ExperimentalDesktopBrowserLease>(),
+    }),
+    openConnection: defineRoute({
+      path: "/desktop-browsers/connection",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserLeaseRequest>(
+        desktopBrowserLeaseRequestSchema,
+      ),
+      response: jsonResponse<ExperimentalDesktopBrowserConnection>(),
+    }),
+    releaseControl: defineRoute({
+      path: "/desktop-browsers/release",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserLeaseRequest>(
+        desktopBrowserLeaseRequestSchema,
+      ),
+      response: jsonResponse<{ ok: true }>(),
+    }),
+    closeTab: defineRoute({
+      path: "/desktop-browsers/close",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserTabRequest>(
+        desktopBrowserTabRequestSchema,
+      ),
+      response: jsonResponse<{ ok: true }>(),
+    }),
+    revealTab: defineRoute({
+      path: "/desktop-browsers/reveal",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserTabRequest>(
+        desktopBrowserTabRequestSchema,
+      ),
+      response: jsonResponse<{ ok: true }>(),
+    }),
+    captureTab: defineRoute({
+      path: "/desktop-browsers/capture",
+      method: "post",
+      request: jsonRequest<EmptyInput, ExperimentalDesktopBrowserTabRequest>(
+        desktopBrowserTabRequestSchema,
+      ),
+      response: jsonResponse<ExperimentalDesktopBrowserCapture>(),
+    }),
+    listImportSources: defineRoute({
+      path: "/desktop-browsers/import-sources",
+      method: "post",
+      request: jsonRequest<
+        EmptyInput,
+        ExperimentalDesktopBrowserInstanceRequest
+      >(desktopBrowserInstanceRequestSchema),
+      response: jsonResponse<ExperimentalDesktopBrowserImportSources>(),
+    }),
+    importCookies: defineRoute({
+      path: "/desktop-browsers/import-cookies",
+      method: "post",
+      request: jsonRequest<
+        EmptyInput,
+        ExperimentalDesktopBrowserImportCookiesInput
+      >(desktopBrowserImportCookiesRequestSchema),
+      response: jsonResponse<ExperimentalDesktopBrowserImportOutcome>(),
+    }),
+  },
+
   hosts: {
+    create: defineRoute({
+      path: "/hosts",
+      method: "post",
+      request: jsonRequest<EmptyInput, CreateMachineRequest>(
+        createMachineRequestSchema,
+      ),
+      response: jsonResponse<Host>({ status: 201 }),
+    }),
     createJoinCode: defineRoute({
       path: "/hosts/join-codes",
       method: "post",
@@ -608,14 +821,22 @@ export const publicApiRoutes = {
     list: defineRoute({
       path: "/hosts",
       method: "get",
-      request: noRequest(),
+      request: optionalQueryRequest<EmptyInput, HostListQuery>(
+        hostListQuerySchema,
+      ),
       response: jsonResponse<Host[]>(),
     }),
     get: defineRoute({
       path: "/hosts/:id",
       method: "get",
       request: noRequest<PathId>(),
-      response: jsonResponse<Host>(),
+      response: jsonResponse<Host & { connectMachineId: string | null }>(),
+    }),
+    enrollmentCommand: defineRoute({
+      path: "/hosts/:id/enrollment-command",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<HostEnrollmentCommandResponse>(),
     }),
     update: defineRoute({
       path: "/hosts/:id",
@@ -636,6 +857,30 @@ export const publicApiRoutes = {
       method: "post",
       request: noRequest<PathId>(),
       response: jsonResponse<HostRetryUpdateResponse>(),
+    }),
+    reconcile: defineRoute({
+      path: "/hosts/:id/reconcile",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<Host, 202>({ status: 202 }),
+    }),
+    suspend: defineRoute({
+      path: "/hosts/:id/suspend",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<Host, 202>({ status: 202 }),
+    }),
+    resume: defineRoute({
+      path: "/hosts/:id/resume",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<Host, 202>({ status: 202 }),
+    }),
+    retryCleanup: defineRoute({
+      path: "/hosts/:id/retry-cleanup",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<HostActionResponse>(),
     }),
     delete: defineRoute({
       path: "/hosts/:id",
@@ -688,6 +933,48 @@ export const publicApiRoutes = {
         hostProviderCliInstallRequestSchema,
       ),
       response: textResponse<HostProviderCliInstallEvent>(),
+    }),
+    deleteOldServerCopy: defineRoute({
+      path: "/hosts/:id/old-server-copy",
+      method: "delete",
+      request: noRequest<PathId>(),
+      response: jsonResponse<DeleteOldServerCopyResponse>(),
+    }),
+  },
+  server: {
+    checkMove: defineRoute({
+      path: "/server/move/check",
+      method: "post",
+      request: jsonRequest<EmptyInput, ServerMoveCheckRequest>(
+        serverMoveCheckRequestSchema,
+      ),
+      response: jsonResponse<ServerMoveCheckResponse>(),
+    }),
+    startMove: defineRoute({
+      path: "/server/move",
+      method: "post",
+      request: jsonRequest<EmptyInput, ServerMoveStartRequest>(
+        serverMoveStartRequestSchema,
+      ),
+      response: jsonResponse<ServerMoveStatus>(),
+    }),
+    moveStatus: defineRoute({
+      path: "/server/move",
+      method: "get",
+      request: noRequest(),
+      response: jsonResponse<ServerMoveStatusResponse>(),
+    }),
+    cancelMove: defineRoute({
+      path: "/server/move/cancel",
+      method: "post",
+      request: noRequest(),
+      response: jsonResponse<ServerMoveStatus>(),
+    }),
+    export: defineRoute({
+      path: "/server/export",
+      method: "post",
+      request: noRequest(),
+      response: binaryResponse<Uint8Array>(),
     }),
   },
 
@@ -765,6 +1052,24 @@ export const publicApiRoutes = {
   },
 
   environments: {
+    list: defineRoute({
+      path: "/environments",
+      method: "get",
+      request: optionalQueryRequest<EmptyInput, ListEnvironmentsQuery>(
+        listEnvironmentsQuerySchema,
+      ),
+      response: jsonResponse<Environment[]>(),
+    }),
+    delete: defineRoute({
+      path: "/environments/:id",
+      method: "delete",
+      request: noRequest<PathId>(),
+      response: [
+        jsonResponse<{ ok: true }>(),
+        jsonResponse<ApiError>({ status: 404 }),
+        jsonResponse<ApiError>({ status: 409 }),
+      ],
+    }),
     get: defineRoute({
       path: "/environments/:id",
       method: "get",
@@ -844,10 +1149,6 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<WorkspacePathListResponse>(),
     }),
-    /**
-     * Execute an environment action such as commit or squash_merge.
-     * Returns 409 when the action is blocked by environment state.
-     */
     actions: defineRoute({
       path: "/environments/:id/actions",
       method: "post",
@@ -914,6 +1215,31 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<ThreadListResponse>(),
     }),
+    /**
+     * Grouped `SELECT count(*)` over threads. Exists because a plugin gate
+     * that limits concurrency must count without loading: `threads.list`
+     * would page rows into memory and still miscount past its limit.
+     */
+    count: defineRoute({
+      path: "/threads/count",
+      method: "get",
+      request: optionalQueryRequest<EmptyInput, ThreadCountQuery>(
+        threadCountQuerySchema,
+      ),
+      response: jsonResponse<ThreadCountResponse>(),
+    }),
+    /**
+     * The threads occupying capacity right now, as rows rather than a count.
+     * A limiter needs to know *which* threads are running to hold several
+     * pools at once — `threads.count` answers one pool per request and cannot
+     * reconcile a global limit with a per-host one from separate counts.
+     */
+    running: defineRoute({
+      path: "/threads/running",
+      method: "get",
+      request: noRequest(),
+      response: jsonResponse<ThreadRunningResponse>(),
+    }),
     search: defineRoute({
       path: "/threads/search",
       method: "get",
@@ -962,6 +1288,24 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<ThreadResponse>(),
     }),
+    pluginMetadata: {
+      get: defineRoute({
+        path: "/threads/:id/plugin-metadata",
+        method: "get",
+        request: queryRequest<PathId, ThreadPluginMetadataQuery>(
+          threadPluginMetadataQuerySchema,
+        ),
+        response: jsonResponse<ThreadPluginMetadataResponse>(),
+      }),
+      update: defineRoute({
+        path: "/threads/:id/plugin-metadata",
+        method: "patch",
+        request: jsonRequest<PathId, UpdateThreadPluginMetadataRequest>(
+          updateThreadPluginMetadataRequestSchema,
+        ),
+        response: jsonResponse<ThreadPluginMetadataResponse>(),
+      }),
+    },
     delete: defineRoute({
       path: "/threads/:id",
       method: "delete",
@@ -976,39 +1320,14 @@ export const publicApiRoutes = {
       request: noRequest<PathId>(),
       response: jsonResponse<ThreadChildSummaryResponse>(),
     }),
-    /**
-     * Send a message to a thread.
-     * mode=queue-if-active queues when the thread is active; otherwise it
-     * starts a turn. mode=steer-if-active steers when the thread is active;
-     * otherwise it starts a turn. Legacy mode=auto starts idle threads and
-     * uses the provider's auto target for active turns.
-     */
     send: defineRoute({
       path: "/threads/:id/send",
       method: "post",
       request: jsonRequest<PathId, SendMessageRequest>(
         sendMessageRequestSchema,
       ),
-      response: jsonResponse<{ ok: true }>(),
+      response: jsonResponse<SendMessageResponse>(),
     }),
-    rateLimitRecovery: defineRoute({
-      path: "/threads/:id/rate-limit-recovery",
-      method: "get",
-      request: noRequest<PathId>(),
-      response: jsonResponse<ProviderRateLimitRecoveryStatus>(),
-    }),
-    continueAfterRateLimit: defineRoute({
-      path: "/threads/:id/rate-limit-recovery/continue",
-      method: "post",
-      request: jsonRequest<PathId, ContinueAfterProviderRateLimitRequest>(
-        continueAfterProviderRateLimitRequestSchema,
-      ),
-      response: jsonResponse<ContinueAfterProviderRateLimitResponse>(),
-    }),
-    /**
-     * Replace an accepted root user turn and every later turn. A running
-     * thread is stopped and allowed to settle before history is rewritten.
-     */
     editMessage: defineRoute({
       path: "/threads/:id/edit-message",
       method: "post",
@@ -1016,6 +1335,17 @@ export const publicApiRoutes = {
         editMessageRequestSchema,
       ),
       response: jsonResponse<EditMessageResponse>(),
+    }),
+    /**
+     * Retry a failed turn: re-submit it by reference, as an ordinary dispatch
+     * attempt. `turnRequestId` null means the thread's most recent turn, whose
+     * failure is what put the thread in `error`.
+     */
+    retry: defineRoute({
+      path: "/threads/:id/retry",
+      method: "post",
+      request: jsonRequest<PathId, RetryTurnRequest>(retryTurnRequestSchema),
+      response: jsonResponse<RetryTurnResponse>(),
     }),
     queuedMessages: defineRoute({
       path: "/threads/:id/queued-messages",
@@ -1044,10 +1374,6 @@ export const publicApiRoutes = {
       >(updateQueuedMessageRequestSchema),
       response: jsonResponse<ThreadQueuedMessage>(),
     }),
-    /**
-     * Send a previously queued message in the requested mode, then delete the
-     * queued message.
-     */
     sendQueuedMessage: defineRoute({
       path: "/threads/:id/queued-messages/:queuedMessageId/send",
       method: "post",
@@ -1100,6 +1426,12 @@ export const publicApiRoutes = {
       request: noRequest<PathId>(),
       response: jsonResponse<{ ok: true }>(),
     }),
+    clearContext: defineRoute({
+      path: "/threads/:id/context/clear",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<{ ok: true }>(),
+    }),
     cancelPlan: defineRoute({
       path: "/threads/:id/plan/cancel",
       method: "post",
@@ -1130,7 +1462,7 @@ export const publicApiRoutes = {
       path: "/threads/:id/tabs",
       method: "get",
       request: noRequest<PathId>(),
-      response: jsonResponse<ThreadTabsResponse>(),
+      response: jsonResponse<ThreadTabsWireResponse>(),
     }),
     updateTabs: defineRoute({
       path: "/threads/:id/tabs",
@@ -1139,7 +1471,7 @@ export const publicApiRoutes = {
         updateThreadTabsRequestSchema,
       ),
       response: [
-        jsonResponse<ThreadTabsResponse>(),
+        jsonResponse<ThreadTabsWireResponse>(),
         jsonResponse<ApiError>({ status: 409 }),
       ],
     }),
@@ -1199,12 +1531,6 @@ export const publicApiRoutes = {
       request: noRequest<PathThreadInteractionId>(),
       response: jsonResponse<PendingInteraction>(),
     }),
-    archive: defineRoute({
-      path: "/threads/:id/archive",
-      method: "post",
-      request: noRequest<PathId>(),
-      response: jsonResponse<{ ok: true }>(),
-    }),
     archiveAll: defineRoute({
       path: "/threads/:id/archive-all",
       method: "post",
@@ -1236,6 +1562,12 @@ export const publicApiRoutes = {
         threadTimelineQuerySchema,
       ),
       response: jsonResponse<ThreadTimelineResponse>(),
+    }),
+    context: defineRoute({
+      path: "/threads/:id/context",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<ThreadContextResponse>(),
     }),
     conversationOutline: defineRoute({
       path: "/threads/:id/conversation-outline",
@@ -1287,6 +1619,12 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<ThreadStorageFileListResponse>(),
     }),
+    storageLocation: defineRoute({
+      path: "/threads/:id/thread-storage/location",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<ThreadStorageLocationResponse>(),
+    }),
     storageFile: defineRoute({
       path: "/threads/:id/thread-storage/files/:filePath{.+}",
       method: "get",
@@ -1333,7 +1671,56 @@ export const publicApiRoutes = {
     }),
   },
 
+  queue: {
+    /**
+     * Every live queued row, optionally narrowed to one thread or one
+     * wait holder. Cross-thread because "what is queued right now" is a
+     * whole-workspace question (`bb thread queue list` with no thread, a
+     * limiter plugin's own bookkeeping, a router recovering its rows after a
+     * restart) that no single thread's list can answer.
+     */
+    list: defineRoute({
+      path: "/queued-messages",
+      method: "get",
+      request: optionalQueryRequest<EmptyInput, QueuedMessageListQuery>(
+        queuedMessageListQuerySchema,
+      ),
+      response: jsonResponse<ThreadQueuedMessageListResponse>(),
+    }),
+  },
+
   system: {
+    setMachineEnvironmentVariable: defineRoute({
+      path: "/settings/machine-environment",
+      method: "post",
+      request: jsonRequest<EmptyInput, MachineEnvironmentSet>(
+        machineEnvironmentSetSchema,
+      ),
+      response: jsonResponse<MachineEnvironmentList>(),
+    }),
+    deleteMachineEnvironmentVariable: defineRoute({
+      path: "/settings/machine-environment",
+      method: "delete",
+      request: jsonRequest<EmptyInput, MachineEnvironmentDelete>(
+        machineEnvironmentDeleteSchema,
+      ),
+      response: jsonResponse<MachineEnvironmentList>(),
+    }),
+
+    machineEnvironment: defineRoute({
+      path: "/settings/machine-environment",
+      method: "get",
+      request: noRequest(),
+      response: jsonResponse<MachineEnvironmentList>(),
+    }),
+    replaceMachineEnvironment: defineRoute({
+      path: "/settings/machine-environment",
+      method: "put",
+      request: jsonRequest<EmptyInput, MachineEnvironmentReplace>(
+        machineEnvironmentReplaceSchema,
+      ),
+      response: jsonResponse<MachineEnvironmentList>(),
+    }),
     attention: defineRoute({
       path: "/system/attention",
       method: "get",
@@ -1349,8 +1736,12 @@ export const publicApiRoutes = {
     generalSettings: defineRoute({
       path: "/settings/general",
       method: "put",
-      request: jsonRequest<EmptyInput, AppSettings>(appSettingsSchema),
-      response: jsonResponse<AppSettings>(),
+      request: jsonRequest<EmptyInput, AppSettingsUpdate>(
+        appSettingsUpdateSchema,
+      ),
+      response: jsonResponse<
+        AppSettings & { showUnhandledProviderEvents?: boolean }
+      >(),
     }),
     keyboardSettings: defineRoute({
       path: "/settings/keyboard",
@@ -1374,11 +1765,50 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<AppTheme>(),
     }),
+    uiPreferences: defineRoute({
+      path: "/preferences/ui",
+      method: "get",
+      request: noRequest(),
+      response: jsonResponse<UiPreferencesResponse>(),
+    }),
+    updateUiPreference: defineRoute({
+      path: "/preferences/ui/:key",
+      method: "put",
+      request: jsonRequest<PathUiPreferenceKey, UpdateUiPreferenceRequest>(
+        updateUiPreferenceRequestSchema,
+      ),
+      response: [
+        jsonResponse<UiPreferenceResponse>(),
+        jsonResponse<ApiError>({ status: 404 }),
+        jsonResponse<ApiError>({ status: 409 }),
+      ],
+    }),
+    resetUiPreference: defineRoute({
+      path: "/preferences/ui/:key",
+      method: "delete",
+      request: noRequest<PathUiPreferenceKey>(),
+      response: [
+        jsonResponse<UiPreferenceResponse>(),
+        jsonResponse<ApiError>({ status: 404 }),
+      ],
+    }),
     themes: defineRoute({
       path: "/settings/themes",
       method: "get",
       request: noRequest(),
       response: jsonResponse<ThemeCatalogResponse>(),
+    }),
+    /**
+     * Resolve a built-in, custom, or plugin theme exactly as activating it
+     * would, without persisting anything. The Settings palette hover preview
+     * and `bb theme show <id>` read it; `faviconColor` echoes the stored
+     * appearance because the response is a full `AppTheme`.
+     */
+    resolveTheme: defineRoute({
+      path: "/settings/themes/:id",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<AppTheme>(),
     }),
     reloadConfig: defineRoute({
       path: "/system/config/reload",
@@ -1410,6 +1840,21 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<SystemExecutionOptionsResponse>(),
     }),
+    environmentProviders: defineRoute({
+      path: "/system/environment-providers",
+      method: "get",
+      request: optionalQueryRequest<
+        EmptyInput,
+        SystemEnvironmentProvidersQuery
+      >(systemEnvironmentProvidersQuerySchema),
+      response: jsonResponse<SystemEnvironmentProvidersResponse>(),
+    }),
+    machineProviders: defineRoute({
+      path: "/system/machine-providers",
+      method: "get",
+      request: noRequest(),
+      response: jsonResponse<SystemMachineProvidersResponse>(),
+    }),
     providers: defineRoute({
       path: "/system/providers",
       method: "get",
@@ -1424,29 +1869,13 @@ export const publicApiRoutes = {
       request: noRequest<PathId>(),
       response: binaryResponse<Uint8Array>(),
     }),
-    onboardingEvent: defineRoute({
-      path: "/system/onboarding/event",
-      method: "post",
-      request: jsonRequest<EmptyInput, OnboardingTelemetryEvent>(
-        onboardingTelemetryEventSchema,
-      ),
-      response: jsonResponse<{ ok: true }>(),
-    }),
-    onboardingAgents: defineRoute({
-      path: "/system/onboarding/agents",
+    providerStates: defineRoute({
+      path: "/system/providers/state",
       method: "get",
       request: optionalQueryRequest<EmptyInput, SystemProvidersQuery>(
         systemProvidersQuerySchema,
       ),
-      response: jsonResponse<OnboardingAgentOverview>(),
-    }),
-    onboardingRepos: defineRoute({
-      path: "/system/onboarding/repos",
-      method: "get",
-      request: optionalQueryRequest<EmptyInput, SystemOnboardingReposQuery>(
-        systemOnboardingReposQuerySchema,
-      ),
-      response: jsonResponse<DiscoverReposResult>(),
+      response: jsonResponse<SystemProviderStatesResponse>(),
     }),
     usageLimits: defineRoute({
       path: "/system/usage-limits",
@@ -1478,43 +1907,3 @@ export type PublicApiSchema = ApiSchemaFromRouteDescriptors<
 >;
 
 export type PublicApiRoutes = Hono<{}, PublicApiSchema, "/">;
-
-export type PublicApiFetch = (
-  ...args: Parameters<typeof fetch>
-) => ReturnType<typeof fetch>;
-
-/** Omit the options object to use global fetch; provide it to override fetch. */
-export interface PublicApiClientOptions {
-  fetch: PublicApiFetch;
-}
-
-function toHonoClientOptions(
-  options: PublicApiClientOptions | undefined,
-): ClientRequestOptions | undefined {
-  if (options === undefined) {
-    return undefined;
-  }
-  // Hono types custom fetch as typeof fetch, but only calls the function.
-  return { fetch: options.fetch as typeof fetch };
-}
-
-export function createPublicApiClient(
-  baseUrl: string,
-  options?: PublicApiClientOptions,
-) {
-  return hc<PublicApiRoutes>(`${baseUrl}/api/v1`, toHonoClientOptions(options));
-}
-
-export function createApiClient(
-  baseUrl: string,
-  options?: PublicApiClientOptions,
-) {
-  const apiClient = createPublicApiClient(baseUrl, options);
-  return {
-    api: {
-      v1: apiClient,
-    },
-  };
-}
-
-export type ApiClient = ReturnType<typeof createApiClient>;

@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { HugeiconsIcon } from "@hugeicons/react";
-import {
-  ArrowUpRight01Icon,
-  GithubIcon,
-  MoreHorizontalIcon,
-  PlusSignIcon,
-} from "@hugeicons/core-free-icons";
-import { MAX_SERVERS_PER_ACCOUNT } from "@bb/connect-db";
+import ArrowUpRight01Icon from "@hugeicons/core-free-icons/ArrowUpRight01Icon";
+import GithubIcon from "@hugeicons/core-free-icons/GithubIcon";
+import MoreHorizontalIcon from "@hugeicons/core-free-icons/MoreHorizontalIcon";
+import PlusSignIcon from "@hugeicons/core-free-icons/PlusSignIcon";
+import { MAX_PER_ACCOUNT } from "@bb/connect-db";
 import type { HandleValidationError, LabelAvailability } from "@bb/connect-db";
 import appCss from "../styles.css?url";
 import { Button } from "@/components/ui/button";
@@ -25,7 +23,6 @@ import {
   getDashboard,
 } from "@/server/fns";
 import type { IssuedCode, MachineSummary, ServerSummary } from "@/server/api";
-import bbIcon from "../assets/bb-icon.png";
 import { DASHBOARD_PATH, connectReturnTo } from "@/lib/connect-return-to";
 import {
   dashboardRefreshIntervalMs,
@@ -37,9 +34,6 @@ interface DashboardSearch {
   returnTo?: string;
 }
 
-// Absent means absent: never surface the literal strings "null"/"undefined" (or
-// empty) as a return target, and omit the key entirely when there is none so the
-// router never re-serializes `?returnTo=null` back into the URL.
 function validateDashboardSearch(
   search: Record<string, unknown>,
 ): DashboardSearch {
@@ -70,12 +64,15 @@ type ServerState = Extract<
   { authed: true }
 >;
 
-/* ── layout shell ─────────────────────────────────────────────────── */
-
 function BrandRow() {
   return (
     <div className="mb-[18px] flex items-center gap-2.5">
-      <img src={bbIcon} alt="bb" className="h-[30px] w-[30px] rounded-lg" />
+      {}
+      <span
+        role="img"
+        aria-label="bb"
+        className="bb-mark h-[30px] w-[30px] rounded-lg"
+      />
       <div className="leading-tight">
         <b className="block text-sm font-semibold">bb connect</b>
         <span className="text-xs text-muted-foreground">
@@ -89,7 +86,6 @@ function BrandRow() {
 const SHELL_WIDTH = {
   sm: "max-w-[430px]",
   md: "max-w-[480px]",
-  lg: "max-w-[530px]",
 } as const;
 
 function Shell({
@@ -138,8 +134,6 @@ function WebCard({
   );
 }
 
-/* ── small primitives ─────────────────────────────────────────────── */
-
 function StatusDot({ state }: { state: "online" | "offline" | "new" }) {
   return (
     <span
@@ -176,9 +170,6 @@ function CopyButton({
       size="sm"
       disabled={disabled}
       onClick={() => {
-        // Copy has a failure path: locked-down / insecure contexts reject the
-        // write, so fall back to asking the user to press ⌘C instead of
-        // silently doing nothing.
         navigator.clipboard.writeText(text).then(
           () => {
             setState("copied");
@@ -241,8 +232,6 @@ function GithubMark() {
   return <HugeiconsIcon icon={GithubIcon} className="size-4" aria-hidden />;
 }
 
-/* ── formatting + copy ────────────────────────────────────────────── */
-
 function relativeTime(ms: number): string {
   const secs = Math.max(0, Math.floor((Date.now() - ms) / 1000));
   if (secs < 60) return "just now";
@@ -297,8 +286,6 @@ function claimErrorCopy(err: string, max: number): string {
   }
 }
 
-/* ── auth actions ─────────────────────────────────────────────────── */
-
 async function signInWithGithub(returnTo: string | undefined) {
   const callbackURL =
     connectReturnTo(returnTo, window.location.origin) ?? DASHBOARD_PATH;
@@ -340,8 +327,6 @@ async function authenticateWithEmail(input: {
 }
 
 async function signOut() {
-  // better-auth requires the JSON content-type (else 415) and a JSON body
-  // (an empty body makes it 500); the browser supplies the Origin it checks.
   await fetch("/api/auth/sign-out", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -349,8 +334,6 @@ async function signOut() {
   });
   window.location.href = "/dashboard";
 }
-
-/* ── root ─────────────────────────────────────────────────────────── */
 
 function Home() {
   const data = Route.useLoaderData();
@@ -373,8 +356,6 @@ function Home() {
     return <ClaimView serverUrlTemplate={data.serverUrlTemplate} />;
   return <AccountDashboard state={data} />;
 }
-
-/* ── W1: sign in ──────────────────────────────────────────────────── */
 
 function SignInView({
   emailPasswordEnabled,
@@ -522,14 +503,12 @@ function SignInView({
           Continue with GitHub
         </Button>
         <p className="mt-3 text-center text-xs text-subtle-foreground">
-          Up to {MAX_SERVERS_PER_ACCOUNT} servers per account
+          Up to {MAX_PER_ACCOUNT} servers per account
         </p>
       </WebCard>
     </Shell>
   );
 }
-
-/* ── shared claim field (W2 handle + M2 label) ────────────────────── */
 
 function ClaimField({
   serverUrlTemplate,
@@ -606,7 +585,7 @@ function ClaimField({
   return (
     <div>
       <div className="flex items-center overflow-hidden rounded-lg border border-border bg-card focus-within:ring-1 focus-within:ring-ring">
-        {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+        {/* oxlint-disable-next-line jsx-a11y/no-autofocus */}
         <input
           value={value}
           autoFocus={autoFocus}
@@ -644,8 +623,6 @@ function ClaimField({
   );
 }
 
-/* ── W2: claim handle ─────────────────────────────────────────────── */
-
 function ClaimView({ serverUrlTemplate }: { serverUrlTemplate: string }) {
   const router = useRouter();
   return (
@@ -672,15 +649,13 @@ function ClaimView({ serverUrlTemplate }: { serverUrlTemplate: string }) {
               await router.invalidate();
               return null;
             }
-            return claimErrorCopy(r.error, MAX_SERVERS_PER_ACCOUNT);
+            return claimErrorCopy(r.error, MAX_PER_ACCOUNT);
           }}
         />
       </WebCard>
     </Shell>
   );
 }
-
-/* ── setup-mode code panel (W2b first-run + M2 beat 2) ────────────── */
 
 function SetupCodePanel({
   serverId,
@@ -689,7 +664,6 @@ function SetupCodePanel({
 }: {
   serverId: string | undefined;
   waitingText: string;
-  /** Drop the top divider above the waiting line when already inside a box (dialog / inline panel). */
   compact?: boolean;
 }) {
   const [code, setCode] = useState<IssuedCode | null>(null);
@@ -704,7 +678,6 @@ function SetupCodePanel({
     void fetchCode();
   }, [fetchCode]);
 
-  // Re-mint in place when the shown code expires.
   useEffect(() => {
     if (!code) return;
     const t = setTimeout(
@@ -755,12 +728,9 @@ function SetupCodePanel({
   );
 }
 
-/* ── re-pair code disclosure ──────────────────────────────────────── */
-
 function RepairCodeBlock({ serverId }: { serverId: string }) {
   const [code, setCode] = useState<IssuedCode | null>(null);
   useEffect(() => {
-    // "Pair again" always mints fresh (reuse: false).
     void createCodeFn({ data: { serverId, reuse: false } }).then((r) => {
       if ("code" in r) setCode(r);
     });
@@ -777,15 +747,12 @@ function RepairCodeBlock({ serverId }: { serverId: string }) {
   );
 }
 
-/* ── disconnect / remove confirm ──────────────────────────────────── */
-
 function ConfirmServerAction({
   server,
   mode,
   onCancel,
 }: {
   server: ServerSummary;
-  /** "disconnect" revokes a live credential (row survives); "remove" deletes a never-paired row. */
   mode: "disconnect" | "remove";
   onCancel: () => void;
 }) {
@@ -834,8 +801,6 @@ function ConfirmServerAction({
   );
 }
 
-/* ── row overflow menu ────────────────────────────────────────────── */
-
 function RowMenu({
   items,
 }: {
@@ -851,8 +816,6 @@ function RowMenu({
         )}
         aria-label="More"
         onClick={(e) => {
-          // The row is a link / click target; keep the button's own click from
-          // navigating or toggling the row's panel.
           e.preventDefault();
           e.stopPropagation();
           setOpen((v) => !v);
@@ -896,18 +859,13 @@ function RowMenu({
   );
 }
 
-/* ── server row — one row per bb, the row is the link ─────────────── */
-
 function ServerRow({
   server,
   autoPair,
 }: {
   server: ServerSummary;
-  /** First-run: the sole never-paired bb opens its pair panel by default. */
   autoPair?: boolean;
 }) {
-  // A connected row toggles the re-pair panel; a never-paired row toggles its
-  // setup panel. `panel` tracks which (if any) is showing under this row.
   const [panel, setPanel] = useState<ServerPanel>(
     autoPair && !server.connected ? "setup" : "none",
   );
@@ -933,8 +891,6 @@ function ServerRow({
       ]
     : [
         { label: "Copy URL", onSelect: copyUrl },
-        // The primary bb (subdomain === handle) is the account's identity and
-        // can't be removed; only never-paired secondaries offer Remove.
         ...(server.isPrimary
           ? []
           : [
@@ -1045,8 +1001,6 @@ function ServerRow({
   );
 }
 
-/* ── M2: connect another bb dialog ────────────────────────────────── */
-
 function ConnectAnotherDialog({
   state,
   onClose,
@@ -1130,8 +1084,6 @@ function ConnectAnotherDialog({
   );
 }
 
-/* ── footer ───────────────────────────────────────────────────────── */
-
 function AccountFooter({ state }: { state: ServerState }) {
   const gh = state.githubLogin
     ? `https://github.com/${state.githubLogin}`
@@ -1166,8 +1118,6 @@ function AccountFooter({ state }: { state: ServerState }) {
   );
 }
 
-/* ── account dashboard — one list for 1..N bbs ────────────────────── */
-
 function AccountDashboard({ state }: { state: ServerState }) {
   const router = useRouter();
   const [connectOpen, setConnectOpen] = useState(false);
@@ -1184,7 +1134,6 @@ function AccountDashboard({ state }: { state: ServerState }) {
     return () => clearInterval(id);
   }, [refreshIntervalMs, router]);
 
-  // Self-close the connect dialog once the new server pairs.
   useEffect(() => {
     if (pendingId == null) return;
     if (
@@ -1201,8 +1150,6 @@ function AccountDashboard({ state }: { state: ServerState }) {
       onClose={() => {
         setConnectOpen(false);
         setPendingId(null);
-        // A claim may have created a still-offline row; refetch so the list
-        // reflects it (e.g. after "Do this later").
         void router.invalidate();
       }}
       onServerCreated={(id) => setPendingId(id)}
@@ -1220,7 +1167,7 @@ function AccountDashboard({ state }: { state: ServerState }) {
 
   return (
     <Shell top width="md" footer={<AccountFooter state={state} />}>
-      {/* Tight padding so each row is a full-bleed, rounded hover target. */}
+      {}
       <div className="rounded-xl border border-border bg-card p-2 shadow-sm">
         <div className="flex items-center px-1.5 pb-1.5 pl-3 pt-1.5">
           <h3 className="flex-1 text-[17px] font-semibold tracking-tight">

@@ -32,7 +32,7 @@ concurrency:
 jobs:
   macos:
     name: macOS arm64 desktop artifacts
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-latest
     timeout-minutes: 45
     outputs:
       has_signing_secrets: ${{ steps.signing.outputs.has_signing_secrets }}
@@ -40,6 +40,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -64,6 +66,9 @@ jobs:
 
       - name: Build desktop
         run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
+
+      - name: Install Electron before parallel tests
+        run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
 
       - name: Test desktop and launcher
         run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --force --output-logs=new-only
@@ -149,6 +154,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -165,11 +172,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
 
+      - name: Install AppImage FUSE runtime
+        uses: ./.github/actions/install-appimage-fuse
+        timeout-minutes: 5
+
       - name: Typecheck desktop and launcher
         run: pnpm exec turbo run typecheck --filter=@bb/desktop --filter=bb-app --output-logs=new-only
 
       - name: Build desktop
         run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
+
+      - name: Install Electron before parallel tests
+        run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
 
       - name: Test desktop and launcher
         run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --force --output-logs=new-only
@@ -183,6 +197,11 @@ jobs:
         # The packaged app opens a real BrowserWindow, so the headless runner
         # needs a virtual display.
         run: xvfb-run -a pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
+
+      - name: Smoke test AppImage mount lifecycle
+        # Launches the generated AppImage itself, tears down only its GUI mount,
+        # and verifies the separately mounted owned runtime remains healthy.
+        run: xvfb-run -a pnpm exec turbo run smoke:appimage-lifecycle --filter=@bb/desktop --force --output-logs=new-only
 
       - name: Generate desktop version feed
         run: pnpm --dir apps/desktop run desktop:version-feed
@@ -203,7 +222,7 @@ jobs:
     needs:
       - macos
       - linux
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write

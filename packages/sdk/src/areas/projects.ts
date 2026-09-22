@@ -1,4 +1,7 @@
 import type {
+  MachineEnvironmentReplace,
+  MachineEnvironmentSet,
+  ProjectMachineEnvironmentList,
   CommandListResponse,
   CopyProjectAttachmentsRequest,
   CreateProjectRequest,
@@ -15,6 +18,7 @@ import type {
   PromptHistoryResponse,
   PromptHistoryQuery,
   ReorderProjectRequest,
+  SidebarBootstrapResponse,
   UpdateProjectRequest,
   UpdateProjectSourceRequest,
   UploadedPromptAttachment,
@@ -27,7 +31,6 @@ import { signalRequestArgs, type CreateSdkAreaArgs } from "./common.js";
 
 export interface ProjectListArgs {
   include?: ProjectListQuery["include"];
-  /** Include the singleton personal project. Defaults to false for compatibility. */
   includePersonal?: boolean;
   signal?: AbortSignal;
 }
@@ -56,7 +59,6 @@ export interface ProjectPromptHistoryArgs extends PromptHistoryQuery {
   signal?: AbortSignal;
 }
 
-/** Select one project workspace source, or omit both for the primary host. */
 export type ProjectWorkspaceRoutingArgs =
   | { environmentId: string; hostId?: never }
   | { environmentId?: never; hostId: string }
@@ -96,6 +98,10 @@ export interface ProjectDefaultExecutionOptionsArgs {
   signal?: AbortSignal;
 }
 
+export interface ProjectSidebarBootstrapArgs {
+  signal?: AbortSignal;
+}
+
 export interface ProjectAttachmentFileLike {
   arrayBuffer(): Promise<ArrayBuffer>;
   readonly name: string;
@@ -109,15 +115,10 @@ export type ProjectAttachmentUploadFile =
   | Uint8Array;
 
 interface ProjectAttachmentUploadArgsBase {
-  /** MIME override. Omit to use the File/Blob type, when available. */
   mimeType?: string;
   projectId: string;
 }
 
-/**
- * Upload bytes owned by this SDK client. A bare Blob/byte buffer needs an
- * explicit filename; File-like values can supply their own name.
- */
 export type ProjectAttachmentUploadArgs = ProjectAttachmentUploadArgsBase &
   (
     | {
@@ -163,11 +164,9 @@ export interface ProjectAttachmentReadResult {
 export type ProjectAttachmentUploadResult = UploadedPromptAttachment;
 export type ProjectCommandsResult = CommandListResponse;
 export type ProjectCreateResult = ProjectResponse;
-export type ProjectDefaultExecutionOptionsResult =
-  ProjectExecutionDefaults | null;
+export type ProjectDefaultExecutionOptionsResult = ProjectExecutionDefaults | null;
 export type ProjectDeleteResult = { ok: true };
 export interface ProjectFileContentResult {
-  /** UTF-8 text or base64, as selected by `contentEncoding`. */
   content: string;
   contentEncoding: "utf8" | "base64";
   mimeType: string;
@@ -181,6 +180,7 @@ export type ProjectListResult =
 export type ProjectPathsResult = WorkspacePathListResponse;
 export type ProjectPromptHistoryResult = PromptHistoryResponse;
 export type ProjectReorderResult = ProjectResponse[];
+export type ProjectSidebarBootstrapResult = SidebarBootstrapResponse;
 export type ProjectSourceAddResult = ProjectSource;
 export type ProjectSourceDeleteResult = { ok: true };
 export type ProjectSourceUpdateResult = ProjectSource;
@@ -201,6 +201,19 @@ export interface ProjectAttachmentsArea {
 }
 
 export interface ProjectsArea {
+  machineEnvironment(args: {
+    projectId: string;
+  }): Promise<ProjectMachineEnvironmentList>;
+  replaceMachineEnvironment(
+    args: { projectId: string } & MachineEnvironmentReplace,
+  ): Promise<ProjectMachineEnvironmentList>;
+  setMachineEnvironmentVariable(
+    args: { projectId: string } & MachineEnvironmentSet,
+  ): Promise<ProjectMachineEnvironmentList>;
+  deleteMachineEnvironmentVariable(args: {
+    projectId: string;
+    name: string;
+  }): Promise<ProjectMachineEnvironmentList>;
   attachments: ProjectAttachmentsArea;
   branches(args: ProjectBranchesArgs): Promise<ProjectBranchesResult>;
   commands(args: ProjectCommandsArgs): Promise<ProjectCommandsResult>;
@@ -218,6 +231,9 @@ export interface ProjectsArea {
     args: ProjectPromptHistoryArgs,
   ): Promise<ProjectPromptHistoryResult>;
   reorder(args: ProjectReorderArgs): Promise<ProjectReorderResult>;
+  sidebarBootstrap(
+    args?: ProjectSidebarBootstrapArgs,
+  ): Promise<ProjectSidebarBootstrapResult>;
   sources: ProjectSourcesArea;
   update(args: ProjectUpdateArgs): Promise<ProjectUpdateResult>;
 }
@@ -360,9 +376,12 @@ export function createProjectsArea(args: CreateSdkAreaArgs): ProjectsArea {
       const filename = resolveAttachmentFilename(input);
       const mimeType =
         input.mimeType ?? embeddedAttachmentMimeType(input.clientFile) ?? "";
-      const file = new Blob([await attachmentBytes(input.clientFile)], {
-        type: mimeType,
-      });
+      const file =
+        input.clientFile instanceof Blob && input.clientFile.type === mimeType
+          ? input.clientFile
+          : new Blob([await attachmentBytes(input.clientFile)], {
+              type: mimeType,
+            });
       const form = new FormData();
       form.set("file", file, filename);
       const baseUrl = transport.baseUrl.replace(/\/$/u, "");
@@ -498,6 +517,37 @@ export function createProjectsArea(args: CreateSdkAreaArgs): ProjectsArea {
         ),
       );
     },
+    async machineEnvironment(input) {
+      return transport.readJson(
+        transport.api.v1.projects[":id"]["machine-environment"].$get({
+          param: { id: input.projectId },
+        }),
+      );
+    },
+    async replaceMachineEnvironment(input) {
+      return transport.readJson(
+        transport.api.v1.projects[":id"]["machine-environment"].$put({
+          param: { id: input.projectId },
+          json: { variables: input.variables },
+        }),
+      );
+    },
+    async setMachineEnvironmentVariable(input) {
+      return transport.readJson(
+        transport.api.v1.projects[":id"]["machine-environment"].$post({
+          param: { id: input.projectId },
+          json: { name: input.name, value: input.value, note: input.note },
+        }),
+      );
+    },
+    async deleteMachineEnvironmentVariable(input) {
+      return transport.readJson(
+        transport.api.v1.projects[":id"]["machine-environment"].$delete({
+          param: { id: input.projectId },
+          json: { name: input.name },
+        }),
+      );
+    },
     async get(input) {
       return transport.readJson(
         transport.api.v1.projects[":id"].$get(
@@ -551,6 +601,14 @@ export function createProjectsArea(args: CreateSdkAreaArgs): ProjectsArea {
             nextProjectId: input.nextProjectId,
           },
         }),
+      );
+    },
+    async sidebarBootstrap(input = {}) {
+      return transport.readJson(
+        transport.api.v1["sidebar-bootstrap"].$get(
+          {},
+          ...signalRequestArgs(input.signal),
+        ),
       );
     },
     sources,

@@ -21,7 +21,6 @@ function setup() {
   migrate(db);
   const host = upsertHost(db, noopNotifier, {
     name: "test-host",
-    type: "persistent",
   });
   const { project } = createProject(db, noopNotifier, {
     name: "test-project",
@@ -31,7 +30,7 @@ function setup() {
       type: "local_path",
     },
   });
-  return { db, project };
+  return { db, host, project };
 }
 
 function captureApiError(callback: ThrowingCallback): ApiError {
@@ -58,11 +57,33 @@ describe("thread parent validation", () => {
       { db },
       {
         parentThreadId: parentThread.id,
-        projectId: project.id,
       },
     );
 
     expect(validatedParent.id).toBe(parentThread.id);
+  });
+
+  it("accepts a live parent thread from another project", () => {
+    const { db, host } = setup();
+    const { project: otherProject } = createProject(db, noopNotifier, {
+      name: "other-project",
+      source: {
+        hostId: host.id,
+        path: "/tmp/thread-parent-test-other",
+        type: "local_path",
+      },
+    });
+    const parentThread = createThread(db, noopNotifier, {
+      projectId: otherProject.id,
+      providerId: "codex",
+    });
+
+    const validatedParent = assertValidParentThread(
+      { db },
+      { parentThreadId: parentThread.id },
+    );
+
+    expect(validatedParent.projectId).toBe(otherProject.id);
   });
 
   it("rejects self-parenting", () => {
@@ -78,7 +99,6 @@ describe("thread parent validation", () => {
         {
           childThreadId: thread.id,
           parentThreadId: thread.id,
-          projectId: project.id,
         },
       );
     });
@@ -112,7 +132,6 @@ describe("thread parent validation", () => {
         {
           childThreadId: rootThread.id,
           parentThreadId: grandchildThread.id,
-          projectId: project.id,
         },
       );
     });
@@ -144,7 +163,6 @@ describe("thread parent validation", () => {
       { db },
       {
         parentThreadId: level3Thread.id,
-        projectId: project.id,
       },
     );
 
@@ -178,7 +196,6 @@ describe("thread parent validation", () => {
         { db },
         {
           parentThreadId: level4Thread.id,
-          projectId: project.id,
         },
       );
     });
@@ -221,7 +238,6 @@ describe("thread parent validation", () => {
         {
           childThreadId: movingThread.id,
           parentThreadId: level3Thread.id,
-          projectId: project.id,
         },
       );
     });

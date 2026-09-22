@@ -15,6 +15,7 @@ import type {
 } from "@bb/server-contract";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { systemExecutionOptionsQueryKey } from "@/hooks/queries/query-keys";
+import { sdk } from "@/lib/sdk";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { CompactViewportOverrideProvider } from "@bb/shared-ui/hooks/use-compact-viewport";
 import {
@@ -22,11 +23,12 @@ import {
   type PaneContextValue,
 } from "@/views/thread-detail/PaneContext";
 import {
-  buildFuzzyRegex,
   buildModelNavRows,
   ModelReasoningPicker,
+  type ModelReasoningPickerHandoff,
 } from "./ModelReasoningPicker";
 import type { PickerOption } from "./OptionPicker";
+import type { ProviderPickerOption } from "./model-brand-prefix";
 import type { ModelPickerOption } from "./model-picker-option";
 
 type CapturedCommandHandler = (invocation: {
@@ -61,16 +63,19 @@ vi.mock("@/components/commands/AppCommandProvider", () => ({
   useIsAppCommandModifierHeld: () => false,
 }));
 
-const providerOptions: readonly PickerOption<string>[] = [
-  { value: "codex", label: "Codex" },
-  { value: "claude-code", label: "Claude Code" },
+const providerOptions: readonly ProviderPickerOption[] = [
+  { value: "codex", label: "Codex", brandPrefix: "GPT-" },
+  { value: "claude-code", label: "Claude Code", brandPrefix: "Claude " },
 ];
+
+function ProviderMaskIcon({ className }: { className?: string }) {
+  return <span className={className} data-testid="provider-mask-icon" />;
+}
 
 const codexModels: readonly PickerOption<string>[] = [
   { value: "gpt-5.5", label: "GPT-5.5" },
 ];
 
-// A list long enough (> MODEL_SEARCH_MIN_OPTIONS) to render the search box.
 const manyCodexModels: readonly PickerOption<string>[] = [
   { value: "gpt-5.5", label: "GPT-5.5" },
   { value: "gpt-5.2", label: "GPT-5.2" },
@@ -155,6 +160,8 @@ function renderPicker({
   modelLoadError = null,
   compact = false,
   splitPane = false,
+  muted = false,
+  handoff,
 }: {
   onSelectedProviderChange?: ((value: string) => void) | null;
   onModelChange?: (value: string) => void;
@@ -164,7 +171,7 @@ function renderPicker({
   pickerReasoningOptions?: readonly PickerOption<ReasoningLevel>[];
   reasoningValue?: ReasoningLevel;
   moreModelOptions?: readonly ModelPickerOption[];
-  pickerProviderOptions?: readonly PickerOption<string>[];
+  pickerProviderOptions?: readonly ProviderPickerOption[];
   alternateProviderModels?: AvailableModel[];
   providerRouting?: SystemProvidersQuery;
   selectedProviderId?: string;
@@ -172,6 +179,8 @@ function renderPicker({
   modelLoadError?: SystemExecutionOptionsModelLoadError | null;
   compact?: boolean;
   splitPane?: boolean;
+  muted?: boolean;
+  handoff?: ModelReasoningPickerHandoff;
 } = {}) {
   const { queryClient, wrapper } = createQueryClientTestHarness();
   queryClient.setQueryData(
@@ -211,7 +220,9 @@ function renderPicker({
         fastModeEnabled={false}
         onFastModeChange={vi.fn()}
         showFastModeToggle={false}
+        muted={muted}
         modal={false}
+        handoff={handoff}
       />
       <button type="button">Composer action</button>
     </div>
@@ -244,6 +255,132 @@ afterEach(() => {
 });
 
 describe("ModelReasoningPicker", () => {
+  it.each([
+    ["ArrowRight", "medium", "high"],
+    ["ArrowLeft", "high", "medium"],
+  ] as const)(
+    "adjusts reasoning with %s on the focused trigger",
+    (key, value, next) => {
+      const { onReasoningChange } = renderPicker({ reasoningValue: value });
+      const trigger = screen.getByRole("button", {
+        name: "Provider, model and reasoning",
+      });
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key });
+      expect(onReasoningChange).toHaveBeenCalledExactlyOnceWith(next);
+      expect(document.activeElement).toBe(trigger);
+    },
+  );
+
+  it.each([
+    ["ArrowLeft", "medium"],
+    ["ArrowRight", "high"],
+  ] as const)("stops at the reasoning limit for %s", (key, value) => {
+    const { onReasoningChange } = renderPicker({ reasoningValue: value });
+    fireEvent.keyDown(
+      screen.getByRole("button", {
+        name: "Provider, model and reasoning",
+      }),
+      { key },
+    );
+    expect(onReasoningChange).not.toHaveBeenCalled();
+  });
+
+  it("adjusts reasoning in an empty search but preserves text navigation", () => {
+    const { onReasoningChange, onModelChange } = renderPicker({
+      modelOptions: manyCodexModels,
+    });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Provider, model and reasoning",
+      }),
+    );
+    const search = screen.getByPlaceholderText("Search models");
+    fireEvent.keyDown(search, { key: "ArrowRight" });
+    expect(onReasoningChange).toHaveBeenCalledExactlyOnceWith("high");
+    fireEvent.change(search, { target: { value: "o4" } });
+    fireEvent.keyDown(search, { key: "ArrowRight" });
+    expect(onReasoningChange).toHaveBeenCalledTimes(1);
+    expect(onModelChange).not.toHaveBeenCalled();
+  });
+
+  it("adjusts reasoning from a model row without changing the model", () => {
+    const { onReasoningChange, onModelChange } = renderPicker();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Provider, model and reasoning",
+      }),
+    );
+    const model = screen.getByRole("button", { name: "5.5" });
+    model.focus();
+    fireEvent.keyDown(model, { key: "ArrowRight" });
+    expect(onReasoningChange).toHaveBeenCalledExactlyOnceWith("high");
+    expect(onModelChange).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(model);
+  });
+
+  it("does not change reasoning when the submenu handles an arrow", () => {
+    const { onReasoningChange } = renderPicker({
+      moreModelOptions: [{ value: "legacy", label: "Legacy" }],
+    });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Provider, model and reasoning",
+      }),
+    );
+    const moreModels = screen.getByRole("button", { name: "More models" });
+    act(() => moreModels.focus());
+    fireEvent.keyDown(moreModels, {
+      key: "ArrowRight",
+    });
+    expect(onReasoningChange).not.toHaveBeenCalled();
+  });
+
+  it("leaves modified arrows and models without reasoning alone", () => {
+    const { onReasoningChange } = renderPicker();
+    const trigger = screen.getByRole("button", {
+      name: "Provider, model and reasoning",
+    });
+    for (const modifier of ["altKey", "ctrlKey", "metaKey", "shiftKey"]) {
+      fireEvent.keyDown(trigger, { key: "ArrowRight", [modifier]: true });
+    }
+    expect(onReasoningChange).not.toHaveBeenCalled();
+    cleanup();
+    renderPicker({ pickerReasoningOptions: [], onReasoningChange });
+    fireEvent.keyDown(
+      screen.getByRole("button", {
+        name: "Provider, model and reasoning",
+      }),
+      { key: "ArrowRight" },
+    );
+    expect(onReasoningChange).not.toHaveBeenCalled();
+  });
+
+  it("uses the lower-emphasis chrome token for the composer caret", () => {
+    renderPicker({ muted: true });
+
+    const trigger = screen.getByRole("button", {
+      name: "Provider, model and reasoning",
+    });
+    expect(
+      trigger.querySelector('[data-icon="ChevronDown"]')?.classList,
+    ).toContain("text-subtle-foreground/75");
+    expect(trigger.classList).toContain("font-normal");
+  });
+
+  it("gives a non-SVG provider mark the same 16px trigger size as button SVGs", () => {
+    renderPicker({
+      pickerProviderOptions: [
+        { ...providerOptions[0], icon: ProviderMaskIcon },
+        providerOptions[1],
+      ],
+    });
+
+    expect(screen.getByTestId("provider-mask-icon").classList).toContain(
+      "size-4",
+    );
+  });
+
   it("keeps a failed provider tab visible with its provider-plugin error", () => {
     renderPicker({
       modelOptions: [],
@@ -335,9 +472,6 @@ describe("ModelReasoningPicker", () => {
     const lockedTarget = screen.getByRole("button", {
       name: "Provider, model and reasoning",
     });
-    // Owning the chord with nowhere to rotate is the correct no-op. Returning
-    // false lets the command provider skip `preventDefault()`, and macOS would
-    // then insert the composed Option+P character into the prompt.
     expect(
       commandHandlers.get("modelPicker.cycleProvider")?.({
         target: lockedTarget,
@@ -383,7 +517,7 @@ describe("ModelReasoningPicker", () => {
     expect(onSelectedProviderChange).toHaveBeenCalledWith("claude-code");
   });
 
-  it("clears the previous provider's search and highlight when cycling", () => {
+  it("keeps search focused and clears it when switching providers", () => {
     const alternateProviderModels = [
       "claude-opus-4-7",
       "claude-sonnet-4-7",
@@ -406,20 +540,20 @@ describe("ModelReasoningPicker", () => {
       screen.getByRole("button", { name: "Provider, model and reasoning" }),
     );
     const search = screen.getByPlaceholderText("Search models");
+    search.focus();
     fireEvent.change(search, { target: { value: "o4" } });
     fireEvent.keyDown(search, { key: "ArrowDown" });
 
-    act(() => {
-      expect(
-        commandHandlers.get("modelPicker.cycleProvider")?.({ target: search }),
-      ).toBe(true);
-    });
+    const claudeTab = screen.getByTitle("Claude Code");
+    if (fireEvent.mouseDown(claudeTab)) claudeTab.focus();
+    fireEvent.click(claudeTab);
 
     expect(onSelectedProviderChange).toHaveBeenCalledWith("claude-code");
     const nextSearch = screen.getByPlaceholderText(
       "Search models",
     ) as HTMLInputElement;
     expect(nextSearch.value).toBe("");
+    expect(document.activeElement).toBe(nextSearch);
     fireEvent.keyDown(nextSearch, { key: "Enter" });
     expect(onModelChange).not.toHaveBeenCalled();
   });
@@ -475,6 +609,45 @@ describe("ModelReasoningPicker", () => {
     ).toBe("");
   });
 
+  it("caps the desktop picker and scrolls only the model list", () => {
+    renderPicker({ modelOptions: manyCodexModels });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+
+    const menu = screen.getByRole("dialog");
+    expect(menu.className).toContain(
+      "max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))]",
+    );
+    expect(menu.className).toContain("overflow-hidden");
+
+    const scrollers = [
+      ...(menu.className.includes("overflow-y-auto") ? [menu] : []),
+      ...menu.querySelectorAll<HTMLElement>("[class*='overflow-y-auto']"),
+    ];
+    expect(scrollers).toHaveLength(1);
+
+    const models = screen.getByRole("listbox", { name: "Models" });
+    expect(scrollers[0]).toBe(models);
+    expect(models.className).toContain("overscroll-contain");
+    expect(models.className).toContain("max-h-64");
+    expect(models.contains(screen.getByText("High"))).toBe(false);
+  });
+
+  it("leaves compact drawer height and scrolling to the responsive shell", async () => {
+    renderPicker({ compact: true, modelOptions: manyCodexModels });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+
+    expect(screen.getByRole("dialog").className).not.toContain("100dvh");
+    expect(
+      (await screen.findByRole("listbox", { name: "Models" })).className,
+    ).not.toContain("max-h-");
+  });
+
   it("commits a provider tab immediately and keeps its models selectable", async () => {
     const { onSelectedProviderChange, onModelChange } = renderPicker();
 
@@ -497,6 +670,210 @@ describe("ModelReasoningPicker", () => {
     expect(onSelectedProviderChange).toHaveBeenCalledTimes(1);
     expect(onModelChange).toHaveBeenCalledWith("claude-opus-4-7");
   });
+
+  it("can hand off within the source provider and exit the picker mode", () => {
+    const onSelect = vi.fn();
+    const onExit = vi.fn();
+    const onStart = vi.fn();
+    const { onModelChange } = renderPicker({
+      pickerProviderOptions: providerOptions.filter(
+        (provider) => provider.value === "codex",
+      ),
+      handoff: {
+        sourceProviderId: "codex",
+        active: false,
+        onStart,
+        onExit,
+        onSelect,
+      },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Handoff to new thread" }),
+    );
+    expect(onStart).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "5.5" }));
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "codex" }),
+    );
+    expect(onModelChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Exit handoff" }));
+    expect(onExit).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Exit handoff" })).toBeNull();
+  });
+
+  it.each([
+    ["modelPicker.cycleModel", "claude-sonnet-4-6"],
+    ["modelPicker.cycleModelBackward", "claude-haiku-4-5"],
+  ])(
+    "%s selects from the handoff provider without changing the source",
+    async (command, expectedModel) => {
+      const onSelect = vi.fn();
+      const { onModelChange, onReasoningChange, onSelectedProviderChange } =
+        renderPicker({
+          handoff: {
+            sourceProviderId: "codex",
+            active: false,
+            onStart: vi.fn(),
+            onExit: vi.fn(),
+            onSelect,
+          },
+          providerRouting: { environmentId: "env-source" },
+          alternateProviderModels: [
+            availableModel({
+              value: "claude-opus-4-7",
+              label: "Claude Opus 4.7",
+              isDefault: true,
+            }),
+            availableModel({
+              value: "claude-sonnet-4-6",
+              label: "Claude Sonnet 4.6",
+            }),
+            availableModel({
+              value: "claude-haiku-4-5",
+              label: "Claude Haiku 4.5",
+            }),
+          ],
+        });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Provider, model and reasoning" }),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Handoff to new thread" }),
+      );
+      fireEvent.click(screen.getByTitle("Claude Code"));
+      await screen.findByText("Opus 4.7");
+      act(() => {
+        commandHandlers.get(command)?.({ target: document.body });
+      });
+      expect(onSelect).toHaveBeenCalledExactlyOnceWith({
+        providerId: "claude-code",
+        model: expectedModel,
+        reasoningLevel: "medium",
+      });
+      expect(onModelChange).not.toHaveBeenCalled();
+      expect(onReasoningChange).not.toHaveBeenCalled();
+      expect(onSelectedProviderChange).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["modelPicker.cycleReasoning", "modelPicker.cycleReasoningBackward"])(
+    "%s keeps the handoff preview and applies its reasoning to selection",
+    async (command) => {
+      const onSelect = vi.fn();
+      const { onModelChange, onReasoningChange } = renderPicker({
+        handoff: {
+          sourceProviderId: "codex",
+          active: false,
+          onStart: vi.fn(),
+          onExit: vi.fn(),
+          onSelect,
+        },
+        alternateProviderModels: [
+          {
+            ...availableModel({
+              value: "claude-opus-4-7",
+              label: "Claude Opus 4.7",
+              isDefault: true,
+            }),
+            supportedReasoningEfforts: [
+              { reasoningEffort: "medium", description: "Medium" },
+              { reasoningEffort: "high", description: "High" },
+            ],
+          },
+        ],
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Provider, model and reasoning" }),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Handoff to new thread" }),
+      );
+      fireEvent.click(screen.getByTitle("Claude Code"));
+      await screen.findByText("Opus 4.7");
+      act(() => {
+        commandHandlers.get(command)?.({ target: document.body });
+      });
+      expect(screen.getByTitle("Codex (current thread)")).not.toBeNull();
+      fireEvent.click(screen.getByText("Opus 4.7"));
+      expect(onSelect).toHaveBeenCalledExactlyOnceWith({
+        providerId: "claude-code",
+        model: "claude-opus-4-7",
+        reasoningLevel: "high",
+      });
+      expect(onModelChange).not.toHaveBeenCalled();
+      expect(onReasoningChange).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps handoff mode when browsing the current provider", () => {
+    const onSelect = vi.fn();
+    const onExit = vi.fn();
+    const { onSelectedProviderChange } = renderPicker({
+      selectedProviderId: "claude-code",
+      handoff: {
+        sourceProviderId: "codex",
+        active: true,
+        onStart: vi.fn(),
+        onExit,
+        onSelect,
+      },
+    });
+    const trigger = screen.getByRole("button", {
+      name: "Provider, model and reasoning",
+    });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByTitle("Codex (current thread)"));
+    expect(onExit).not.toHaveBeenCalled();
+    expect(onSelectedProviderChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Exit handoff" })).not.toBeNull();
+    fireEvent.click(trigger);
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "Exit handoff" })).not.toBeNull();
+  });
+
+  it.each([
+    {
+      label: "fetches every sibling",
+      locked: false,
+      expected: ["cursor", "pi"],
+    },
+    { label: "fetches nothing", locked: true, expected: [] },
+  ])(
+    "$label on the routed host when opened with switching locked: $locked",
+    async ({ locked, expected }) => {
+      vi.mocked(sdk.system.executionOptions).mockImplementation(
+        () => new Promise<SystemExecutionOptionsResponse>(() => undefined),
+      );
+      renderPicker({
+        ...(locked ? { onSelectedProviderChange: null } : {}),
+        providerRouting: { hostId: "h1" },
+        pickerProviderOptions: [
+          { value: "codex", label: "Codex" },
+          { value: "cursor", label: "Cursor" },
+          { value: "pi", label: "Pi" },
+        ],
+      });
+      expect(sdk.system.executionOptions).not.toHaveBeenCalled();
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Provider, model and reasoning" }),
+      );
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+
+      expect(screen.getByRole("dialog")).not.toBeNull();
+      expect(
+        vi
+          .mocked(sdk.system.executionOptions)
+          .mock.calls.map(([args]) => `${args?.hostId}/${args?.providerId}`)
+          .sort(),
+      ).toEqual(expected.map((providerId) => `h1/${providerId}`));
+    },
+  );
 
   it("loads provider models on the compose-selected host", async () => {
     renderPicker({ providerRouting: { hostId: "host-remote" } });
@@ -539,7 +916,6 @@ describe("ModelReasoningPicker", () => {
 
     expect(screen.getAllByText(modelLabel)).toHaveLength(3);
     const apiQualifier = screen.getByText("openai");
-    expect(apiQualifier.className).toContain("text-subtle-foreground");
     expect(screen.getByText("openai-codex")).not.toBeNull();
 
     fireEvent.click(apiQualifier);
@@ -547,7 +923,7 @@ describe("ModelReasoningPicker", () => {
     expect(onModelChange).toHaveBeenCalledWith(apiModel);
   });
 
-  it("fuzzy-filters a long model list and selects the match by keyboard", () => {
+  it("uses picker search policy and selects the match by keyboard", () => {
     const { onModelChange } = renderPicker({ modelOptions: manyCodexModels });
 
     fireEvent.click(
@@ -555,9 +931,8 @@ describe("ModelReasoningPicker", () => {
     );
 
     const search = screen.getByPlaceholderText("Search models");
-    fireEvent.change(search, { target: { value: "o4" } });
+    fireEvent.change(search, { target: { value: "o4m" } });
 
-    // Only the fuzzy match survives; unrelated models are filtered out.
     expect(screen.getByText("o4-mini")).not.toBeNull();
     expect(screen.queryByText("Sonnet")).toBeNull();
 
@@ -565,6 +940,54 @@ describe("ModelReasoningPicker", () => {
     fireEvent.keyDown(search, { key: "Enter" });
 
     expect(onModelChange).toHaveBeenCalledWith("o4-mini");
+  });
+
+  it("ranks primary and selected-only model matches together", () => {
+    const looseMatch = "Super GPT-4 Compatibility";
+    const directMatch = "GPT-4 Turbo";
+    renderPicker({
+      modelOptions: [
+        { value: "super-gpt-4", label: looseMatch },
+        { value: "alpha", label: "Alpha" },
+        { value: "beta", label: "Beta" },
+        { value: "gamma", label: "Gamma" },
+        { value: "delta", label: "Delta" },
+      ],
+      moreModelOptions: [{ value: "gpt-4-turbo", label: directMatch }],
+      pickerProviderOptions: [{ value: "codex", label: "Codex" }],
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+    fireEvent.change(screen.getByPlaceholderText("Search models"), {
+      target: { value: "gpt4" },
+    });
+
+    const directResult = screen.getByText(directMatch);
+    const looseResult = screen.getAllByText(looseMatch).at(-1);
+    expect(looseResult).toBeTruthy();
+    if (!looseResult) return;
+    expect(
+      directResult.compareDocumentPosition(looseResult) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
+  it("returns the results viewport to the top when searching", () => {
+    renderPicker({ modelOptions: manyCodexModels });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+
+    const search = screen.getByPlaceholderText("Search models");
+    const list = screen.getByRole("listbox", { name: "Models" });
+    list.scrollTop = 120;
+
+    fireEvent.change(search, { target: { value: "o4" } });
+
+    expect(list.scrollTop).toBe(0);
   });
 
   it("resets retained mobile browse state after the drawer closes", () => {
@@ -612,8 +1035,6 @@ describe("ModelReasoningPicker", () => {
       screen.getByRole("button", { name: "Provider, model and reasoning" }),
     );
 
-    // On desktop the extra models normally hide in a hover submenu; searching
-    // flattens them inline so the keyboard can reach them.
     const search = screen.getByPlaceholderText("Search models");
     fireEvent.change(search, { target: { value: "legacy" } });
 
@@ -623,6 +1044,46 @@ describe("ModelReasoningPicker", () => {
     fireEvent.keyDown(search, { key: "Enter" });
 
     expect(onModelChange).toHaveBeenCalledWith("gpt-4.1-legacy");
+  });
+
+  it("compact: keeps reasoning outside the scrollable model list", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    renderPicker({ compact: true, modelOptions: manyCodexModels });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+    act(() => frames.shift()?.(0));
+    act(() => frames.shift()?.(16));
+
+    const modelList = screen.getByRole("listbox", { name: "Models" });
+    const reasoning = screen.getByRole("radiogroup", { name: "Reasoning" });
+
+    expect(modelList.contains(reasoning)).toBe(false);
+    for (const className of [
+      "min-h-0",
+      "flex-1",
+      "overflow-y-auto",
+      "overscroll-contain",
+    ]) {
+      expect(modelList.classList.contains(className)).toBe(true);
+    }
+
+    const scrollParents: string[] = [];
+    for (
+      let element = modelList.parentElement;
+      element !== null && element.getAttribute("role") !== "dialog";
+      element = element.parentElement
+    ) {
+      if (element.classList.contains("overflow-y-auto")) {
+        scrollParents.push(element.className);
+      }
+    }
+    expect(scrollParents).toEqual([]);
   });
 
   it("does not render the search box for short model lists", () => {
@@ -718,19 +1179,5 @@ describe("buildModelNavRows", () => {
       { kind: "model", option: primary[0] },
       { kind: "model", option: primary[1] },
     ]);
-  });
-});
-
-describe("buildFuzzyRegex", () => {
-  it("matches subsequences case-insensitively", () => {
-    expect(buildFuzzyRegex("gpt4").test("GPT-4 Turbo")).toBe(true);
-    expect(buildFuzzyRegex("o4m").test("o4-mini")).toBe(true);
-    expect(buildFuzzyRegex("xyz").test("o4-mini")).toBe(false);
-  });
-
-  it("escapes regex metacharacters so they match literally", () => {
-    expect(buildFuzzyRegex("5.2").test("5.2")).toBe(true);
-    // The dot is literal, so it must not match an arbitrary character.
-    expect(buildFuzzyRegex("5.2").test("512")).toBe(false);
   });
 });

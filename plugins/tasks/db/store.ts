@@ -7,7 +7,14 @@ import {
   TASKS_PAGE_MAX_LIMIT,
   type TaskSort,
 } from "../shared/pagination.js";
-import { presetPermissionModeSchema } from "../shared/contract.js";
+import {
+  ISO_DATE_PATTERN,
+  PROJECT_PREFIX_PATTERN,
+  presetPermissionModeSchema,
+  presetReasoningLevelSchema,
+  presetServiceTierSchema,
+  ULID_PATTERN,
+} from "../shared/contract.js";
 import type {
   Attachment,
   Comment,
@@ -18,6 +25,7 @@ import type {
   CreatePresetInput,
   CreateProjectInput,
   CreateTaskInput,
+  DeleteFolderResult,
   Folder,
   Label,
   ListTasksFilters,
@@ -25,7 +33,6 @@ import type {
   Preset,
   PresetEnvironmentKind,
   Project,
-  SubtaskDoneCounts,
   Task,
   TaskLabel,
   TaskThread,
@@ -38,7 +45,6 @@ import type {
   UpdateProjectInput,
   UpdateTaskInput,
   UpdateTaskPositionInput,
-  UpdateTaskThreadInput,
   UpsertTaskThreadInput,
 } from "./types";
 
@@ -48,9 +54,6 @@ type SqlParameter = string | number;
 const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const POSITION_STEP = 1_024;
 const MIN_POSITION_GAP = 0.000_001;
-const PROJECT_PREFIX_PATTERN = /^[A-Z][A-Z0-9]{0,9}$/;
-const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const ULID_PATTERN = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 
 interface FolderRow {
   id: string;
@@ -153,6 +156,7 @@ interface PresetRow {
   provider_id: string;
   model_id: string;
   reasoning_level: string;
+  service_tier: string | null;
   permission_mode: string;
   environment_kind: PresetEnvironmentKind;
   base_branch: string | null;
@@ -224,9 +228,7 @@ function decodeTaskCursor(value: string): TaskCursor {
     const parsed: unknown = JSON.parse(decoded);
     const result = taskCursorSchema.safeParse(parsed);
     if (result.success) return result.data;
-  } catch {
-    // The common error below deliberately does not reveal cursor internals.
-  }
+  } catch {}
   throw new TasksPageCursorError(
     "invalid_cursor",
     "invalid task-list cursor; start again without --cursor",
@@ -237,9 +239,6 @@ function encodeTaskCursor(cursor: TaskCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }
 
-// Monotonic ULIDs (per the ULID spec): rows created in the same millisecond
-// still sort in creation order, which `ORDER BY created_at/attached_at, id`
-// queries rely on for stable list ordering.
 let lastUlidMs = -1;
 let lastUlidRandom = 0n;
 
@@ -436,7 +435,11 @@ function presetFromRow(row: PresetRow): Preset {
     name: row.name,
     providerId: row.provider_id,
     modelId: row.model_id,
-    reasoningLevel: row.reasoning_level,
+    reasoningLevel: presetReasoningLevelSchema.parse(row.reasoning_level),
+    serviceTier:
+      row.service_tier === null
+        ? null
+        : presetServiceTierSchema.parse(row.service_tier),
     permissionMode: presetPermissionModeSchema.parse(row.permission_mode),
     environmentKind: row.environment_kind,
     baseBranch: row.base_branch,
@@ -475,7 +478,7 @@ function validatePresetEnvironment(input: {
   return { environmentKind: input.environmentKind, baseBranch, machineId };
 }
 
-function escapeLike(value: string): string {
+export function escapeLike(value: string): string {
   return value
     .replaceAll("\\", "\\\\")
     .replaceAll("%", "\\%")
@@ -535,10 +538,9 @@ export function createTasksStore(db: PluginDatabase) {
     }
     if (ownId) {
       const hasChildren = db
-        .prepare<
-          [string],
-          { found: number }
-        >("SELECT 1 AS found FROM folders WHERE parent_folder_id = ? LIMIT 1")
+        .prepare<[string], { found: number }>(
+          "SELECT 1 AS found FROM folders WHERE parent_folder_id = ? LIMIT 1",
+        )
         .get(ownId);
       if (hasChildren) {
         throw new Error("A folder with children cannot be nested");
@@ -563,10 +565,9 @@ export function createTasksStore(db: PluginDatabase) {
 
   function listFolders(): Folder[] {
     return db
-      .prepare<
-        [],
-        FolderRow
-      >("SELECT * FROM folders ORDER BY parent_folder_id IS NOT NULL, name COLLATE NOCASE, id")
+      .prepare<[], FolderRow>(
+        "SELECT * FROM folders ORDER BY parent_folder_id IS NOT NULL, name COLLATE NOCASE, id",
+      )
       .all()
       .map(folderFromRow);
   }
@@ -590,11 +591,31 @@ export function createTasksStore(db: PluginDatabase) {
     return requireFolder(id);
   }
 
-  function deleteFolder(id: string): boolean {
-    return (
-      db.prepare<[string]>("DELETE FROM folders WHERE id = ?").run(id).changes >
-      0
-    );
+  const selectFolderProjectIds = db.prepare<[string], { id: string }>(
+    "SELECT id FROM projects WHERE folder_id = ? ORDER BY name COLLATE NOCASE, id",
+  );
+  const selectChildFolderIds = db.prepare<[string], { id: string }>(
+    "SELECT id FROM folders WHERE parent_folder_id = ? ORDER BY name COLLATE NOCASE, id",
+  );
+  const deleteFolderRow = db.prepare<[string]>(
+    "DELETE FROM folders WHERE id = ?",
+  );
+
+  const deleteFolderTransaction = db.transaction(
+    (id: string): DeleteFolderResult => {
+      const movedProjectIds = selectFolderProjectIds
+        .all(id)
+        .map((row) => row.id);
+      const movedFolderIds = selectChildFolderIds.all(id).map((row) => row.id);
+      const deleted = deleteFolderRow.run(id).changes > 0;
+      return deleted
+        ? { deleted, movedProjectIds, movedFolderIds }
+        : { deleted, movedProjectIds: [], movedFolderIds: [] };
+    },
+  );
+
+  function deleteFolder(id: string): DeleteFolderResult {
+    return deleteFolderTransaction(id);
   }
 
   function getProject(id: string): Project | undefined {
@@ -635,26 +656,23 @@ export function createTasksStore(db: PluginDatabase) {
   function listProjects(folderId?: string | null): Project[] {
     if (folderId === undefined) {
       return db
-        .prepare<
-          [],
-          ProjectRow
-        >("SELECT * FROM projects ORDER BY name COLLATE NOCASE, id")
+        .prepare<[], ProjectRow>(
+          "SELECT * FROM projects ORDER BY name COLLATE NOCASE, id",
+        )
         .all()
         .map(projectFromRow);
     }
     const rows =
       folderId === null
         ? db
-            .prepare<
-              [],
-              ProjectRow
-            >("SELECT * FROM projects WHERE folder_id IS NULL ORDER BY name COLLATE NOCASE, id")
+            .prepare<[], ProjectRow>(
+              "SELECT * FROM projects WHERE folder_id IS NULL ORDER BY name COLLATE NOCASE, id",
+            )
             .all()
         : db
-            .prepare<
-              [string],
-              ProjectRow
-            >("SELECT * FROM projects WHERE folder_id = ? ORDER BY name COLLATE NOCASE, id")
+            .prepare<[string], ProjectRow>(
+              "SELECT * FROM projects WHERE folder_id = ? ORDER BY name COLLATE NOCASE, id",
+            )
             .all(folderId);
     return rows.map(projectFromRow);
   }
@@ -705,7 +723,6 @@ export function createTasksStore(db: PluginDatabase) {
     `${taskSelect} WHERE p.prefix = ? COLLATE NOCASE AND t.number = ?`,
   );
 
-  /** Resolve a task key like "TSK-4" (prefix matched case-insensitively). */
   function getTaskByKey(key: string): Task | undefined {
     const match = /^([A-Za-z][A-Za-z0-9]{0,9})-(\d+)$/.exec(key.trim());
     if (!match) return undefined;
@@ -740,10 +757,9 @@ export function createTasksStore(db: PluginDatabase) {
     }
     if (ownId) {
       const hasChildren = db
-        .prepare<
-          [string],
-          { found: number }
-        >("SELECT 1 AS found FROM tasks WHERE parent_task_id = ? LIMIT 1")
+        .prepare<[string], { found: number }>(
+          "SELECT 1 AS found FROM tasks WHERE parent_task_id = ? LIMIT 1",
+        )
         .get(ownId);
       if (hasChildren) {
         throw new Error(
@@ -893,12 +909,20 @@ export function createTasksStore(db: PluginDatabase) {
     }
     const search = filters.search?.trim();
     if (search) {
-      parameters.search = `%${escapeLike(search)}%`;
-      clauses.push(`(
-        t.title LIKE @search ESCAPE '\\'
-        OR t.description LIKE @search ESCAPE '\\'
-        OR (p.prefix || '-' || t.number) LIKE @search ESCAPE '\\'
-      )`);
+      clauses.push(
+        search
+          .split(/\s+/)
+          .map((term, index) => {
+            const name = `search${index}`;
+            parameters[name] = `%${escapeLike(term)}%`;
+            return `(
+              t.title LIKE @${name} ESCAPE '\\'
+              OR t.description LIKE @${name} ESCAPE '\\'
+              OR (p.prefix || '-' || t.number) LIKE @${name} ESCAPE '\\'
+            )`;
+          })
+          .join(" AND "),
+      );
     }
 
     const limit = filters.limit ?? TASKS_PAGE_DEFAULT_LIMIT;
@@ -953,10 +977,9 @@ export function createTasksStore(db: PluginDatabase) {
 
     const readPage = db.transaction((): ListTasksPage => {
       const revision = db
-        .prepare<
-          [],
-          TaskListRevisionRow
-        >("SELECT revision FROM task_list_revision WHERE id = 1")
+        .prepare<[], TaskListRevisionRow>(
+          "SELECT revision FROM task_list_revision WHERE id = 1",
+        )
         .get()?.revision;
       if (revision === undefined) {
         throw new Error("Task-list revision state is unavailable");
@@ -1030,7 +1053,6 @@ export function createTasksStore(db: PluginDatabase) {
     return readPage();
   }
 
-  /** Compatibility helper for internal jobs that intentionally need all tasks. */
   function listTasks(filters: ListTasksFilters = {}): Task[] {
     const unpagedFilters: ListTasksFilters = { ...filters };
     delete unpagedFilters.limit;
@@ -1061,21 +1083,6 @@ export function createTasksStore(db: PluginDatabase) {
       )
       .all(parentTaskId)
       .map(taskFromRow);
-  }
-
-  function getSubtaskDoneCounts(parentTaskId: string): SubtaskDoneCounts {
-    requireTask(parentTaskId);
-    return (
-      db
-        .prepare<[string], SubtaskDoneCounts>(
-          `
-        SELECT COUNT(*) AS total,
-          COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done
-        FROM tasks WHERE parent_task_id = ?
-      `,
-        )
-        .get(parentTaskId) ?? { total: 0, done: 0 }
-    );
   }
 
   const updateTaskTransaction = db.transaction(
@@ -1272,10 +1279,9 @@ export function createTasksStore(db: PluginDatabase) {
 
   function listLabels(projectId: string): Label[] {
     return db
-      .prepare<
-        [string],
-        LabelRow
-      >("SELECT * FROM labels WHERE project_id = ? ORDER BY name COLLATE NOCASE, id")
+      .prepare<[string], LabelRow>(
+        "SELECT * FROM labels WHERE project_id = ? ORDER BY name COLLATE NOCASE, id",
+      )
       .all(projectId)
       .map(labelFromRow);
   }
@@ -1321,19 +1327,18 @@ export function createTasksStore(db: PluginDatabase) {
   function removeTaskLabel(taskId: string, labelId: string): boolean {
     return (
       db
-        .prepare<
-          [string, string]
-        >("DELETE FROM task_labels WHERE task_id = ? AND label_id = ?")
+        .prepare<[string, string]>(
+          "DELETE FROM task_labels WHERE task_id = ? AND label_id = ?",
+        )
         .run(taskId, labelId).changes > 0
     );
   }
 
   function listTaskLabels(taskId: string): TaskLabel[] {
     return db
-      .prepare<
-        [string],
-        TaskLabelRow
-      >("SELECT task_id, label_id FROM task_labels WHERE task_id = ? ORDER BY label_id")
+      .prepare<[string], TaskLabelRow>(
+        "SELECT task_id, label_id FROM task_labels WHERE task_id = ? ORDER BY label_id",
+      )
       .all(taskId)
       .map(taskLabelFromRow);
   }
@@ -1441,13 +1446,6 @@ export function createTasksStore(db: PluginDatabase) {
       id,
     );
     return requireComment(id);
-  }
-
-  function deleteComment(id: string): boolean {
-    return (
-      db.prepare<[string]>("DELETE FROM comments WHERE id = ?").run(id)
-        .changes > 0
-    );
   }
 
   function getAttachment(id: string): Attachment | undefined {
@@ -1581,6 +1579,19 @@ export function createTasksStore(db: PluginDatabase) {
     return row ? taskThreadFromRow(row) : undefined;
   }
 
+  function listTaskThreadsByThreadId(threadId: string): TaskThread[] {
+    return db
+      .prepare<[string], TaskThreadRow>(
+        `
+        SELECT * FROM task_threads
+        WHERE thread_id = ?
+        ORDER BY task_id, id
+      `,
+      )
+      .all(threadId)
+      .map(taskThreadFromRow);
+  }
+
   function requireTaskThread(id: string): TaskThread {
     const thread = getTaskThread(id);
     if (!thread) throw new Error(`Task thread not found: ${id}`);
@@ -1632,16 +1643,21 @@ export function createTasksStore(db: PluginDatabase) {
     return db
       .prepare<[string], TaskThreadRow>(
         `
-        SELECT * FROM task_threads WHERE task_id = ? ORDER BY attached_at, id
+        SELECT * FROM task_threads
+        WHERE task_id = ?
+        ORDER BY
+          CASE WHEN live_status IN ('completed', 'failed') THEN 1 ELSE 0 END,
+          attached_at DESC,
+          id DESC
       `,
       )
       .all(taskId)
       .map(taskThreadFromRow);
   }
 
-  function updateTaskThread(
+  function updateTaskThreadStatus(
     id: string,
-    input: UpdateTaskThreadInput,
+    liveStatus: TaskThreadLiveStatus,
   ): TaskThread {
     const current = requireTaskThread(id);
     db.prepare<[string, string, TaskThreadLiveStatus, string, string]>(
@@ -1650,25 +1666,8 @@ export function createTasksStore(db: PluginDatabase) {
       SET preset_name = ?, title = ?, live_status = ?, updated_at = ?
       WHERE id = ?
     `,
-    ).run(
-      input.presetName === undefined
-        ? current.presetName
-        : requireNonEmpty(input.presetName, "Task thread presetName"),
-      input.title === undefined
-        ? current.title
-        : requireNonEmpty(input.title, "Task thread title"),
-      input.liveStatus ?? current.liveStatus,
-      nowIso(),
-      id,
-    );
+    ).run(current.presetName, current.title, liveStatus, nowIso(), id);
     return requireTaskThread(id);
-  }
-
-  function updateTaskThreadStatus(
-    id: string,
-    liveStatus: TaskThreadLiveStatus,
-  ): TaskThread {
-    return updateTaskThread(id, { liveStatus });
   }
 
   function deleteTaskThread(id: string): boolean {
@@ -1699,6 +1698,7 @@ export function createTasksStore(db: PluginDatabase) {
         string,
         string,
         string,
+        "default" | "fast" | null,
         string,
         PresetEnvironmentKind,
         string | null,
@@ -1710,10 +1710,11 @@ export function createTasksStore(db: PluginDatabase) {
     >(
       `
       INSERT INTO presets (
-        id, name, provider_id, model_id, reasoning_level, permission_mode,
+        id, name, provider_id, model_id, reasoning_level, service_tier,
+        permission_mode,
         environment_kind, base_branch, machine_id, instructions, builtin,
         created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     ).run(
       id,
@@ -1721,6 +1722,7 @@ export function createTasksStore(db: PluginDatabase) {
       requireNonEmpty(input.providerId, "Preset providerId"),
       requireNonEmpty(input.modelId, "Preset modelId"),
       requireNonEmpty(input.reasoningLevel, "Preset reasoningLevel"),
+      input.serviceTier,
       requireNonEmpty(input.permissionMode, "Preset permissionMode"),
       environment.environmentKind,
       environment.baseBranch,
@@ -1734,10 +1736,9 @@ export function createTasksStore(db: PluginDatabase) {
 
   function listPresets(): Preset[] {
     return db
-      .prepare<
-        [],
-        PresetRow
-      >("SELECT * FROM presets ORDER BY builtin DESC, name COLLATE NOCASE, id")
+      .prepare<[], PresetRow>(
+        "SELECT * FROM presets ORDER BY builtin DESC, name COLLATE NOCASE, id",
+      )
       .all()
       .map(presetFromRow);
   }
@@ -1757,6 +1758,7 @@ export function createTasksStore(db: PluginDatabase) {
         string,
         string,
         string,
+        "default" | "fast" | null,
         string,
         PresetEnvironmentKind,
         string | null,
@@ -1769,7 +1771,7 @@ export function createTasksStore(db: PluginDatabase) {
       `
       UPDATE presets SET
         name = ?, provider_id = ?, model_id = ?, reasoning_level = ?,
-        permission_mode = ?, environment_kind = ?, base_branch = ?,
+        service_tier = ?, permission_mode = ?, environment_kind = ?, base_branch = ?,
         machine_id = ?, instructions = ?, builtin = ?
       WHERE id = ?
     `,
@@ -1786,6 +1788,7 @@ export function createTasksStore(db: PluginDatabase) {
       input.reasoningLevel === undefined
         ? current.reasoningLevel
         : requireNonEmpty(input.reasoningLevel, "Preset reasoningLevel"),
+      input.serviceTier === undefined ? current.serviceTier : input.serviceTier,
       input.permissionMode === undefined
         ? current.permissionMode
         : requireNonEmpty(input.permissionMode, "Preset permissionMode"),
@@ -1823,7 +1826,6 @@ export function createTasksStore(db: PluginDatabase) {
     listTasksPage,
     listTasks,
     listSubtasks,
-    getSubtaskDoneCounts,
     updateTask,
     updatePosition,
     deleteTask,
@@ -1841,7 +1843,6 @@ export function createTasksStore(db: PluginDatabase) {
     listComments,
     getLatestAgentComment,
     updateComment,
-    deleteComment,
     createAttachment,
     getAttachment,
     listAttachmentsForTask,
@@ -1851,8 +1852,8 @@ export function createTasksStore(db: PluginDatabase) {
     upsertTaskThread,
     getTaskThread,
     getTaskThreadByThreadId,
+    listTaskThreadsByThreadId,
     listTaskThreads,
-    updateTaskThread,
     updateTaskThreadStatus,
     deleteTaskThread,
     createPreset,

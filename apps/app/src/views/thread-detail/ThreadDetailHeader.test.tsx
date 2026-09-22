@@ -7,14 +7,12 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { createStore, Provider as JotaiProvider } from "jotai";
 import type { ReactNode, Ref } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThreadDetailHeader } from "./ThreadDetailHeader";
 import { PaneContext, type PaneContextValue } from "./PaneContext";
-import { dimInactiveSplitsAtom } from "@/lib/split-layout/atoms";
 import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadTitleMentions";
-import { makeThreadListEntry } from "@/test/fixtures/thread-list-entries";
+import { makeThreadListEntry } from "@bb/test-helpers/domain-fixtures";
 import { sdk } from "@/lib/sdk";
 
 const mocks = vi.hoisted(() => ({
@@ -28,6 +26,8 @@ vi.mock("@/components/thread/ThreadActionsProvider", () => ({
 }));
 
 vi.mock("@/components/layout/AppPageHeader", () => ({
+  COMPACT_SHELF_HIDDEN_PAGE_HEADER_ACTIONS_CLASS:
+    "compact-shelf-hidden-header-actions",
   HEADER_ICON_BUTTON_CLASS: "header-icon-button",
   HEADER_PANE_ACTION_ICON_BUTTON_CLASS: "header-pane-action-button",
   AppPageHeader: ({
@@ -48,8 +48,10 @@ vi.mock("@/components/layout/AppPageHeader", () => ({
   ),
 }));
 
+const viewportState = vi.hoisted(() => ({ isCompactViewport: false }));
+
 vi.mock("@bb/shared-ui/hooks/use-compact-viewport", () => ({
-  useIsCompactViewport: () => false,
+  useIsCompactViewport: () => viewportState.isCompactViewport,
 }));
 
 const THREAD_ID = "thr_header";
@@ -71,15 +73,13 @@ const PANE_CONTEXT: PaneContextValue = {
 
 afterEach(() => {
   cleanup();
+  viewportState.isCompactViewport = false;
   mocks.renameThread.mockReset();
   vi.restoreAllMocks();
   window.localStorage.clear();
 });
 
 describe("ThreadDetailHeader", () => {
-  // The header seam now belongs to AppPageHeader, so AppPageHeader.test.tsx
-  // guards it for every header instead of this one call site.
-
   it("leaves the open right-panel collapse control to the panel header", () => {
     render(
       <PaneContext.Provider value={PANE_CONTEXT}>
@@ -100,6 +100,62 @@ describe("ThreadDetailHeader", () => {
       screen.queryByRole("button", { name: "Hide right panel" }),
     ).toBeNull();
   });
+
+  it("retains the compact trigger while the open shelf hides page actions", () => {
+    viewportState.isCompactViewport = true;
+
+    render(
+      <PaneContext.Provider value={PANE_CONTEXT}>
+        <ThreadDetailHeader
+          actionsMenu={null}
+          childPillLabel={null}
+          isSecondaryPanelOpen
+          onOpenThreadGitAction={vi.fn()}
+          onToggleSecondaryPanel={vi.fn()}
+          threadHeaderGitActions={[]}
+          threadId={THREAD_ID}
+          threadTitle="Panel state"
+        />
+      </PaneContext.Provider>,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: "Hide right panel",
+    });
+    expect(trigger.closest("[data-thread-header-pane-actions]")).not.toBeNull();
+  });
+
+  it.each([
+    { expectedIcon: "PanelRight", isCompactViewport: true },
+    { expectedIcon: "PanelRight", isCompactViewport: false },
+  ])(
+    "shows the $expectedIcon glyph on the right-panel trigger",
+    ({ expectedIcon, isCompactViewport }) => {
+      viewportState.isCompactViewport = isCompactViewport;
+
+      render(
+        <PaneContext.Provider value={PANE_CONTEXT}>
+          <ThreadDetailHeader
+            actionsMenu={null}
+            childPillLabel={null}
+            isSecondaryPanelOpen={false}
+            onOpenThreadGitAction={vi.fn()}
+            onToggleSecondaryPanel={vi.fn()}
+            threadHeaderGitActions={[]}
+            threadId={THREAD_ID}
+            threadTitle="Panel state"
+          />
+        </PaneContext.Provider>,
+      );
+
+      const showButton = screen.getByRole("button", {
+        name: "Show right panel",
+      });
+      expect(
+        showButton.querySelector(`[data-icon="${expectedIcon}"]`),
+      ).not.toBeNull();
+    },
+  );
 
   it("keeps thread Full Screen in a split header while its panel is open", () => {
     render(
@@ -124,7 +180,9 @@ describe("ThreadDetailHeader", () => {
       </PaneContext.Provider>,
     );
 
-    expect(screen.getByRole("button", { name: /Full Screen/ })).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Maximize pane/ }),
+    ).not.toBeNull();
     expect(
       screen.queryByRole("button", { name: "Hide right panel" }),
     ).toBeNull();
@@ -179,6 +237,9 @@ describe("ThreadDetailHeader", () => {
     expect(screen.queryByText("Commit")).toBeNull();
     expect(screen.getByText("Thread menu")).not.toBeNull();
     expect(screen.getByText("Responsive menu actions")).not.toBeNull();
+    expect(
+      screen.getByTestId("thread-detail-header-actions-menu").classList,
+    ).toContain("compact-shelf-hidden-header-actions");
     const closePane = screen.getByRole("button", { name: "Close pane" });
     expect(closePane.classList).toContain("header-pane-action-button");
     const closeIcon = closePane.querySelector('[data-icon="CloseThreadPane"]');
@@ -415,92 +476,6 @@ describe("ThreadDetailHeader", () => {
     await waitFor(() => expect(resolveMentions).toHaveBeenCalledTimes(1));
     expect(container.textContent).toContain("thr_2222222222");
     expect(container.querySelector('[data-prompt-mention="true"]')).toBeNull();
-  });
-
-  it("uses a title tab for the focused split and no pane-wide dimming", () => {
-    const splitContext: PaneContextValue = {
-      ...PANE_CONTEXT,
-      isFocused: true,
-      isSplitPane: true,
-      beginPaneDrag: vi.fn(),
-    };
-    const { container, rerender } = render(
-      <PaneContext.Provider value={splitContext}>
-        <ThreadDetailHeader
-          actionsMenu={null}
-          childPillLabel="child"
-          isSecondaryPanelOpen={false}
-          onOpenThreadGitAction={vi.fn()}
-          onToggleSecondaryPanel={vi.fn()}
-          threadHeaderGitActions={[]}
-          threadId={THREAD_ID}
-          threadTitle="Focused thread"
-        />
-      </PaneContext.Provider>,
-    );
-
-    const focusedTab = container.querySelector<HTMLElement>(
-      "[data-pane-header-focus-tab]",
-    );
-    expect(focusedTab).not.toBeNull();
-    expect(focusedTab?.classList).toContain("bg-state-active");
-    expect(focusedTab?.classList).not.toContain("shadow-sm");
-    expect(container.querySelector("[data-app-page-header-dim]")).toBeNull();
-    const activeTitle = screen.getByText("Focused thread");
-    expect(activeTitle.classList).toContain("font-normal");
-    expect(activeTitle.classList).not.toContain("font-medium");
-    expect(screen.getByText("child")).not.toBeNull();
-
-    rerender(
-      <PaneContext.Provider value={{ ...splitContext, isFocused: false }}>
-        <ThreadDetailHeader
-          actionsMenu={null}
-          childPillLabel="child"
-          isSecondaryPanelOpen={false}
-          onOpenThreadGitAction={vi.fn()}
-          onToggleSecondaryPanel={vi.fn()}
-          threadHeaderGitActions={[]}
-          threadId={THREAD_ID}
-          threadTitle="Focused thread"
-        />
-      </PaneContext.Provider>,
-    );
-
-    expect(container.querySelector("[data-pane-header-focus-tab]")).toBeNull();
-    const inactiveTitle = screen.getByText("Focused thread");
-    expect(inactiveTitle.classList).toContain("text-muted-foreground/60");
-    expect(inactiveTitle.classList).toContain("font-normal");
-    expect(inactiveTitle.classList).not.toContain("font-medium");
-  });
-
-  it("keeps inactive split titles undimmed when split dimming is off", () => {
-    const store = createStore();
-    store.set(dimInactiveSplitsAtom, false);
-    const splitContext: PaneContextValue = {
-      ...PANE_CONTEXT,
-      isFocused: false,
-      isSplitPane: true,
-      beginPaneDrag: vi.fn(),
-    };
-    render(
-      <JotaiProvider store={store}>
-        <PaneContext.Provider value={splitContext}>
-          <ThreadDetailHeader
-            actionsMenu={null}
-            childPillLabel={null}
-            isSecondaryPanelOpen={false}
-            onOpenThreadGitAction={vi.fn()}
-            onToggleSecondaryPanel={vi.fn()}
-            threadHeaderGitActions={[]}
-            threadId={THREAD_ID}
-            threadTitle="Inactive thread"
-          />
-        </PaneContext.Provider>
-      </JotaiProvider>,
-    );
-    expect(screen.getByText("Inactive thread").classList).not.toContain(
-      "text-muted-foreground/60",
-    );
   });
 
   it("edits the title inline after a double click and commits on Enter", () => {

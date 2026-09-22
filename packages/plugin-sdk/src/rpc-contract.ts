@@ -24,7 +24,7 @@ export interface PluginRpcError {
 }
 
 /**
- * The validator-neutral subset of Standard Schema v1 used by plugin RPC.
+ * The validator-neutral subset of Standard Schema v1 used by plugin contracts.
  * Zod 4 schemas implement this interface directly; other validators can do
  * the same without becoming part of BB's public protocol.
  */
@@ -37,6 +37,10 @@ export interface StandardSchemaV1<Input = unknown, Output = Input> {
     ) =>
       | StandardSchemaV1Result<Output>
       | Promise<StandardSchemaV1Result<Output>>;
+    readonly jsonSchema?: {
+      readonly input: (options: { target: string }) => Record<string, unknown>;
+      readonly output: (options: { target: string }) => Record<string, unknown>;
+    };
     readonly types?: {
       readonly input: Input;
       readonly output: Output;
@@ -65,6 +69,7 @@ export interface PluginRpcMethodContract<
   InputSchema extends StandardSchemaV1 = StandardSchemaV1,
   OutputSchema extends StandardSchemaV1 = StandardSchemaV1,
 > {
+  readonly experimental_description?: string;
   readonly input: InputSchema;
   readonly output: OutputSchema;
 }

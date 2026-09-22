@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useEffect, useState } from "react";
-import { cleanup, fireEvent, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type {
@@ -8,6 +8,7 @@ import type {
   PluginComposerScope,
   PluginMessageDirectiveProps,
   PluginNavPanelProps,
+  ExperimentalPluginFixedTabReference,
 } from "../../app-contract.js";
 import {
   installTestPluginRuntime,
@@ -17,18 +18,81 @@ import {
 } from "../app.js";
 import { defineRpcContract } from "../../rpc-contract.js";
 
-// Install before touching @get-bb/plugin-sdk/app — it binds the runtime global
-// at import time (same constraint real plugin app.tsx files have).
 installTestPluginRuntime();
 const {
   definePluginApp,
+  experimental_FileLink: FileLink,
+  UrlLink: UrlLink,
+  experimental_ProviderModelPicker: ProviderModelPicker,
+  experimental_PermissionModePicker: PermissionModePicker,
+  experimental_useAppPanel,
+  experimental_useFixedTabTarget,
   ThreadChat,
+  useBbNavigate,
   useComposer,
   useComposerView,
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
 } = await import("../../app.js");
+
+type TestTaskTarget = {
+  kind: "task";
+  taskId: string;
+};
+
+const taskDetailsTab = {
+  panelId: "tasks",
+  id: "details",
+  experimental_target: {
+    validate(value): value is TestTaskTarget {
+      return (
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value) &&
+        value.kind === "task" &&
+        typeof value.taskId === "string"
+      );
+    },
+  },
+} satisfies ExperimentalPluginFixedTabReference<TestTaskTarget>;
+
+function FixedTabProbe() {
+  const panel = experimental_useAppPanel();
+  const targetState = experimental_useFixedTabTarget(taskDetailsTab);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() =>
+          panel.openFixedTab({
+            surface: { kind: "current" },
+            tab: taskDetailsTab,
+            target: { kind: "task", taskId: "TASK-42" },
+          })
+        }
+      >
+        Open details
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          panel.openFixedTab({
+            surface: { kind: "current" },
+            tab: taskDetailsTab,
+          })
+        }
+      >
+        Select details
+      </button>
+      {targetState === null ? null : (
+        <button type="button" onClick={targetState.clear}>
+          Clear {targetState.target.taskId}
+        </button>
+      )}
+    </div>
+  );
+}
 
 const typedRpcContract = defineRpcContract({
   getItem: {
@@ -52,6 +116,92 @@ function TypedRpcPanel() {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+describe("experimental_ProviderModelPicker test runtime", () => {
+  it("applies all execution edits as one controlled value", () => {
+    const onChange = vi.fn();
+    const picker = render(
+      <ProviderModelPicker
+        value={{
+          providerId: "codex",
+          model: "gpt-5.5",
+          reasoningLevel: "medium",
+          serviceTier: "default",
+        }}
+        onChange={onChange}
+        routing={{ kind: "host", hostId: "host-test" }}
+        align="end"
+      />,
+    );
+
+    fireEvent.change(picker.getByRole("textbox", { name: "Provider ID" }), {
+      target: { value: "claude-code" },
+    });
+    fireEvent.change(picker.getByRole("textbox", { name: "Model" }), {
+      target: { value: "claude-opus-4-7" },
+    });
+    fireEvent.change(picker.getByRole("textbox", { name: "Reasoning level" }), {
+      target: { value: "xhigh" },
+    });
+    fireEvent.change(picker.getByRole("combobox", { name: "Service tier" }), {
+      target: { value: "fast" },
+    });
+    expect(onChange).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      picker.getByRole("button", { name: "Apply execution selection" }),
+    );
+    expect(onChange).toHaveBeenCalledWith({
+      providerId: "claude-code",
+      model: "claude-opus-4-7",
+      reasoningLevel: "xhigh",
+      serviceTier: "fast",
+    });
+    expect(
+      picker.getByTestId("bb-provider-model-picker").dataset.routingKind,
+    ).toBe("host");
+    expect(
+      picker.getByTestId("bb-provider-model-picker").dataset.routingId,
+    ).toBe("host-test");
+    expect(picker.getByTestId("bb-provider-model-picker").dataset.align).toBe(
+      "end",
+    );
+  });
+});
+
+describe("experimental_PermissionModePicker test runtime", () => {
+  it("exposes the controlled mode, provider, and routing", () => {
+    const onChange = vi.fn();
+    const picker = render(
+      <PermissionModePicker
+        providerId="codex"
+        value="auto"
+        onChange={onChange}
+        routing={{ kind: "environment", environmentId: "env-test" }}
+        align="start"
+      />,
+    );
+
+    fireEvent.change(
+      picker.getByRole("combobox", { name: "Permission mode" }),
+      { target: { value: "full" } },
+    );
+
+    expect(onChange).toHaveBeenCalledWith("full");
+    expect(
+      picker.getByTestId("bb-permission-mode-picker").dataset.providerId,
+    ).toBe("codex");
+    expect(
+      picker.getByTestId("bb-permission-mode-picker").dataset.routingKind,
+    ).toBe("environment");
+    expect(
+      picker.getByTestId("bb-permission-mode-picker").dataset.routingId,
+    ).toBe("env-test");
+    expect(picker.getByTestId("bb-permission-mode-picker").dataset.align).toBe(
+      "start",
+    );
+  });
 });
 
 function Panel({ subPath }: PluginNavPanelProps) {
@@ -84,10 +234,101 @@ function RealtimeConnectionProbe() {
   return <div>Realtime: {state}</div>;
 }
 
+function UrlNavigationProbe() {
+  const navigate = useBbNavigate();
+  return (
+    <div>
+      <UrlLink href="https://example.com/from-link">Open link</UrlLink>
+      <UrlLink
+        href="https://example.com/native"
+        target="preview-pane"
+        rel="nofollow"
+      >
+        Open in explicit target
+      </UrlLink>
+      <button
+        type="button"
+        onClick={() => navigate.openUrl("https://example.com/imperative")}
+      >
+        Open imperatively
+      </button>
+    </div>
+  );
+}
+
+const fileIntent = {
+  target: {
+    kind: "workspace" as const,
+    environmentId: "env_42",
+    path: "src/example.ts",
+  },
+  location: { kind: "line" as const, line: 12, column: 4 },
+};
+
+function FileNavigationProbe() {
+  const navigate = useBbNavigate();
+  return (
+    <div>
+      <FileLink {...fileIntent}>Open file</FileLink>
+      <button
+        type="button"
+        onClick={() => navigate.experimental_openFileExternally(fileIntent)}
+      >
+        Open file externally
+      </button>
+    </div>
+  );
+}
+
+function MalformedFileLinkProbe() {
+  return (
+    <FileLink
+      target={{
+        kind: "workspace",
+        environmentId: "env_42",
+        path: "../secret",
+      }}
+    >
+      Open malformed file
+    </FileLink>
+  );
+}
+
+function MalformedUnicodeFileLinkProbe() {
+  return (
+    <FileLink
+      target={{
+        kind: "workspace",
+        environmentId: "env_42",
+        path: String.fromCharCode(0xd800),
+      }}
+    >
+      Open malformed Unicode file
+    </FileLink>
+  );
+}
+
+function SchemeLikeFileLinkProbe() {
+  return (
+    <FileLink
+      target={{
+        kind: "workspace",
+        environmentId: "env_42",
+        path: "vscode:foo",
+      }}
+    >
+      Open scheme-like file
+    </FileLink>
+  );
+}
+
 let capturedComposerVisualSetters: Pick<
   PluginComposerApi,
   "setTextEffect" | "setInputLock"
 > | null = null;
+let capturedComposerSetSelection:
+  | PluginComposerApi["experimental_setSelection"]
+  | null = null;
 
 function InlineVis({
   attributes,
@@ -110,6 +351,7 @@ function ComposerProbe() {
     setTextEffect: composer.setTextEffect,
     setInputLock: composer.setInputLock,
   };
+  capturedComposerSetSelection = composer.experimental_setSelection;
   return (
     <div>
       <span data-testid="composer-scope">{composer.scope.kind}</span>
@@ -224,6 +466,78 @@ const app = await loadPluginApp(
 );
 
 describe("loadPluginApp", () => {
+  it("captures and validates app overlay registrations", async () => {
+    function Overlay() {
+      return <div>overlay</div>;
+    }
+    const captured = await loadPluginApp(
+      definePluginApp((builder) => {
+        builder.slots.experimental_appOverlay({
+          id: "office",
+          component: Overlay,
+        });
+      }),
+    );
+
+    expect(captured.appOverlays).toEqual([
+      { id: "office", component: Overlay },
+    ]);
+    await expect(
+      loadPluginApp(
+        definePluginApp((builder) => {
+          builder.slots.experimental_appOverlay({
+            id: "office",
+            component: Overlay,
+          });
+          builder.slots.experimental_appOverlay({
+            id: "office",
+            component: Overlay,
+          });
+        }),
+      ),
+    ).rejects.toThrow('slots.experimental_appOverlay: duplicate id "office"');
+  });
+
+  it("captures and validates sidebar navigation registrations", async () => {
+    const captured = await loadPluginApp(
+      definePluginApp((builder) => {
+        builder.slots.experimental_sidebarNavigation({
+          id: "compact",
+          title: "Compact navigation",
+          description: "Groups the sidebar destinations.",
+          component: () => null,
+        });
+      }),
+    );
+
+    expect(captured.experimentalSidebarNavigations).toEqual([
+      {
+        id: "compact",
+        title: "Compact navigation",
+        description: "Groups the sidebar destinations.",
+        component: expect.any(Function),
+      },
+    ]);
+    await expect(
+      loadPluginApp(
+        definePluginApp((builder) => {
+          builder.slots.experimental_sidebarNavigation({
+            id: "compact",
+            title: "One",
+            component: () => null,
+          });
+          builder.slots.experimental_sidebarNavigation({
+            id: "compact",
+            title: "Two",
+            component: () => null,
+          });
+        }),
+      ),
+    ).rejects.toThrow(
+      'slots.experimental_sidebarNavigation: duplicate id "compact"',
+    );
+  });
+
   it("captures and validates New thread panel action registrations", async () => {
     const run = () => {};
     const captured = await loadPluginApp(
@@ -585,6 +899,174 @@ describe("loadPluginApp", () => {
     );
   });
 
+  it("validates and captures nav panel fixed tabs", async () => {
+    function Navigation({ subPath }: PluginNavPanelProps) {
+      return <span>{subPath}</span>;
+    }
+    const targetContract = {
+      validate(
+        value: import("../../json-value.js").JsonValue,
+      ): value is TestTaskTarget {
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          !Array.isArray(value) &&
+          value.kind === "task" &&
+          typeof value.taskId === "string"
+        );
+      },
+    };
+    const captured = await loadPluginApp(
+      definePluginApp((builder) => {
+        builder.slots.navPanel({
+          id: "tasks",
+          title: "Tasks",
+          icon: "ListTodo",
+          path: "tasks",
+          component: Panel,
+          fixedTabs: [
+            {
+              panelId: "tasks",
+              id: "navigation",
+              title: "Navigation",
+              icon: "PanelRight",
+              component: Navigation,
+              layout: "flush",
+              experimental_target: targetContract,
+            },
+          ],
+        });
+      }),
+    );
+
+    expect(captured.navPanels[0]?.fixedTabs).toEqual([
+      {
+        panelId: "tasks",
+        id: "navigation",
+        title: "Navigation",
+        icon: "PanelRight",
+        component: Navigation,
+        layout: "flush",
+        experimental_target: targetContract,
+      },
+    ]);
+  });
+
+  it("rejects a malformed fixed-tab target contract", async () => {
+    await expect(
+      loadPluginApp(
+        definePluginApp((builder) => {
+          builder.slots.navPanel({
+            id: "tasks",
+            title: "Tasks",
+            icon: "ListTodo",
+            path: "tasks",
+            component: Panel,
+            fixedTabs: [
+              {
+                panelId: "tasks",
+                id: "details",
+                title: "Details",
+                icon: "Info",
+                component: Panel,
+                experimental_target: {
+                  // @ts-expect-error Runtime collector coverage for malformed JS.
+                  validate: "not-a-function",
+                },
+              },
+            ],
+          });
+        }),
+      ),
+    ).rejects.toThrow(
+      '"experimental_target.validate" must be a function when set',
+    );
+  });
+
+  it("rejects a fixed-tab reference scoped to a different nav panel", async () => {
+    await expect(
+      loadPluginApp(
+        definePluginApp((builder) => {
+          builder.slots.navPanel({
+            id: "tasks",
+            title: "Tasks",
+            icon: "ListTodo",
+            path: "tasks",
+            component: Panel,
+            fixedTabs: [
+              {
+                panelId: "other-page",
+                id: "navigation",
+                title: "Navigation",
+                icon: "PanelRight",
+                component: Panel,
+              },
+            ],
+          });
+        }),
+      ),
+    ).rejects.toThrow(
+      '"panelId" must match its containing navPanel id "tasks"',
+    );
+  });
+
+  it("rejects a fixed-tab registration without an owner panel", async () => {
+    await expect(
+      loadPluginApp(
+        definePluginApp((builder) => {
+          builder.slots.navPanel({
+            id: "tasks",
+            title: "Tasks",
+            icon: "ListTodo",
+            path: "tasks",
+            component: Panel,
+            fixedTabs: [
+              // @ts-expect-error Runtime collector coverage for malformed JS.
+              {
+                id: "navigation",
+                title: "Navigation",
+                icon: "PanelRight",
+                component: Panel,
+              },
+            ],
+          });
+        }),
+      ),
+    ).rejects.toThrow('"panelId" must be a non-empty string');
+  });
+
+  it("rejects duplicate nav panel fixed tab ids", async () => {
+    await expect(
+      loadPluginApp(
+        definePluginApp((builder) => {
+          builder.slots.navPanel({
+            id: "tasks",
+            title: "Tasks",
+            icon: "ListTodo",
+            path: "tasks",
+            component: Panel,
+            fixedTabs: [
+              {
+                panelId: "tasks",
+                id: "navigation",
+                title: "First",
+                icon: "PanelRight",
+                component: Panel,
+              },
+              {
+                panelId: "tasks",
+                id: "navigation",
+                title: "Second",
+                icon: "PanelRight",
+                component: Panel,
+              },
+            ],
+          });
+        }),
+      ),
+    ).rejects.toThrow('duplicate id "navigation"');
+  });
+
   it("captures messageDirective registrations", () => {
     expect(app.messageDirectives).toEqual([
       { id: "inline-vis", component: InlineVis },
@@ -755,10 +1237,56 @@ describe("loadPluginApp", () => {
     ).rejects.toThrow('slots.messageAction: duplicate id "dup"');
   });
 
+  it("collects separate provider kinds and the legacy all-kinds registration", async () => {
+    const captured = await loadPluginApp(
+      definePluginApp((builder) => {
+        for (const providerKind of [
+          "agent",
+          "machine",
+          "environment",
+        ] as const) {
+          builder.slots.experimental_providerIcon({
+            providerKind,
+            providerId: "shared",
+            icon: () => null,
+          });
+        }
+        // @ts-expect-error legacy plugin declaration
+        builder.slots.experimental_providerIcon({
+          providerId: "shared",
+          icon: () => null,
+        });
+      }),
+    );
+    expect(
+      captured.providerIcons.map(({ providerKind }) => providerKind),
+    ).toEqual(["agent", "machine", "environment", "all"]);
+  });
+
+  it.each([null, "all", "unknown", 7])(
+    "rejects an explicit invalid provider kind %j",
+    async (providerKind) => {
+      await expect(
+        loadPluginApp(
+          definePluginApp((builder) => {
+            const registration = {
+              providerKind: "agent" as const,
+              providerId: "shared",
+              icon: () => null,
+            };
+            Reflect.set(registration, "providerKind", providerKind);
+            builder.slots.experimental_providerIcon(registration);
+          }),
+        ),
+      ).rejects.toThrow("providerKind");
+    },
+  );
+
   it("validates experimental_providerIcon registrations like the host", async () => {
     const captured = await loadPluginApp(
       definePluginApp((builder) => {
         builder.slots.experimental_providerIcon({
+          providerKind: "agent",
           providerId: "acp-cursor",
           icon: () => null,
         });
@@ -769,8 +1297,8 @@ describe("loadPluginApp", () => {
     await expect(
       loadPluginApp(
         definePluginApp((builder) => {
-          // A provider id, not a plugin id: `bb-plugin-x/codex` is not one.
           builder.slots.experimental_providerIcon({
+            providerKind: "agent",
             providerId: "bb-plugin-x/codex",
             icon: () => null,
           });
@@ -783,16 +1311,20 @@ describe("loadPluginApp", () => {
       loadPluginApp(
         definePluginApp((builder) => {
           builder.slots.experimental_providerIcon({
+            providerKind: "agent",
             providerId: "codex",
             icon: () => null,
           });
           builder.slots.experimental_providerIcon({
+            providerKind: "agent",
             providerId: "codex",
             icon: () => null,
           });
         }),
       ),
-    ).rejects.toThrow('slots.experimental_providerIcon: duplicate id "codex"');
+    ).rejects.toThrow(
+      'slots.experimental_providerIcon: duplicate id "agent:codex"',
+    );
   });
 
   it("invokes a captured messageAction run with a plugin-authored context", () => {
@@ -873,6 +1405,138 @@ describe("typed rpc test runtime", () => {
 });
 
 describe("renderSlot", () => {
+  it("records URL intents from links and imperative navigation through one host boundary", () => {
+    const slot = renderSlot(
+      { component: UrlNavigationProbe },
+      {},
+      { openUrl: () => true },
+    );
+    fireEvent.click(slot.getByRole("link", { name: "Open link" }));
+    const explicitTargetLink = slot.getByRole("link", {
+      name: "Open in explicit target",
+    });
+    expect(explicitTargetLink.getAttribute("target")).toBe("preview-pane");
+    expect(explicitTargetLink.getAttribute("rel")).toBe(
+      "nofollow noopener noreferrer",
+    );
+    expect(fireEvent.click(explicitTargetLink)).toBe(true);
+    fireEvent.click(slot.getByRole("button", { name: "Open imperatively" }));
+    expect(slot.inspection.navigateCalls).toEqual([
+      { method: "openUrl", url: "https://example.com/from-link" },
+      {
+        method: "openUrl",
+        url: "https://example.com/imperative",
+      },
+    ]);
+  });
+
+  it("exposes a scheme-safe href for file links", () => {
+    const slot = renderSlot(
+      { component: SchemeLikeFileLinkProbe },
+      {},
+      { openFilePreview: () => true },
+    );
+    const link = slot.getByRole("link", { name: "Open scheme-like file" });
+    expect(link.getAttribute("href")).toBe("./vscode%3Afoo");
+    fireEvent.click(link);
+    expect(slot.inspection.navigateCalls).toEqual([
+      {
+        method: "experimental_openFilePreview",
+        options: {
+          target: {
+            kind: "workspace",
+            environmentId: "env_42",
+            path: "vscode:foo",
+          },
+          location: null,
+        },
+      },
+    ]);
+  });
+
+  it("makes malformed file-link targets inert", () => {
+    const slot = renderSlot(
+      { component: MalformedFileLinkProbe },
+      {},
+      { openFilePreview: () => true },
+    );
+    const invalid = slot.getByText("Open malformed file");
+    expect(
+      slot.queryByRole("link", { name: "Open malformed file" }),
+    ).toBeNull();
+    expect(invalid.getAttribute("href")).toBeNull();
+    fireEvent.click(invalid);
+    expect(slot.inspection.navigateCalls).toEqual([]);
+  });
+
+  it("makes malformed Unicode file-link targets inert", () => {
+    const slot = renderSlot(
+      { component: MalformedUnicodeFileLinkProbe },
+      {},
+      { openFilePreview: () => true },
+    );
+    const invalid = slot.getByText("Open malformed Unicode file");
+    expect(
+      slot.queryByRole("link", { name: "Open malformed Unicode file" }),
+    ).toBeNull();
+    expect(invalid.getAttribute("href")).toBeNull();
+    fireEvent.click(invalid);
+    expect(slot.inspection.navigateCalls).toEqual([]);
+  });
+
+  it("records file-link preview and imperative external intents through one host boundary", () => {
+    const slot = renderSlot(
+      { component: FileNavigationProbe },
+      {},
+      {
+        openFilePreview: () => true,
+        openFileExternally: () => true,
+      },
+    );
+    fireEvent.click(slot.getByRole("link", { name: "Open file" }));
+    fireEvent.click(slot.getByRole("button", { name: "Open file externally" }));
+    expect(slot.inspection.navigateCalls).toEqual([
+      { method: "experimental_openFilePreview", options: fileIntent },
+      { method: "experimental_openFileExternally", options: fileIntent },
+    ]);
+  });
+
+  it("records fixed-tab opens and retains target state until the owner clears it", () => {
+    const slot = renderSlot(
+      { component: FixedTabProbe },
+      {},
+      {
+        experimental_openFixedTab: () => true,
+        experimental_fixedTabTarget: {
+          panelId: "tasks",
+          tabId: "details",
+          target: { kind: "task", taskId: "TASK-7" },
+        },
+      },
+    );
+
+    fireEvent.click(slot.getByRole("button", { name: "Clear TASK-7" }));
+    expect(slot.queryByRole("button", { name: "Clear TASK-7" })).toBeNull();
+
+    fireEvent.click(slot.getByRole("button", { name: "Open details" }));
+    expect(slot.getByRole("button", { name: "Clear TASK-42" })).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Select details" }));
+    expect(slot.getByRole("button", { name: "Clear TASK-42" })).toBeTruthy();
+    expect(slot.inspection.experimental_fixedTabOpenCalls).toEqual([
+      {
+        surface: { kind: "current" },
+        panelId: "tasks",
+        tabId: "details",
+        target: { kind: "task", taskId: "TASK-42" },
+      },
+      {
+        surface: { kind: "current" },
+        panelId: "tasks",
+        tabId: "details",
+      },
+    ]);
+  });
+
   it("drives the shared realtime connection lifecycle", async () => {
     const slot = renderSlot(
       app.homepageSections[0]!,
@@ -902,7 +1566,6 @@ describe("renderSlot", () => {
     expect(slot.inspection.rpcCalls).toBe(slot.rpcCalls);
     expect(slot.behavior.emitRealtime).toBe(slot.emitRealtime);
 
-    // A realtime push re-fetches and renders the new listing.
     listing = ["a.md", "b.md"];
     await slot.behavior.emitRealtime("items-changed", null);
     await slot.findByText("b.md");
@@ -1085,6 +1748,68 @@ describe("renderSlot", () => {
       { provider: "notes", id: "ideas", label: "Ideas" },
     ]);
     expect(slot.composer.focusCount).toBe(3);
+  });
+
+  it("records accepted selections and echoes back what the scope has pickers for", async () => {
+    const threadSlot = renderSlot(
+      app.composerCustomizations[0]!.actions![0]!,
+      {},
+      { context: { projectId: "proj_1", threadId: "thr_1" } },
+    );
+    const setSelection = capturedComposerSetSelection;
+    if (setSelection === null) throw new Error("setSelection not captured");
+
+    await expect(
+      setSelection({
+        projectId: "proj_2",
+        environment: { type: "project-default" },
+        providerId: "codex",
+        model: "gpt-5",
+        reasoningLevel: "high",
+      }),
+    ).resolves.toEqual({
+      providerId: "codex",
+      model: "gpt-5",
+      reasoningLevel: "high",
+    });
+    expect(threadSlot.composer.selections).toEqual([
+      { providerId: "codex", model: "gpt-5", reasoningLevel: "high" },
+    ]);
+    threadSlot.unmount();
+
+    const newThreadSlot = renderSlot(
+      app.composerCustomizations[0]!.actions![0]!,
+      {},
+      { context: { projectId: "proj_1" } },
+    );
+    await expect(
+      capturedComposerSetSelection!({ projectId: "proj_2", model: "gpt-5" }),
+    ).resolves.toEqual({ projectId: "proj_2", model: "gpt-5" });
+    expect(newThreadSlot.composer.selections).toEqual([
+      { projectId: "proj_2", model: "gpt-5" },
+    ]);
+    newThreadSlot.unmount();
+
+    const sideChatSlot = renderSlot(
+      app.composerCustomizations[0]!.actions![0]!,
+      {},
+      {
+        composer: {
+          scope: {
+            kind: "side-chat",
+            projectId: "proj_1",
+            parentThreadId: "thr_1",
+            tabId: "tab_1",
+            childThreadId: null,
+          },
+        },
+      },
+    );
+    await expect(
+      capturedComposerSetSelection!({ model: "gpt-5" }),
+    ).rejects.toThrow(/no pickers/);
+    expect(sideChatSlot.composer.selections).toEqual([]);
+    sideChatSlot.unmount();
   });
 
   it("invalidates visual-state setters through both unmount controls", () => {

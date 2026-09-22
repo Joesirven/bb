@@ -3,8 +3,6 @@ import { getExperiments } from "@bb/db";
 import { experimentsSchema } from "@bb/domain";
 import { systemConfigResponseSchema } from "@bb/server-contract";
 import { readJson } from "../helpers/json.js";
-import { internalAuthHeaders } from "../helpers/commands.js";
-import { seedHostSession } from "../helpers/seed.js";
 import { withTestHarness } from "../helpers/test-app.js";
 
 describe("experiments settings", () => {
@@ -14,10 +12,12 @@ describe("experiments settings", () => {
       expect(response.status).toBe(200);
       const body = systemConfigResponseSchema.parse(await readJson(response));
       expect(body.experiments).toEqual({
-        claudeCodeMockCliTraffic: false,
-        editMessages: true,
-        newOnboarding: false,
-        providerSessionReaping: false,
+        changelogPreview: false,
+        mobileApp: false,
+        multiMachinePicker: false,
+        serverMove: false,
+        sidebarProgressiveDisclosure: false,
+        timelineWindowing: false,
       });
     });
   });
@@ -28,67 +28,42 @@ describe("experiments settings", () => {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          claudeCodeMockCliTraffic: true,
-          editMessages: true,
-          newOnboarding: true,
-            providerSessionReaping: true,
+          changelogPreview: true,
+          mobileApp: true,
+          multiMachinePicker: true,
+          serverMove: true,
+          sidebarProgressiveDisclosure: true,
+          timelineWindowing: true,
         }),
       });
       expect(put.status).toBe(200);
       expect(experimentsSchema.parse(await readJson(put))).toEqual({
-        claudeCodeMockCliTraffic: true,
-        editMessages: true,
-        newOnboarding: true,
-        providerSessionReaping: true,
+        changelogPreview: true,
+        mobileApp: true,
+        multiMachinePicker: true,
+        serverMove: true,
+        sidebarProgressiveDisclosure: true,
+        timelineWindowing: true,
       });
       expect(getExperiments(harness.db)).toEqual({
-        claudeCodeMockCliTraffic: true,
-        editMessages: true,
-        newOnboarding: true,
-        providerSessionReaping: true,
+        changelogPreview: true,
+        mobileApp: true,
+        multiMachinePicker: true,
+        serverMove: true,
+        sidebarProgressiveDisclosure: true,
+        timelineWindowing: true,
       });
 
       const config = await harness.app.request("/api/v1/system/config");
       expect(
         systemConfigResponseSchema.parse(await readJson(config)).experiments,
       ).toEqual({
-        claudeCodeMockCliTraffic: true,
-        editMessages: true,
-        newOnboarding: true,
-        providerSessionReaping: true,
-      });
-    });
-  });
-
-  it("serves the current provider session policy to the daemon", async () => {
-    await withTestHarness(async (harness) => {
-      const { host } = seedHostSession(harness.deps, {
-        id: "host-runtime-policy",
-      });
-      const headers = internalAuthHeaders(harness, { hostId: host.id });
-
-      const initial = await harness.app.request("/internal/runtime-policy", {
-        headers,
-      });
-      expect(initial.status).toBe(200);
-      await expect(readJson(initial)).resolves.toEqual({
-        providerSessionReaping: false,
-      });
-      await harness.app.request("/api/v1/settings/experiments", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          claudeCodeMockCliTraffic: false,
-          editMessages: true,
-          newOnboarding: false,
-            providerSessionReaping: true,
-        }),
-      });
-      const updated = await harness.app.request("/internal/runtime-policy", {
-        headers,
-      });
-      await expect(readJson(updated)).resolves.toEqual({
-        providerSessionReaping: true,
+        changelogPreview: true,
+        mobileApp: true,
+        multiMachinePicker: true,
+        serverMove: true,
+        sidebarProgressiveDisclosure: true,
+        timelineWindowing: true,
       });
     });
   });
@@ -102,10 +77,12 @@ describe("experiments settings", () => {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          claudeCodeMockCliTraffic: false,
-          editMessages: false,
-          newOnboarding: false,
-          providerSessionReaping: false,
+          changelogPreview: false,
+          mobileApp: false,
+          multiMachinePicker: false,
+          serverMove: false,
+          sidebarProgressiveDisclosure: false,
+          timelineWindowing: false,
         }),
       });
       expect(put.status).toBe(200);

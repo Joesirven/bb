@@ -10,13 +10,14 @@ import type { TimelineTitle, TimelineTitleSegment } from "@bb/thread-view";
 import { type IconName } from "@bb/shared-ui/icon";
 import { MarkdownPreview } from "@/components/ui/markdown-preview.js";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing.js";
+import { buildMarkdownMessageLinkRouting } from "@/components/ui/markdown-message-link-routing";
 import { cn } from "@bb/shared-ui/lib/utils";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
 import {
   ConversationAttachments,
   type ConversationAttachmentItems,
 } from "./ConversationAttachments.js";
-import { computeMutedPrefixLength } from "./compute-muted-prefix-length.js";
+import { computeMutedPrefixLength } from "@bb/client-core";
 import {
   clipMentionTextToVisibleRange,
   shiftMentionsToTextRange,
@@ -31,25 +32,21 @@ import type {
   ThreadTimelineLinkHandler,
   ThreadTimelineLocalFileLinkHandler,
 } from "./types.js";
-import { turnRequestLabel } from "./conversation-turn-request-label.js";
+import { turnRequestLabel } from "@bb/client-core";
 import { TurnRequestLabel } from "./TurnRequestLabel.js";
 import { useOverflowMeasurement } from "./conversation-message-overflow.js";
 import { PromptMentionPill } from "./ConversationMessageMentions.js";
 import { useThreadTitleDisplayText } from "@/components/thread/ThreadTitleMentions.js";
+import { getThreadRoutePath } from "@/lib/route-paths";
 import {
   boundedMarkdownPreview,
   closeUnterminatedMarkdownCodeSpan,
   endsInsideExactRawThreadIdCodeSpan,
   GENERATED_MESSAGE_COLLAPSED_PREVIEW_CHAR_CAP,
-} from "./conversation-message-limits.js";
+} from "@bb/client-core";
 
 interface GeneratedConversationMessageProps {
   attachmentItems: ConversationAttachmentItems;
-  /**
-   * `originKind` of the thread this generated row belongs to. A fork's
-   * seed-without-run anchor (`"fork"`) renders the Fork leading icon for
-   * consistency with the Fork action; otherwise the per-`sourceKind` icon.
-   */
   originKind: ThreadOriginKind | null;
   mentions: readonly PromptTextMention[];
   onOpenLink?: ThreadTimelineLinkHandler;
@@ -58,20 +55,17 @@ interface GeneratedConversationMessageProps {
   resolveMentionLink?: PromptMentionLinkResolver;
   resolveSegmentLinkHref?: TimelineTitleLinkResolver;
   onTitleAction?: TimelineTitleActionResolver;
-  // `system` rows specialize their title/icon on `systemMessageKind` +
-  // `systemMessageSubject`; `agent` rows specialize on `sourceName` +
-  // `sourceThreadId`. Both groups are always supplied — the inactive group is
-  // ignored by the source-kind switch — so the props stay non-optional.
   sourceKind: GeneratedConversationSourceKind;
   sourceName: string;
+  sourceProjectId: string | null;
   sourceThreadId: string | null;
-  /** The source is a side-chat plugin hidden fork: its name carries no route
-   * link because its title action opens the plugin's panel tab instead. */
   sourceIsPluginSideChat: boolean;
   systemMessageKind: SystemMessageKind;
   systemMessageSubject: SystemMessageSubject | null;
   text: string;
+  threadId?: string;
   turnRequest: TimelineUserConversationRow["turnRequest"];
+  workspaceRootPath?: string;
 }
 
 type GeneratedConversationSourceKind = "agent" | "system";
@@ -129,12 +123,6 @@ export function generatedConversationBodySlice({
   };
 }
 
-/**
- * Bounds the initial generated-message parse without manufacturing a complete
- * token at the cut. When the cap lands inside a token, retreat to the previous
- * whitespace boundary; a solid unbroken token falls back to plain text for the
- * collapsed row and is parsed only after explicit expansion.
- */
 export function generatedConversationCollapsedPreview(
   text: string,
 ): GeneratedConversationCollapsedPreview {
@@ -182,8 +170,6 @@ function timelineTitleSegment({
   return segment;
 }
 
-// A muted verb segment ("finished", "assigned to you", …) — the non-emphasized
-// connective text that frames the linked subject.
 function verbSegment(text: string): TimelineTitleSegment {
   return timelineTitleSegment({
     em: false,
@@ -194,8 +180,6 @@ function verbSegment(text: string): TimelineTitleSegment {
   });
 }
 
-// The emphasized subject segment: a thread name links to its thread; an
-// unlinkable subject (missing id) renders emphasized but plain.
 function subjectSegment(
   text: string,
   threadId: string | null,
@@ -219,9 +203,6 @@ const SYSTEM_MESSAGE_FALLBACK_SEGMENTS: TimelineTitleSegment[] = [
   }),
 ];
 
-// A `thread`-subject verb title: `[name]` (linked) followed by the verb phrase.
-// Falls back to the generic "System Message" title when the row's subject shape
-// does not match the kind (defensive — should not happen for stamped rows).
 function threadSubjectTitleSegments(
   subject: SystemMessageSubject | null,
   verb: string,
@@ -256,6 +237,14 @@ function systemMessageTitleSegments(
       return subject !== null && subject.kind === "thread-batch"
         ? [verbSegment(`${subject.count} threads updated`)]
         : SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
+    case "tool-result-delivered":
+      return subject !== null && subject.kind === "tool-call"
+        ? [
+            verbSegment("Delivered"),
+            subjectSegment(subject.toolName, null),
+            verbSegment("result"),
+          ]
+        : SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
     case "unlabeled":
       return SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
   }
@@ -270,17 +259,11 @@ export function generatedConversationTitle({
   systemMessageKind,
   systemMessageSubject,
 }: GeneratedConversationTitleArgs): TimelineTitle {
-  // The lead-in names the relationship to the source: a side chat is replying
-  // to it ("Replying to"), any other fork branched from it ("Forked from"), and
-  // anything else keeps the neutral "Message from". A side chat is a fork too,
-  // so it is tested first.
   const agentLeadIn = sourceIsPluginSideChat
     ? "Replying to"
     : originKind === "fork"
       ? "Forked from"
       : "Message from";
-  // A side-chat source opens in the plugin's panel tab (a title action), so its
-  // name carries no route link; other sources navigate to the source thread.
   const sideChatAction =
     sourceIsPluginSideChat && sourceThreadId !== null
       ? ({ kind: "open-plugin-side-chat", threadId: sourceThreadId } as const)
@@ -331,9 +314,7 @@ function generatedConversationEmptyText(
   }
 }
 
-export function systemMessageIconName(
-  systemMessageKind: SystemMessageKind,
-): IconName {
+function systemMessageIconName(systemMessageKind: SystemMessageKind): IconName {
   switch (systemMessageKind) {
     case "ownership-assigned":
       return "UserRoundPlus";
@@ -349,6 +330,8 @@ export function systemMessageIconName(
       return "AlertCircle";
     case "child-outcome-batch":
       return "ListTodo";
+    case "tool-result-delivered":
+      return "Toolbox";
     case "unlabeled":
       return "Info";
   }
@@ -359,8 +342,6 @@ function generatedConversationIconName(
   originKind: ThreadOriginKind | null,
   systemMessageKind: SystemMessageKind,
 ): IconName {
-  // A fork's anchor uses the Fork icon (matching the Fork action) regardless of
-  // source kind; in practice fork anchors are always agent-initiated.
   if (originKind === "fork") {
     return "Fork";
   }
@@ -377,6 +358,7 @@ interface GeneratedAgentSourceTitleProps {
   resolveSegmentLinkHref?: TimelineTitleLinkResolver;
   sourceIsPluginSideChat: boolean;
   sourceName: string;
+  sourceProjectId: string | null;
   sourceThreadId: string | null;
   title: TimelineTitle;
 }
@@ -386,17 +368,24 @@ function GeneratedAgentSourceTitle({
   resolveSegmentLinkHref,
   sourceIsPluginSideChat,
   sourceName,
+  sourceProjectId,
   sourceThreadId,
   title,
 }: GeneratedAgentSourceTitleProps) {
   const sourceDisplayName = useThreadTitleDisplayText(sourceName);
   const sourceTitleAction =
     title.action && onTitleAction ? onTitleAction(title.action) : null;
-  // A side chat opens in the plugin's panel (a title action), so its name
-  // carries no route link; other sources navigate to the source thread.
   const sourceLinkHref =
-    sourceThreadId !== null && !sourceIsPluginSideChat && resolveSegmentLinkHref
-      ? resolveSegmentLinkHref({ kind: "thread", threadId: sourceThreadId })
+    sourceThreadId !== null && !sourceIsPluginSideChat
+      ? sourceProjectId !== null
+        ? getThreadRoutePath({
+            projectId: sourceProjectId,
+            threadId: sourceThreadId,
+          })
+        : (resolveSegmentLinkHref?.({
+            kind: "thread",
+            threadId: sourceThreadId,
+          }) ?? null)
       : null;
   const leadIn = title.segments[0]?.text ?? "Message from";
 
@@ -417,6 +406,7 @@ function GeneratedAgentSourceTitle({
           resource={{
             kind: "thread",
             threadId: sourceThreadId,
+            ...(sourceProjectId === null ? {} : { projectId: sourceProjectId }),
             label: sourceDisplayName,
           }}
           serializedText={`@thread:${sourceThreadId}`}
@@ -428,9 +418,6 @@ function GeneratedAgentSourceTitle({
   );
 }
 
-// True only for the ownership kinds, whose one-line body restates the granular
-// title verbatim. Those rows render title-only (no body, no preview,
-// non-expandable); every other kind keeps its information-bearing body.
 function systemMessageIsTitleOnly(
   sourceKind: GeneratedConversationSourceKind,
   systemMessageKind: SystemMessageKind,
@@ -444,10 +431,6 @@ function systemMessageIsTitleOnly(
   );
 }
 
-// Flattens the markdown collapsed-preview to a single inline line: block nodes
-// (paragraphs, headings, lists, code) lose their margins/sizing and render
-// inline so the row stays one truncated line while still showing inline
-// formatting (bold, code, links) and @thread pills.
 const COLLAPSED_MARKDOWN_PREVIEW_CLASS = cn(
   "[&_p]:!m-0 [&_p]:inline",
   "[&_ul]:!m-0 [&_ol]:!m-0 [&_ul]:!pl-0 [&_ol]:!pl-0 [&_li]:!m-0 [&_li]:inline",
@@ -471,12 +454,15 @@ export const GeneratedConversationMessage = memo(
     onTitleAction,
     sourceKind,
     sourceName,
+    sourceProjectId,
     sourceThreadId,
     sourceIsPluginSideChat,
     systemMessageKind,
     systemMessageSubject,
     text,
+    threadId,
     turnRequest,
+    workspaceRootPath,
   }: GeneratedConversationMessageProps) {
     const trimStartLength = text.length - text.trimStart().length;
     const messageText = text.trim();
@@ -490,9 +476,16 @@ export const GeneratedConversationMessage = memo(
       [mentions, messageText.length, trimStartLength],
     );
     const requestLabel = turnRequestLabel(turnRequest);
-    const linkRouting = useMemo<MarkdownLinkRouting | undefined>(() => {
-      return onOpenLink === undefined ? undefined : { onOpenLink };
-    }, [onOpenLink]);
+    const linkRouting = useMemo<MarkdownLinkRouting | undefined>(
+      () =>
+        buildMarkdownMessageLinkRouting({
+          onOpenLink,
+          onOpenLocalFileLink,
+          threadId,
+          workspaceRootPath,
+        }),
+      [onOpenLink, onOpenLocalFileLink, threadId, workspaceRootPath],
+    );
     const title = useMemo(
       () =>
         generatedConversationTitle({
@@ -521,6 +514,7 @@ export const GeneratedConversationMessage = memo(
           resolveSegmentLinkHref={resolveSegmentLinkHref}
           sourceIsPluginSideChat={sourceIsPluginSideChat}
           sourceName={sourceName}
+          sourceProjectId={sourceProjectId}
           sourceThreadId={sourceThreadId}
           title={title}
         />
@@ -530,8 +524,6 @@ export const GeneratedConversationMessage = memo(
       originKind,
       systemMessageKind,
     );
-    // Title-only rows (ownership assigned/removed) restate their body in the
-    // title; suppress the body, the collapsed preview, and expansion entirely.
     const titleOnly = systemMessageIsTitleOnly(sourceKind, systemMessageKind);
     const hasExpandedOnlyContent =
       attachmentItems.filePaths.length > 0 ||
@@ -557,12 +549,6 @@ export const GeneratedConversationMessage = memo(
         collapsedPreviewSource.hasAdditionalBodyLines ||
         collapsedPreviewSource.wasCapped ||
         collapsedPreviewOverflowMeasurement === "overflowing");
-    // Keep the continuation marker mounted once the row is expandable. If we
-    // remove it when the preview overflows, its reclaimed width can make the
-    // preview fit again; ResizeObserver then adds it back and creates a
-    // fit/overflow render loop. `invisible` preserves the measured width while
-    // native truncation supplies the visible continuation affordance.
-    const renderManualContinuation = expandable;
     const hideManualContinuation =
       collapsedPreviewOverflowMeasurement === "overflowing";
     const collapsedPreviewBody = clipMentionTextToVisibleRange({
@@ -583,9 +569,6 @@ export const GeneratedConversationMessage = memo(
           className={`${NESTED_TIMELINE_GROUP_LINE_CLASS_NAME} max-w-full min-w-0`}
         >
           <div className="flex min-w-0 items-baseline truncate pl-2 text-sm leading-relaxed text-foreground">
-            {/* Render every generated preview through the combined Markdown
-                mention pipeline. Offset mentions preserve paths and commands;
-                token mentions also recognize raw persisted thread ids. */}
             <div ref={setCollapsedPreviewTextRef} className="min-w-0 truncate">
               {collapsedPreviewSource.parseAsMarkdown ? (
                 <MarkdownPreview
@@ -610,7 +593,7 @@ export const GeneratedConversationMessage = memo(
                 <span>{collapsedPreviewBody.text}</span>
               )}
             </div>
-            {renderManualContinuation ? (
+            {expandable ? (
               <span
                 className={cn(
                   "shrink-0 text-muted-foreground",

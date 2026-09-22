@@ -1,17 +1,18 @@
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import {
-  createConnection,
-  createQueuedThreadMessageId,
   createEnvironmentId,
-  createEnvironmentProvisioningId,
-  createEventId,
   createHostDaemonSessionId,
-  createHostId,
   createProjectId,
   createPromptHistoryEntryId,
   createProjectSourceId,
   createThreadId,
+} from "../src/ids.js";
+import {
+  createConnection,
+  createQueuedThreadMessageId,
+  createEventId,
+  createHostId,
   environments,
   events,
   hostDaemonSessions,
@@ -190,10 +191,8 @@ describe("db rebuild schema", () => {
         projectId,
         hostId,
         path: null,
-        managed: true,
         isGitRepo: true,
         branchName: "bb/env-1",
-        workspaceProvisionType: "managed-worktree",
         status: "ready",
         createdAt: now,
         updatedAt: now,
@@ -228,7 +227,6 @@ describe("db rebuild schema", () => {
         hostId,
         instanceId: "instance-1",
         hostName: "Local host",
-        hostType: "persistent",
         dataDir: "/tmp/test-data",
         protocolVersion: 1,
         heartbeatIntervalMs: 10_000,
@@ -382,9 +380,7 @@ describe("db rebuild schema", () => {
         projectId,
         hostId,
         path: "/tmp/rebuild/.bb/env",
-        managed: true,
         isGitRepo: true,
-        workspaceProvisionType: "managed-worktree",
         status: "ready",
         createdAt: now,
         updatedAt: now,
@@ -504,9 +500,7 @@ describe("db rebuild schema", () => {
         projectId,
         hostId,
         path: "/tmp/rebuild/.bb/env",
-        managed: true,
         isGitRepo: true,
-        workspaceProvisionType: "managed-worktree",
         branchName: "bb/env-1",
         status: "ready",
         createdAt: now,
@@ -519,7 +513,6 @@ describe("db rebuild schema", () => {
         hostId,
         instanceId: "instance-1",
         hostName: "Local host",
-        hostType: "persistent",
         dataDir: "/tmp/test-data",
         protocolVersion: 1,
         heartbeatIntervalMs: 10_000,
@@ -572,9 +565,7 @@ describe("db rebuild schema", () => {
         projectId,
         hostId,
         path: "/tmp/rebuild/.bb/env",
-        managed: true,
         isGitRepo: true,
-        workspaceProvisionType: "managed-worktree",
         branchName: "bb/env-1",
         status: "ready",
         createdAt: now,
@@ -749,7 +740,6 @@ describe("db rebuild schema", () => {
     expect(createProjectId()).toMatch(/^proj_/u);
     expect(createProjectSourceId()).toMatch(/^src_/u);
     expect(createEnvironmentId()).toMatch(/^env_/u);
-    expect(createEnvironmentProvisioningId()).toMatch(/^epv_/u);
     expect(createThreadId()).toMatch(/^thr_/u);
     expect(createEventId()).toMatch(/^evt_/u);
     expect(createPromptHistoryEntryId()).toMatch(/^phist_/u);
@@ -780,8 +770,6 @@ describe("db rebuild schema", () => {
           hostId,
           instanceId: "instance",
           hostName: "host",
-          hostType: "persistent",
-          // data_dir intentionally omitted — column is NOT NULL.
           protocolVersion: 1,
           heartbeatIntervalMs: 1_000,
           leaseTimeoutMs: 10_000,

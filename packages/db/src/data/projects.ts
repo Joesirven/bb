@@ -72,7 +72,7 @@ function publicProjectFilter() {
   return and(eq(projects.kind, "standard"), isNull(projects.deletedAt));
 }
 
-function listOrderedPublicProjects(db: DbQueryConnection): ProjectRow[] {
+export function listPublicProjects(db: DbQueryConnection): ProjectRow[] {
   return db
     .select()
     .from(projects)
@@ -259,18 +259,6 @@ export function ensurePersonalProject(db: DbConnection) {
   return project;
 }
 
-export function listProjects(db: DbConnection) {
-  return db
-    .select()
-    .from(projects)
-    .orderBy(asc(projects.sortKey), asc(projects.id))
-    .all();
-}
-
-export function listPublicProjects(db: DbConnection) {
-  return listOrderedPublicProjects(db);
-}
-
 export interface UpdateProjectInput {
   name?: string;
 }
@@ -374,7 +362,7 @@ export function reorderProject({
         return { kind: "invalid_neighbor_order" };
       }
 
-      const currentProjects = listOrderedPublicProjects(tx);
+      const currentProjects = listPublicProjects(tx);
       const currentIndex = currentProjects.findIndex(
         (project) => project.id === projectId,
       );
@@ -407,7 +395,7 @@ export function reorderProject({
 
       return {
         kind: "reordered",
-        projects: listOrderedPublicProjects(tx),
+        projects: listPublicProjects(tx),
       };
     },
     { behavior: "immediate" },

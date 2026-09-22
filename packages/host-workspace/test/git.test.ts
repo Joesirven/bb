@@ -3,9 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  detectGitRepo,
+  detectGitRepoKind,
+  detectLinkedWorktree,
+  fetchRemoteBranches,
   getCheckoutRef,
   getWorkspaceGitOperation,
-  parseBranchStatus,
   parseNameStatusEntries,
   parseNumstatEntriesZ,
   parsePorcelainEntries,
@@ -89,6 +92,33 @@ async function pushRemoteMainCommit(remotePath: string) {
   await runGit(["add", "."], { cwd: clonePath });
   await runGit(["commit", "-m", "Remote edit"], { cwd: clonePath });
   await runGit(["push", "origin", "main"], { cwd: clonePath });
+}
+
+async function initSshRemoteRepo() {
+  const repoPath = await initReadGitBlobRepo();
+  const sshLogPath = path.join(repoPath, "ssh-invocations.log");
+  const sshScriptPath = path.join(repoPath, "recording-ssh.sh");
+  await fs.writeFile(
+    sshScriptPath,
+    `#!/bin/sh\nprintf '%s\\n' "$@" >> ${JSON.stringify(sshLogPath)}\nprintf 'GIT_TERMINAL_PROMPT=%s\\n' "\${GIT_TERMINAL_PROMPT-unset}" >> ${JSON.stringify(sshLogPath)}\nexit 255\n`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  await runGit(["remote", "add", "origin", "ssh://git.invalid/repo.git"], {
+    cwd: repoPath,
+  });
+  await runGit(["config", "core.sshCommand", sshScriptPath], { cwd: repoPath });
+  return { repoPath, sshLogPath };
+}
+
+async function initBareWorktreeLayout() {
+  const origin = await initReadGitBlobRepo();
+  await runGit(["branch", "feature-a"], { cwd: origin });
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "bb-bare-layout-"));
+  tempDirs.push(root);
+  await runGit(["clone", "--bare", origin, ".bare"], { cwd: root });
+  await fs.writeFile(path.join(root, ".git"), "gitdir: ./.bare\n", "utf8");
+  await runGit(["worktree", "add", "feature-a", "feature-a"], { cwd: root });
+  return { root, worktreePath: path.join(root, "feature-a") };
 }
 
 afterEach(async () => {
@@ -201,7 +231,51 @@ describe("runGitWithNullRecordLimit", () => {
   });
 });
 
+describe("detectGitRepoKind", () => {
+  it("tells a bare repository root apart from its worktrees and plain directories", async () => {
+    const { root, worktreePath } = await initBareWorktreeLayout();
+    const plainDir = await fs.mkdtemp(path.join(os.tmpdir(), "bb-plain-dir-"));
+    tempDirs.push(plainDir);
+
+    await expect(detectGitRepoKind(root)).resolves.toBe("bare");
+    await expect(detectGitRepoKind(path.join(root, ".bare"))).resolves.toBe(
+      "bare",
+    );
+    await expect(detectGitRepoKind(worktreePath)).resolves.toBe("work-tree");
+    await expect(detectGitRepoKind(plainDir)).resolves.toBe("none");
+  });
+
+  it("tells a linked worktree apart from an ordinary checkout", async () => {
+    const { worktreePath } = await initBareWorktreeLayout();
+    const ordinaryCheckout = await initReadGitBlobRepo();
+    const plainDir = await fs.mkdtemp(path.join(os.tmpdir(), "bb-plain-wt-"));
+    tempDirs.push(plainDir);
+
+    await expect(detectLinkedWorktree(worktreePath)).resolves.toBe(true);
+    await expect(detectLinkedWorktree(ordinaryCheckout)).resolves.toBe(false);
+    await expect(detectLinkedWorktree(plainDir)).resolves.toBe(false);
+  });
+
+  it("keeps detectGitRepo scoped to work trees so bare roots get no checkout UI", async () => {
+    const { root, worktreePath } = await initBareWorktreeLayout();
+
+    await expect(detectGitRepo(root)).resolves.toBe(false);
+    await expect(detectGitRepo(worktreePath)).resolves.toBe(true);
+  });
+});
+
 describe("getCheckoutRef", () => {
+  it("reports the HEAD branch of a bare repository root", async () => {
+    const { root } = await initBareWorktreeLayout();
+    const head = await runGit(["rev-parse", "HEAD"], { cwd: root });
+
+    await expect(getCheckoutRef(root)).resolves.toEqual({
+      kind: "branch",
+      branchName: "main",
+      headSha: head.stdout.trim(),
+    });
+  });
+
   it("reports branch checkouts with HEAD sha", async () => {
     const repoPath = await initReadGitBlobRepo();
     const head = await runGit(["rev-parse", "HEAD"], { cwd: repoPath });
@@ -367,6 +441,57 @@ describe("command timeouts", () => {
   });
 });
 
+describe("fetchRemoteBranches", () => {
+  it("keeps a non-interactive fetch from prompting for ssh or git credentials", async () => {
+    const { repoPath, sshLogPath } = await initSshRemoteRepo();
+
+    await expect(
+      fetchRemoteBranches(repoPath, { interactive: false }),
+    ).resolves.toEqual({ status: "failed" });
+
+    const log = await fs.readFile(sshLogPath, "utf8");
+    expect(log).not.toContain("BatchMode");
+    expect(log).toContain("GIT_TERMINAL_PROMPT=0\n");
+  });
+
+  it("leaves an interactive fetch free to prompt", async () => {
+    const { repoPath, sshLogPath } = await initSshRemoteRepo();
+
+    await expect(
+      fetchRemoteBranches(repoPath, { interactive: true }),
+    ).resolves.toEqual({ status: "failed" });
+
+    const log = await fs.readFile(sshLogPath, "utf8");
+    expect(log).not.toContain("BatchMode");
+    expect(log).toContain("GIT_TERMINAL_PROMPT=unset\n");
+  });
+});
+
+describe("user-shell Git resolution", () => {
+  it("uses the resolved shell PATH for Git commands and Git pipelines", async () => {
+    const workspacePath = await fs.mkdtemp(
+      path.join(os.tmpdir(), "bb-git-shell-path-workspace-"),
+    );
+    const binPath = await fs.mkdtemp(
+      path.join(os.tmpdir(), "bb-git-shell-path-bin-"),
+    );
+    tempDirs.push(workspacePath, binPath);
+    const gitPath = path.join(binPath, "git");
+    await fs.writeFile(gitPath, "#!/bin/sh\nprintf 'user-shell-git\\n'\n");
+    await fs.chmod(gitPath, 0o755);
+
+    await expect(
+      runGit(["--version"], { cwd: workspacePath, shellPath: binPath }),
+    ).resolves.toMatchObject({ stdout: "user-shell-git\n" });
+    await expect(
+      runShellPipeline("git --version", [], {
+        cwd: workspacePath,
+        shellPath: binPath,
+      }),
+    ).resolves.toMatchObject({ stdout: "user-shell-git\n" });
+  });
+});
+
 describe("readGitBlob", () => {
   it("reads a blob at a git ref and reports the returned byte size", async () => {
     const repoPath = await initReadGitBlobRepo();
@@ -426,29 +551,6 @@ describe("readGitBlob", () => {
     ).rejects.toMatchObject({
       code: "blob_too_large",
       message: "Blob size 11 bytes exceeds the 0 MB limit",
-    });
-  });
-});
-
-describe("parseBranchStatus", () => {
-  it("parses branch names and ahead/behind counts", () => {
-    expect(
-      parseBranchStatus("## main...origin/main [ahead 2, behind 1]"),
-    ).toEqual({
-      branchName: "main",
-      aheadCount: 2,
-      behindCount: 1,
-    });
-  });
-
-  it("returns zero counts for missing or non-header lines", () => {
-    expect(parseBranchStatus(undefined)).toEqual({
-      aheadCount: 0,
-      behindCount: 0,
-    });
-    expect(parseBranchStatus(" M README.md")).toEqual({
-      aheadCount: 0,
-      behindCount: 0,
     });
   });
 });
@@ -581,9 +683,7 @@ describe("parseNameStatusEntries", () => {
   });
 
   it("skips truncated trailing entries without throwing", () => {
-    // A status token with no following path token.
     expect(parseNameStatusEntries("M\0")).toEqual([]);
-    // A rename with only the old path, no new path.
     expect(parseNameStatusEntries("R100\0src/old.ts\0")).toEqual([]);
   });
 });

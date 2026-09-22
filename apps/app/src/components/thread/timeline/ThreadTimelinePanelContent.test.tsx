@@ -47,6 +47,7 @@ vi.mock("./useThreadTimelineController.js", () => ({
     activeThinking: null,
     activeWorkflows: [],
     activeBackgroundCommands: [],
+    contextBoundarySeq: null,
     contextWindowUsage: undefined,
     goal: null,
     modelFallback: null,
@@ -82,6 +83,7 @@ function workflowRow(): TimelineWorkflowWorkRow {
     taskType: "local_workflow",
     workflowName: "fixture-mini",
     description: "fixture workflow",
+    model: null,
     taskStatus: "running",
     workflow: null,
     usage: null,
@@ -109,6 +111,7 @@ function baseTimeline(
     timelineLoading: false,
     timelineRows: [],
     ...overrides,
+    contextBoundarySeq: overrides.contextBoundarySeq ?? null,
     modelFallback: overrides.modelFallback ?? null,
   };
 }

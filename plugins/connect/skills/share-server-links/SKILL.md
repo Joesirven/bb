@@ -1,6 +1,6 @@
 ---
 name: share-server-links
-description: Share a local HTTP server with the user over bb connect. Use when an agent has started a local HTTP server (dev server, preview, static server) and wants to hand the user a link they can open — especially remotely ("start the dev server", "let me see it", "preview", "open it on my phone", "share a link"). Prefer this over pasting localhost URLs when bb connect may be paired.
+description: "Expose a local HTTP server through BB Connect and give the user its remotely accessible URL."
 ---
 
 # Share local server links via bb connect
@@ -22,8 +22,23 @@ host, and the command resolves the thread's host automatically.
    thread (or with the same `--host`) so the share is cleaned up. Use
    `bb connect shares [--host <name-or-id>]` to inspect that host's shares.
 
+`bb connect --help` and `bb connect <command> --help` print the commands and
+their flags and exit 0. Unknown commands and flags fail with a suggestion —
+`bb connect list` points at `bb connect shares` — and with `--json` a failure
+prints `{"ok":false,"error":{"code":…,"message":…}}` on stdout while the same
+message stays on stderr.
+
 Server-host shares use `https://<server-label>--<port>.<base-domain>` through
 the server tunnel. Other enrolled hosts use
 `https://<machine-label>--<port>.<base-domain>` through their daemon. If a
 machine was not enrolled through Connect, expose fails with instructions to
 remove and re-add it under Settings > Machines.
+
+## Agent instructions setting
+
+Settings → Installed plugins → Connect has a "Tell agents about remote access"
+toggle, enabled by default. Use
+`bb plugin config connect set sendRemoteInstructions false` to suppress the
+remote-access message, or `true` to restore it. This controls only the message;
+sharing still works. The message otherwise requires active or recent remote
+usage. Changes apply when session instructions are next assembled.

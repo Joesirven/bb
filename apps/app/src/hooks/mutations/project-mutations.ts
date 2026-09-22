@@ -2,10 +2,12 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type {
   CreateProjectRequest,
   CreateProjectSourceRequest,
+  ReorderProjectRequest,
   UpdateProjectRequest,
   UploadedPromptAttachment,
 } from "@bb/server-contract";
 import { sdk } from "@/lib/sdk";
+import { registerLocalAttachmentPreview } from "@/lib/attachment-local-previews";
 import {
   applyProjectCreateResult,
   applyProjectDeleteResult,
@@ -34,6 +36,10 @@ interface DeleteLocalProjectSourceRequest {
 }
 
 interface UpdateProjectMutationRequest extends UpdateProjectRequest {
+  id: string;
+}
+
+interface ReorderProjectMutationRequest extends ReorderProjectRequest {
   id: string;
 }
 
@@ -68,6 +74,21 @@ export function useUpdateProject() {
       sdk.projects.update({ projectId: id, ...request }),
     onSuccess: (_data, variables) => {
       invalidateProjectUpdateQueries({ projectId: variables.id, queryClient });
+    },
+  });
+}
+
+export function useReorderProject() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    meta: {
+      errorMessage: "Failed to reorder project.",
+    },
+    mutationFn: ({ id, ...request }: ReorderProjectMutationRequest) =>
+      sdk.projects.reorder({ projectId: id, ...request }),
+    onSuccess: () => {
+      invalidateProjectListQueries({ queryClient });
     },
   });
 }
@@ -116,11 +137,6 @@ interface AddProjectSourceMutationRequest {
   request: CreateProjectSourceRequest;
 }
 
-/**
- * Source add for the guided machine-setup dialog (clone or existing folder).
- * Errors render inline in the dialog — clone failures carry git stderr the
- * user needs to read — so the global error toast is suppressed.
- */
 export function useAddProjectSource() {
   const queryClient = useQueryClient();
 
@@ -194,11 +210,17 @@ export function useUploadPromptAttachment() {
       errorMessage: "Failed to upload attachment.",
       showErrorToast: false,
     },
-    mutationFn: ({
+    mutationFn: async ({
       projectId,
       file,
-    }: UploadPromptAttachmentRequest): Promise<UploadedPromptAttachment> =>
-      sdk.projects.attachments.upload({ projectId, clientFile: file }),
+    }: UploadPromptAttachmentRequest): Promise<UploadedPromptAttachment> => {
+      const uploaded = await sdk.projects.attachments.upload({
+        projectId,
+        clientFile: file,
+      });
+      registerLocalAttachmentPreview(uploaded.path, file);
+      return uploaded;
+    },
     retry: false,
   });
 }

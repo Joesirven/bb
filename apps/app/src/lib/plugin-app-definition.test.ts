@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import type {
+  ExperimentalSidebarFooterDisclosureController,
+  PluginSidebarFooterActionContext,
+} from "@get-bb/plugin-sdk";
+import { getCollectedSidebarFooterItems } from "@get-bb/plugin-sdk/internal/plugin-app-collector";
 import { loadPluginApp } from "@get-bb/plugin-sdk/testing/app";
 import {
   collectPluginAppRegistrations,
@@ -22,6 +27,47 @@ describe("definePluginApp", () => {
   it("rejects a non-function setup", () => {
     expect(() => definePluginApp(undefined as unknown as () => void)).toThrow(
       /setup function/,
+    );
+  });
+});
+
+describe("collectPluginAppRegistrations — experimental_appOverlay", () => {
+  it("collects additive app overlays", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_appOverlay({
+        id: "office",
+        component: Component,
+      });
+    });
+
+    expect(collectPluginAppRegistrations(definition).appOverlays).toEqual([
+      { id: "office", component: Component },
+    ]);
+  });
+
+  it("rejects duplicate ids and malformed components", () => {
+    const duplicate = definePluginApp((app) => {
+      app.slots.experimental_appOverlay({
+        id: "office",
+        component: Component,
+      });
+      app.slots.experimental_appOverlay({
+        id: "office",
+        component: Component,
+      });
+    });
+    const malformed = definePluginApp((app) => {
+      app.slots.experimental_appOverlay({
+        id: "office",
+        component: null as never,
+      });
+    });
+
+    expect(() => collectPluginAppRegistrations(duplicate)).toThrow(
+      'duplicate id "office"',
+    );
+    expect(() => collectPluginAppRegistrations(malformed)).toThrow(
+      '"component" must be a React component function',
     );
   });
 });
@@ -58,8 +104,6 @@ describe("collectPluginAppRegistrations — experimental_threadHeaderAction", ()
     );
   });
 
-  // Ids from different slot kinds must not collide: a plugin can reasonably
-  // name its list and its header control the same thing.
   it("keeps ids independent from the thread-list slot", () => {
     const definition = definePluginApp((app) => {
       app.slots.experimental_threadList({
@@ -86,6 +130,37 @@ describe("collectPluginAppRegistrations — experimental_threadHeaderAction", ()
       } as never);
     });
     expect(() => collectPluginAppRegistrations(definition)).toThrow(/title/);
+  });
+});
+
+describe("collectPluginAppRegistrations — experimental_browserToolbarAction", () => {
+  it("collects a browser toolbar action", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_browserToolbarAction({
+        id: "annotate",
+        title: "Annotate",
+        component: Component,
+      });
+    });
+    expect(
+      collectPluginAppRegistrations(definition).browserToolbarActions,
+    ).toEqual([{ id: "annotate", title: "Annotate", component: Component }]);
+  });
+
+  it("rejects duplicate browser toolbar action ids", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_browserToolbarAction({
+        id: "annotate",
+        title: "One",
+        component: Component,
+      });
+      app.slots.experimental_browserToolbarAction({
+        id: "annotate",
+        title: "Two",
+        component: Component,
+      });
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow(/annotate/);
   });
 });
 
@@ -155,6 +230,228 @@ describe("collectPluginAppRegistrations — experimental_threadList", () => {
   });
 });
 
+describe("collectPluginAppRegistrations — experimental_floatingWindow", () => {
+  it("collects a floating window with its default size", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+        defaultSize: { width: 240, height: 120 },
+      });
+    });
+    const registrations = collectPluginAppRegistrations(definition);
+    expect(registrations.floatingWindows).toEqual([
+      {
+        id: "timer",
+        path: "timer",
+        component: Component,
+        defaultSize: { width: 240, height: 120 },
+      },
+    ]);
+  });
+
+  it("omits an absent defaultSize rather than storing undefined", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+      });
+    });
+    const [registration] = collectPluginAppRegistrations(
+      definition,
+    ).floatingWindows;
+    expect(registration).toEqual({
+      id: "timer",
+      path: "timer",
+      component: Component,
+    });
+    expect(Object.hasOwn(registration, "defaultSize")).toBe(false);
+  });
+
+  it("rejects two floating windows with the same id", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+      });
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer-two",
+        component: Component,
+      });
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow(/timer/);
+  });
+
+  it("rejects a path that would not be a valid URL segment", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer/nested",
+        component: Component,
+      });
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow(
+      /"path" must match/,
+    );
+  });
+
+  it("rejects a non-positive defaultSize", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+        defaultSize: { width: 0, height: 120 },
+      });
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow(
+      /"defaultSize"/,
+    );
+  });
+
+  it("rejects a missing component", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+      } as never);
+    });
+    expect(() => collectPluginAppRegistrations(definition)).toThrow();
+  });
+});
+
+describe("collectPluginAppRegistrations — experimental_sidebarFooter", () => {
+  it("collects actions and disclosures with live disclosure controls", () => {
+    let disclosure: ExperimentalSidebarFooterDisclosureController | null = null;
+    const onActivate = vi.fn();
+    const openPluginDetails = vi.fn();
+    const legacyRun = vi.fn(
+      ({ openSettings }: PluginSidebarFooterActionContext) => openSettings(),
+    );
+    const definition = definePluginApp((app) => {
+      app.experimental_sidebarFooter.register({
+        kind: "action",
+        id: "refresh",
+        label: "Refresh",
+        icon: "Refresh",
+        onActivate,
+      });
+      app.slots.sidebarFooterAction({
+        id: "legacy",
+        title: "Legacy action",
+        icon: "Bolt",
+        run: legacyRun,
+      });
+      disclosure = app.experimental_sidebarFooter.register({
+        kind: "disclosure",
+        id: "usage",
+        label: "Provider usage",
+        icon: "ChartColumn",
+        component: Component,
+      });
+    });
+
+    const registrations = collectPluginAppRegistrations(definition);
+    const sidebarFooterItems = getCollectedSidebarFooterItems(registrations);
+    expect(sidebarFooterItems).not.toBeNull();
+    if (sidebarFooterItems === null)
+      throw new Error("expected collected sidebar footer items");
+    expect(registrations.experimentalSidebarFooterItems).toHaveLength(2);
+    expect(registrations.experimentalSidebarFooterItems[0]).toMatchObject({
+      kind: "action",
+      id: "refresh",
+      label: "Refresh",
+      icon: "Refresh",
+      onActivate,
+    });
+    expect(registrations.experimentalSidebarFooterItems[1]).toMatchObject({
+      kind: "disclosure",
+      id: "usage",
+      label: "Provider usage",
+      icon: "ChartColumn",
+      component: Component,
+    });
+    expect(
+      sidebarFooterItems.map(({ source, id }) => ({
+        source,
+        id,
+      })),
+    ).toEqual([
+      { source: "experimental_sidebarFooter", id: "refresh" },
+      { source: "sidebarFooterAction", id: "legacy" },
+      { source: "experimental_sidebarFooter", id: "usage" },
+    ]);
+    const compatibilityItem = sidebarFooterItems[1];
+    expect(compatibilityItem?.kind).toBe("action");
+    if (compatibilityItem?.kind !== "action")
+      throw new Error("expected action");
+    compatibilityItem.onActivate({ openPluginDetails });
+    expect(legacyRun).toHaveBeenCalledOnce();
+    expect(openPluginDetails).toHaveBeenCalledOnce();
+
+    disclosure!.open();
+    const runtime = registrations.experimentalSidebarFooterItems[1]!.runtime;
+    expect(runtime.getSnapshot()).toMatchObject({
+      command: { kind: "open" },
+    });
+    const sequence = runtime.getSnapshot().command?.sequence;
+    expect(sequence).toBeTypeOf("number");
+    runtime.acknowledgeCommand(sequence!);
+    expect(runtime.getSnapshot().command).toBeNull();
+  });
+
+  it("shares ids with the compatibility footer-action surface", () => {
+    const definition = definePluginApp((app) => {
+      app.slots.sidebarFooterAction({
+        id: "usage",
+        title: "Legacy usage",
+        icon: "ChartColumn",
+        run: () => {},
+      });
+      app.experimental_sidebarFooter.register({
+        kind: "disclosure",
+        id: "usage",
+        label: "Usage",
+        icon: "ChartColumn",
+        component: Component,
+      });
+    });
+
+    expect(() => collectPluginAppRegistrations(definition)).toThrow(/usage/);
+  });
+
+  it("validates registrations at their boundaries", () => {
+    const definition = definePluginApp((app) => {
+      app.experimental_sidebarFooter.register({
+        kind: "disclosure",
+        id: "usage",
+        label: "Usage",
+        icon: "ChartColumn",
+        component: Component,
+      });
+    });
+    collectPluginAppRegistrations(definition);
+
+    const staleDefinition = definePluginApp((app) => {
+      app.experimental_sidebarFooter.register({
+        kind: "disclosure",
+        id: "usage",
+        label: "Usage",
+        icon: "ChartColumn",
+        component: Component,
+        providerId: "coupled-provider",
+      } as never);
+    });
+    expect(() => collectPluginAppRegistrations(staleDefinition)).toThrow(
+      /unknown field "providerId"/,
+    );
+  });
+});
+
 describe("collectPluginAppRegistrations", () => {
   it("produces the same complete registration set in the app and test runtimes", async () => {
     const run = () => {};
@@ -170,6 +467,10 @@ describe("collectPluginAppRegistrations", () => {
         id: "settings",
         title: "Settings",
         description: "Configure it.",
+        component: Component,
+      });
+      app.slots.experimental_appOverlay({
+        id: "overlay",
         component: Component,
       });
       app.slots.navPanel({
@@ -233,6 +534,12 @@ describe("collectPluginAppRegistrations", () => {
         icon: "Bolt",
         run,
       });
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+        defaultSize: { width: 240, height: 120 },
+      });
       app.composer.customize({
         id: "composer",
         scopes: ["thread", "new-thread"],
@@ -270,6 +577,10 @@ describe("collectPluginAppRegistrations", () => {
       app.slots.settingsSection({
         id: "custom-settings",
         title: "Custom settings",
+        component: Component,
+      });
+      app.slots.experimental_appOverlay({
+        id: "floating-widget",
         component: Component,
       });
       app.slots.navPanel({
@@ -316,6 +627,11 @@ describe("collectPluginAppRegistrations", () => {
         icon: "Zap",
         run,
       });
+      app.slots.experimental_floatingWindow({
+        id: "timer",
+        path: "timer",
+        component: Component,
+      });
       app.composer.customize({
         id: "improve-prompt",
         scopes: ["thread", "new-thread"],
@@ -337,6 +653,9 @@ describe("collectPluginAppRegistrations", () => {
         title: "Custom settings",
         component: Component,
       },
+    ]);
+    expect(registrations.appOverlays).toEqual([
+      { id: "floating-widget", component: Component },
     ]);
     expect(registrations.navPanels).toEqual([
       {
@@ -397,6 +716,9 @@ describe("collectPluginAppRegistrations", () => {
     ]);
     expect(registrations.contentScripts).toEqual([
       { id: "editor-enhancement", mount },
+    ]);
+    expect(registrations.floatingWindows).toEqual([
+      { id: "timer", path: "timer", component: Component },
     ]);
   });
 
@@ -731,6 +1053,36 @@ describe("collectPluginAppRegistrations", () => {
           });
         }),
       /"headerContent" must be a React component/,
+    ],
+    [
+      "nav panel with the pre-0.4.16 SDK experimental_fixedTabs key",
+      () =>
+        definePluginApp((app) => {
+          app.slots.navPanel({
+            id: "x",
+            title: "X",
+            icon: "columns",
+            path: "x",
+            component: Component,
+            experimental_fixedTabs: [],
+          } as never);
+        }),
+      'slots.navPanel: "experimental_fixedTabs" was renamed to "fixedTabs" in SDK 0.4.16',
+    ],
+    [
+      "nav panel with an unknown experimental_ key",
+      () =>
+        definePluginApp((app) => {
+          app.slots.navPanel({
+            id: "x",
+            title: "X",
+            icon: "columns",
+            path: "x",
+            component: Component,
+            experimental_badge: Component,
+          } as never);
+        }),
+      'slots.navPanel: unknown field "experimental_badge"',
     ],
     [
       "nav panel with a non-component experimental sidebar accessory",

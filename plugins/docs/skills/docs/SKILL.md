@@ -1,12 +1,12 @@
 ---
 name: docs
-description: Access and update the user's Docs vaults. Use whenever the user asks to read, find, create, update, or store a note, document, plan, or HTML artifact; when a Docs @-mention appears in context; or when an answer should link to a document the user can open in Docs.
+description: "Read, edit, or save documents in BB Docs vaults, including documents supplied through Docs mentions."
 ---
 
 # Docs
 
 Docs is the user's filesystem-first document library. Documents can live on
-the primary machine or another connected host, but the `bb docs` command
+the server machine or another connected host, but the `bb docs` command
 handles that routing through named vaults.
 
 ## Access documents
@@ -47,6 +47,11 @@ bb docs status ./docs-work --diff
 bb docs push ./docs-work
 ```
 
+`bb docs status` exits 0 when no changes exist. It exits 4 when it finds
+changes that the output describes. Exit 4 is a successful status result.
+Review that output, then run `bb docs push` as a separate command. Do not
+connect the status and push commands with `&&`.
+
 Pull a folder subtree with `--folder`, or the whole selected vault with
 `--all`:
 
@@ -71,6 +76,12 @@ pull into a new clean `--into` directory.
 The direct `write`, `mkdir`, `move`, and `remove` commands are deprecated. Do
 not use them for agent edits; they remain temporarily available only for
 backward compatibility.
+
+Run `bb docs --help` for the command list and `bb docs <command> --help` for a
+command's arguments, options, and rules. Each command accepts only the options
+its help lists; an unknown command, unknown option, or stray argument exits 2
+before touching a vault, and with `--json` the failure also prints
+`{"ok":false,"error":{"code","message","hint"?}}` on stdout.
 
 Use Markdown for documents and plans. Use a self-contained `.html` file for a
 visual artifact or interactive report; relative assets can live beside it.

@@ -6,6 +6,7 @@ import type { ServerConfig } from "@bb/config/server";
 import { isLoopbackHostname } from "@bb/config/loopback";
 import { toOptionalString } from "@bb/config/strings";
 import { createLogger } from "@bb/logger";
+import { getAppSettings } from "@bb/db";
 import { initDb } from "./db.js";
 import { createApp } from "./server.js";
 import { PendingInteractionLifecycle } from "./services/interactions/pending-interactions.js";
@@ -13,6 +14,8 @@ import { createMachineAuthService } from "./services/machine-auth.js";
 import { resolveBuiltinSkillsRootPath } from "./services/skills/builtin-skills-copy.js";
 import { SkillTreeRegistry } from "./services/skills/injected-skills.js";
 import { PluginHostArtifactRegistry } from "./services/plugins/plugin-host-artifact-registry.js";
+import { createProviderNativeRootsCache } from "./services/providers/native-roots.js";
+import { createAiServiceRegistry } from "./services/ai/ai-service-registry.js";
 import { createAppVersionService } from "./services/system/app-version.js";
 import { createBbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
 import { startEventLoopStallMonitor } from "./services/system/event-loop-stall-monitor.js";
@@ -20,17 +23,37 @@ import {
   runPeriodicSweeps,
   runStartupRecoverySweep,
 } from "./services/system/periodic-sweeps.js";
-import { createProviderRegistryService } from "./services/providers/provider-registry.js";
-import { resolveAcpAgentCapabilitiesForProviderId } from "./services/system/acp-launch-spec.js";
+import { installProviderModelCatalogPrewarm } from "./services/providers/provider-model-catalog-prewarm.js";
+import {
+  createProviderRegistryService,
+  type ProviderRegistryService,
+} from "./services/providers/provider-registry.js";
+import type { PluginService } from "./services/plugins/plugin-service.js";
 import { createTelemetryService } from "./services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "./services/terminals/terminal-session-lifecycle.js";
-import { resolveThreadStorageRootPath } from "./services/threads/thread-storage.js";
 import { createLifecycleDedupers } from "./lifecycle-dedupers.js";
-import { MANAGED_ENVIRONMENT_RETIRE_GRACE_MS } from "./constants.js";
-import type { ServerRuntimeConfig } from "./types.js";
+import type { ServerLogger, ServerRuntimeConfig } from "./types.js";
 import { NotificationHub } from "./ws/hub.js";
 import { WatchInterestCoordinator } from "./ws/watch-interests.js";
+import { WorkspaceReadCaches } from "./services/environments/workspace-read-cache.js";
 import { HostSharedPortCoordinator } from "./ws/host-shared-ports.js";
+import { disconnectImportedDaemonSessions } from "./internal/session-owner-side-effects.js";
+import {
+  applyServerImportAtBoot,
+  refuseInterruptedServerImport,
+  repairLastServerMoveHostName,
+} from "./services/server-move/pending-boot.js";
+import { createConnectHold } from "./services/server-move/connect-hold.js";
+import { isServerMoveFrozen } from "./services/server-move/freeze-state.js";
+import { reconcileServerMoveRunAtBoot } from "./services/server-move/reconcile.js";
+import {
+  retireServerProcess as retireProcessWithDeadline,
+  SERVER_RETIRE_FORCE_EXIT_MS,
+} from "./services/server-move/retire.js";
+import {
+  PluginToolCallRegistry,
+  setPluginToolCallRegistry,
+} from "./services/plugins/plugin-tool-calls.js";
 
 interface StartHttpListenerArgs {
   fetch: Parameters<typeof serve>[0]["fetch"];
@@ -45,23 +68,70 @@ export function startHttpListener(args: StartHttpListenerArgs) {
   });
 }
 
+export interface StartServerPluginsArgs {
+  dataDir: string;
+  logger: Pick<ServerLogger, "error" | "warn">;
+  pluginService: Pick<PluginService, "start" | "startPeriodicUpdateChecks">;
+  providerRegistry: Pick<ProviderRegistryService, "markRegistrationsSettled">;
+}
+
+export function startServerPlugins(
+  args: StartServerPluginsArgs,
+): Promise<void> {
+  return args.pluginService
+    .start({
+      hold: createConnectHold({ dataDir: args.dataDir, logger: args.logger }),
+    })
+    .catch((error: unknown) => {
+      args.logger.error({ err: error }, "Plugin startup failed");
+    })
+    .finally(() => {
+      args.providerRegistry.markRegistrationsSettled();
+      args.pluginService.startPeriodicUpdateChecks();
+    });
+}
+
 export async function runServer(serverConfig: ServerConfig): Promise<void> {
   const logger = createLogger({
     component: "server",
     dataDir: serverConfig.BB_DATA_DIR,
   });
+  await refuseInterruptedServerImport({
+    dataDir: serverConfig.BB_DATA_DIR,
+    logger,
+  });
   const db = initDb(serverConfig.databasePath, {
     dataDir: serverConfig.BB_DATA_DIR,
     logger,
   });
+  const serverImport = await applyServerImportAtBoot({
+    dataDir: serverConfig.BB_DATA_DIR,
+    db,
+    logger,
+    now: Date.now(),
+  });
+  const pendingServerMove = serverImport.pendingMove;
+  if (pendingServerMove === null) {
+    await repairLastServerMoveHostName({
+      dataDir: serverConfig.BB_DATA_DIR,
+      db,
+      logger,
+    });
+  }
+  const serverMoveRun =
+    pendingServerMove === null
+      ? await reconcileServerMoveRunAtBoot({
+          dataDir: serverConfig.BB_DATA_DIR,
+          logger,
+          now: Date.now(),
+        })
+      : null;
   const hub = new NotificationHub();
   const watchInterests = new WatchInterestCoordinator({ db, hub });
   const sharedPorts = new HostSharedPortCoordinator({ db, hub });
+  const workspaceReadCaches = new WorkspaceReadCaches({ hub });
   const lifecycleDedupers = createLifecycleDedupers();
   const appUrl = toOptionalString(serverConfig.BB_APP_URL);
-  const threadStorageRootPath = resolveThreadStorageRootPath({
-    dataDir: serverConfig.BB_DATA_DIR,
-  });
 
   const selfDir = dirname(fileURLToPath(import.meta.url));
   const appDir = resolve(selfDir, "../../app");
@@ -70,11 +140,9 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   const staticDir =
     isProduction && existsSync(appDistDir) ? appDistDir : undefined;
   const runtimeConfig: ServerRuntimeConfig = {
-    appSurface: serverConfig.BB_APP_SURFACE,
     appVersion: serverConfig.BB_APP_VERSION,
     builtinSkillsRootPath: resolveBuiltinSkillsRootPath(),
     marketplaceUrl: serverConfig.BB_MARKETPLACE_URL,
-    customAcpAgents: [],
     customModels: [],
     dataDir: serverConfig.BB_DATA_DIR,
     featureFlags: serverConfig.featureFlags,
@@ -83,25 +151,21 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     inferenceFallbackModel: serverConfig.BB_INFERENCE_FALLBACK,
     inferenceModel: serverConfig.BB_INFERENCE,
     isDevelopment: !isProduction,
-    managedEnvironmentRetireGraceMs: MANAGED_ENVIRONMENT_RETIRE_GRACE_MS,
     openAiApiKey: serverConfig.OPENAI_API_KEY,
     serverPort: serverConfig.BB_SERVER_PORT,
     sharedSkillRoots: { user: [], project: [] },
-    threadStorageRootPath,
     transcriptionModel: serverConfig.BB_TRANSCRIPTION,
   };
 
-  // Reads `runtimeConfig.customAcpAgents` on every call so a `bb-app config
-  // refresh` (which replaces the array in place) is picked up immediately.
   const providerRegistry = createProviderRegistryService({
-    // Providers arrive with plugin startup, which runs after the listener is
-    // up; provider-routed work waits for it instead of failing on boot.
     deferRegistrationsSettled: true,
-    resolveAcpAgentCapabilities: (providerId) =>
-      resolveAcpAgentCapabilitiesForProviderId(
-        { config: runtimeConfig },
-        providerId,
-      ),
+    readUserProviderPreferences: () => {
+      const settings = getAppSettings(db);
+      return {
+        providerOrder: settings.providerOrder,
+        defaultProviderId: settings.defaultProviderId,
+      };
+    },
   });
 
   if (appUrl !== undefined) {
@@ -109,6 +173,9 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   }
   if (serverConfig.BB_DEV_APP_PORT !== undefined) {
     runtimeConfig.devAppPort = serverConfig.BB_DEV_APP_PORT;
+  }
+  if (serverConfig.BB_SERVER_LAUNCH_ID !== undefined) {
+    runtimeConfig.launchId = serverConfig.BB_SERVER_LAUNCH_ID;
   }
   const terminalSessions = new TerminalSessionLifecycle({
     config: runtimeConfig,
@@ -122,14 +189,14 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     logger,
   });
 
-  // Telemetry only operates in production runs (the bb-app launcher and the
-  // desktop app both set NODE_ENV=production); dev/source runs never send.
   const telemetry = await createTelemetryService({
     apiKey: serverConfig.BB_POSTHOG_API_KEY,
     appSurface: serverConfig.BB_APP_SURFACE,
     appVersion: serverConfig.BB_APP_VERSION,
     dataDir: serverConfig.BB_DATA_DIR,
-    enabled: serverConfig.BB_TELEMETRY && isProduction,
+    enabled:
+      serverConfig.BB_TELEMETRY && isProduction && pendingServerMove === null,
+    telemetryEnabled: getAppSettings(db).telemetryEnabled,
     logger,
   });
 
@@ -141,6 +208,8 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   await machineAuth.ensureReady();
   const skillTreeRegistry = new SkillTreeRegistry();
   const pluginHostArtifacts = new PluginHostArtifactRegistry();
+  const providerNativeRoots = createProviderNativeRootsCache();
+  const aiServices = createAiServiceRegistry();
   const pendingInteractions = new PendingInteractionLifecycle({
     config: runtimeConfig,
     db,
@@ -150,11 +219,13 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     machineAuth,
     providerRegistry,
     pluginHostArtifacts,
+    aiServices,
     skillTreeRegistry,
     telemetry,
     terminalSessions,
   });
   pendingInteractions.start();
+  setPluginToolCallRegistry(new PluginToolCallRegistry({ logger }));
 
   const appVersion = createAppVersionService({
     config: runtimeConfig,
@@ -166,6 +237,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     injectWebSocket,
     pluginCatalogService,
     pluginService,
+    serverMove,
   } = createApp(
     {
       appVersion,
@@ -179,13 +251,36 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       pendingInteractions,
       providerRegistry,
       pluginHostArtifacts,
+      providerNativeRoots,
+      aiServices,
       skillTreeRegistry,
       telemetry,
       terminalSessions,
       watchInterests,
       sharedPorts,
+      workspaceReadCaches,
     },
-    { staticDir },
+    {
+      serverMove: {
+        bindHost: serverConfig.BB_SERVER_BIND_HOST,
+        manualImportPending: serverImport.manualImportPending,
+        pending: pendingServerMove,
+        restoredRun: serverMoveRun,
+        retireProcess: retireServerProcess,
+      },
+      staticDir,
+    },
+  );
+  disconnectImportedDaemonSessions(
+    {
+      db,
+      hub,
+      logger,
+      pendingInteractions,
+      providerRegistry,
+      terminalSessions,
+    },
+    { sessions: serverImport.importedDaemonSessions },
   );
   const eventLoopStallMonitor = startEventLoopStallMonitor({ logger });
 
@@ -199,15 +294,22 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     pendingInteractions,
     providerRegistry,
     pluginHostArtifacts,
+    aiServices,
     skillTreeRegistry,
     pluginSchedules: pluginService,
-    pluginService,
+    plugins: pluginService,
     telemetry,
     terminalSessions,
   };
-  await runStartupRecoverySweep(sweepDeps).catch((error) => {
-    logger.error({ err: error }, "Startup recovery sweep failed");
-  });
+  const providerModelCatalogPrewarm =
+    pendingServerMove === null
+      ? installProviderModelCatalogPrewarm(sweepDeps)
+      : null;
+  if (pendingServerMove === null) {
+    await runStartupRecoverySweep(sweepDeps).catch((error) => {
+      logger.error({ err: error }, "Startup recovery sweep failed");
+    });
+  }
 
   if (!isLoopbackHostname(serverConfig.BB_SERVER_BIND_HOST)) {
     logger.warn(
@@ -230,32 +332,41 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     },
     "Server listening",
   );
-  telemetry.capture({ name: "app_started" });
-
-  // Plugins load after the listener is up: they are additive, and a slow
-  // plugin must not delay serving. Bind the loopback SDK first so bb.sdk is
-  // usable from the moment factories run.
   pluginService.bindSdk({
     baseUrl: `http://127.0.0.1:${serverConfig.BB_SERVER_PORT}`,
   });
-  void pluginService
-    .start()
-    .catch((error: unknown) => {
-      logger.error({ err: error }, "Plugin startup failed");
-    })
-    .finally(() => {
-      // Success or failure, the registry now holds whatever loaded: release
-      // the requests waiting for providers rather than stalling them out.
+  let sweepInterval: ReturnType<typeof setInterval> | null = null;
+  if (pendingServerMove === null) {
+    telemetry.capture({ name: "app_started" });
+    if (serverMoveRun?.kind === "completed") {
+      logger.info(
+        { moveId: serverMoveRun.run.status.moveId },
+        "This server already moved before it restarted; retiring without starting plugins",
+      );
       providerRegistry.markRegistrationsSettled();
-    });
-  // Discovery metadata only: a refresh never installs, updates, or runs
-  // plugin code, and a failure keeps the last-known-good catalog.
-  pluginCatalogService.startPeriodicRefresh();
-
-  const sweepInterval = setInterval(() => {
-    void runPeriodicSweeps(sweepDeps);
-  }, 10_000);
-  sweepInterval.unref();
+    } else {
+      void startServerPlugins({
+        dataDir: serverConfig.BB_DATA_DIR,
+        logger,
+        pluginService,
+        providerRegistry,
+      }).finally(() => {
+        void serverMove.handlePluginsStarted();
+      });
+    }
+    pluginCatalogService.startPeriodicRefresh();
+    sweepInterval = setInterval(() => {
+      if (!isServerMoveFrozen(db)) {
+        void runPeriodicSweeps(sweepDeps);
+      }
+    }, 10_000);
+    sweepInterval.unref();
+  } else {
+    logger.info(
+      { moveId: pendingServerMove.moveId },
+      "Server started in pending move mode; waiting for the target machine to activate it",
+    );
+  }
 
   let shutdownPromise: Promise<void> | null = null;
   const runShutdown = (): Promise<void> => {
@@ -263,12 +374,19 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       return shutdownPromise;
     }
     shutdownPromise = (async () => {
+      serverMove.dispose();
+      providerModelCatalogPrewarm?.stop();
       eventLoopStallMonitor.stop();
-      clearInterval(sweepInterval);
+      if (sweepInterval !== null) {
+        clearInterval(sweepInterval);
+      }
       pluginCatalogService.stopPeriodicRefresh();
-      await pluginService.stop().catch((error: unknown) => {
-        logger.warn({ err: error }, "Plugin shutdown failed");
-      });
+      await pluginService.stopPeriodicUpdateChecks();
+      if (pendingServerMove === null) {
+        await pluginService.stop().catch((error: unknown) => {
+          logger.warn({ err: error }, "Plugin shutdown failed");
+        });
+      }
       const closeServer = new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) {
@@ -283,6 +401,23 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     })();
     return shutdownPromise;
   };
+
+  function retireServerProcess(): void {
+    logger.info({}, "Server moved to another machine; shutting down");
+    retireProcessWithDeadline({
+      exit: (code) => process.exit(code),
+      forceExitAfterMs: SERVER_RETIRE_FORCE_EXIT_MS,
+      shutdown: runShutdown,
+    });
+  }
+
+  process.on("uncaughtException", (error: unknown) => {
+    if (pluginService.handleUncaughtException(error)) return;
+    const message =
+      error instanceof Error ? (error.stack ?? error.message) : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exit(1);
+  });
 
   process.once("SIGINT", () => {
     void runShutdown().finally(() => process.exit(0));

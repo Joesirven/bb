@@ -1,11 +1,3 @@
-// The connect tunnel, hosted by the plugin's "tunnel" background service.
-// When paired, it dials the per-handle gate over an outbound WebSocket and
-// proxies relayed HTTP/WS streams to the server's own loopback base URL
-// (which serves the SPA + /api + /ws), or to a registered share port when
-// the relay stamps `target` on the open frame.
-//
-// Transport-generic session machinery lives in @bb/tunnel-client; this file
-// owns pairing, credentials, shares, and status.
 import { WebSocket as NodeWebSocket } from "ws";
 import {
   PROTOCOL_VERSION,
@@ -37,13 +29,13 @@ import {
   shareLoopbackHost,
   shareLoopbackOrigin,
   sharePublicUrl,
-  type ShareListing,
   type ShareRemoval,
 } from "./shares.js";
 import type { ShareHost } from "./hosts.js";
-import type { ConnectStateName, ConnectStatus } from "./types.js";
+import type { ConnectStateName, ConnectStatus, ShareListing } from "./types.js";
 
 const DISCONNECT_TIMEOUT_MS = 5_000;
+const TUNNEL_HANDSHAKE_TIMEOUT_MS = 15_000;
 
 async function notifyCloudOfDisconnect(
   credential: ConnectCredential,
@@ -61,28 +53,15 @@ async function notifyCloudOfDisconnect(
   }
 }
 
-export interface ConnectTunnelOptions {
+interface ConnectTunnelOptions {
   store: CredentialStore;
   shares: ShareRegistry;
-  /** Connect apex used only while unpaired and when pair has no target. */
   defaultBaseUrl: string;
-  /**
-   * The server's own loopback base URL, read lazily (bb.server is
-   * bind-gated; the tunnel only needs it once a socket opens).
-   */
   getLoopbackBaseUrl: () => string;
   log: PluginLogger;
-  /** Fired on every state/handle/error/shares/presence transition. */
   onStatusChange?: (status: ConnectStatus) => void;
 }
 
-/**
- * Holds the connect tunnel for this bb. Pairing writes the durable credential
- * to plugin kv and (re)connects; the tunnel reconnects with capped backoff on
- * drops and is re-established from the stored credential when the background
- * service starts. Disabling the plugin aborts the service, which stops the
- * tunnel — the plugin is the single owner of remote access.
- */
 export class ConnectTunnel {
   private credential: ConnectCredential | null = null;
   private tunnel: NodeWebSocket | undefined;
@@ -103,16 +82,10 @@ export class ConnectTunnel {
 
   constructor(private readonly options: ConnectTunnelOptions) {}
 
-  get shares(): ShareRegistry {
-    return this.options.shares;
-  }
-
-  /** Current pairing credential, or null when unpaired. */
   getCredential(): ConnectCredential | null {
     return this.credential;
   }
 
-  /** Service start: reconnect from a previously-stored credential, if any. */
   async start(): Promise<void> {
     const stored = await this.options.store.read();
     if (stored) {
@@ -141,8 +114,6 @@ export class ConnectTunnel {
       try {
         redeemed = await redeemConnectCode({ code: args.code, baseUrl });
       } catch (error) {
-        // Raw wire/transport detail goes to the log only; the caller gets a
-        // typed ConnectPairError whose code the panel maps to human copy.
         const pairError = asConnectPairError(error);
         this.options.log.warn(
           `pair failed (${pairError.code}): ${pairError.message}`,
@@ -193,7 +164,6 @@ export class ConnectTunnel {
 
   async expose(port: number, host: ShareHost): Promise<ShareListing> {
     const listing = await this.options.shares.add(port, host);
-    // shares.onChange already publishes; ensure status is fresh if it didn't.
     this.publish();
     return listing;
   }
@@ -211,11 +181,6 @@ export class ConnectTunnel {
     return this.options.shares.list(hostId);
   }
 
-  /**
-   * List every bb server on the paired account (via the connect gate).
-   * Returns this server's handle so callers can dedupe self. Each row includes
-   * the public connect URL (`https://<handle>.…`) derived from the credential.
-   */
   async listAccountServers(): Promise<ListAccountServersResult> {
     const credential = this.credential;
     if (credential === null) {
@@ -238,7 +203,7 @@ export class ConnectTunnel {
     if (this.credential === null) {
       throw new MachineCodeError("not_paired");
     }
-    return fetchMachineCode(this.credential);
+    return fetchMachineCode(this.credential, AbortSignal.timeout(10_000));
   }
 
   async revokeMachine(machineId: string): Promise<void> {
@@ -272,7 +237,6 @@ export class ConnectTunnel {
     };
   }
 
-  /** Dashboard URL, derived from the paired base (or the unpaired default). */
   private dashboardUrl(): string {
     const base =
       this.credential !== null
@@ -281,8 +245,6 @@ export class ConnectTunnel {
     return `${base.replace(/\/$/, "")}/dashboard`;
   }
 
-  /** Stop the tunnel without clearing the credential (service abort). Plugin
-   * dispose clears server-side declarations via the load-scoped hook. */
   stop(): void {
     this.teardown();
     this.publish();
@@ -294,7 +256,6 @@ export class ConnectTunnel {
     return this.connected ? "connected" : "reconnecting";
   }
 
-  /** Recompute the state and push a status snapshot when anything changed. */
   private publish(): void {
     const state = this.computeState();
     if (state !== this.lastState) {
@@ -318,10 +279,6 @@ export class ConnectTunnel {
     this.session?.dispose();
     this.session = undefined;
     this.remoteClients = 0;
-    // Keep the existing 'error'/'close' listeners (they no-op once `stopped` is
-    // set and `this.tunnel` is cleared) rather than removeAllListeners, so a
-    // late socket error after terminate() still has a handler and doesn't throw
-    // as an unhandled 'error' event.
     this.tunnel?.terminate();
     this.tunnel = undefined;
     this.connected = false;
@@ -335,10 +292,6 @@ export class ConnectTunnel {
     this.openTunnel();
   }
 
-  /**
-   * A disconnected enrolled host must not block this server's own tunnel.
-   * Keep retrying persisted machine-share hydration/declaration separately.
-   */
   private startShareActivation(): void {
     const epoch = ++this.shareActivationEpoch;
     void this.activateShares(epoch);
@@ -357,9 +310,6 @@ export class ConnectTunnel {
       );
       if (!this.isShareActivationCurrent(epoch)) return;
       if (this.credential !== null) {
-        // Warm the sync status snapshot so realtime consumers see persisted
-        // shares without waiting for a status rpc. list() never rejects on an
-        // unavailable host — it lists that share as unavailable instead.
         await this.options.shares.list();
         if (!this.isShareActivationCurrent(epoch)) return;
       }
@@ -381,11 +331,6 @@ export class ConnectTunnel {
     }
   }
 
-  /**
-   * The gate refused our bearer credential: reconnecting cannot help, so
-   * forget it and land in "not paired" with an explanation — unlike network
-   * failures, which keep the credential and stay in "reconnecting".
-   */
   private credentialRejected(statusCode: number): void {
     this.lastError =
       `the gate rejected this bb's credential (HTTP ${statusCode}) — ` +
@@ -445,10 +390,9 @@ export class ConnectTunnel {
     try {
       tunnel = new NodeWebSocket(tunnelUrl, {
         headers: { authorization: `Bearer ${credential.credential}` },
+        handshakeTimeout: TUNNEL_HANDSHAKE_TIMEOUT_MS,
       });
     } catch (error) {
-      // A malformed stored serverUrl throws synchronously. Retrying cannot
-      // help; surface it and wait for a re-pair (or disconnect).
       this.lastError = `cannot dial ${tunnelUrl}: ${
         error instanceof Error ? error.message : String(error)
       }`;
@@ -458,9 +402,49 @@ export class ConnectTunnel {
     }
     this.tunnel = tunnel;
     let connectedAt = 0;
+    let retryScheduled = false;
+    let handshakeDeadline: ReturnType<typeof setTimeout> | undefined;
+
+    const scheduleReconnect = (detail: string): void => {
+      if (retryScheduled || this.stopped || this.tunnel !== tunnel) {
+        return;
+      }
+      retryScheduled = true;
+      clearTimeout(handshakeDeadline);
+      this.connected = false;
+      this.session?.dispose();
+      this.session = undefined;
+      this.remoteClients = 0;
+      const stable = connectedAt ? Date.now() - connectedAt : 0;
+      const delay = this.backoff.nextDelayAfterClose(stable);
+      if (this.lastError === null) {
+        this.lastError = `can't reach ${connectApexHost(credential.serverUrl)} — connection closed`;
+      }
+      this.nextRetryAt = Date.now() + delay;
+      this.options.log.warn(`${detail}; reconnecting in ${delay}ms`);
+      this.reconnectTimer = setTimeout(() => {
+        if (this.stopped || this.tunnel !== tunnel) return;
+        this.reconnectTimer = undefined;
+        this.nextRetryAt = null;
+        this.publish();
+        this.openTunnel();
+      }, delay);
+      this.publish();
+    };
+
+    handshakeDeadline = setTimeout(() => {
+      if (retryScheduled || this.stopped || this.tunnel !== tunnel) return;
+      this.lastError = `can't reach ${connectApexHost(credential.serverUrl)} — handshake timed out`;
+      scheduleReconnect(this.lastError);
+      tunnel.terminate();
+    }, TUNNEL_HANDSHAKE_TIMEOUT_MS);
+    handshakeDeadline.unref?.();
 
     tunnel.on("open", () => {
-      if (this.stopped || this.tunnel !== tunnel) return;
+      if (retryScheduled || this.stopped || this.tunnel !== tunnel) {
+        return;
+      }
+      clearTimeout(handshakeDeadline);
       connectedAt = Date.now();
       this.connected = true;
       this.lastError = null;
@@ -483,47 +467,33 @@ export class ConnectTunnel {
     });
     tunnel.on("unexpected-response", (_req, res) => {
       if (this.stopped || this.tunnel !== tunnel) return;
+      res.resume();
       const statusCode = res.statusCode ?? 0;
       if (statusCode === 401 || statusCode === 403) {
         this.credentialRejected(statusCode);
         return;
       }
       this.lastError = `tunnel rejected: HTTP ${statusCode}`;
-      this.options.log.warn(this.lastError);
+      scheduleReconnect(this.lastError);
+      tunnel.terminate();
     });
     tunnel.on("error", (e: Error) => {
-      if (this.stopped || this.tunnel !== tunnel) return;
-      // Humanize transport failures for the reconnecting card; the raw
-      // message still rides the log via the close handler below.
+      if (retryScheduled || this.stopped || this.tunnel !== tunnel) {
+        return;
+      }
       this.lastError = humanizeTransportError(
         e,
         connectApexHost(credential.serverUrl),
       );
     });
     tunnel.on("close", (code: number, reason: Buffer) => {
-      if (this.stopped || this.tunnel !== tunnel) return;
-      this.connected = false;
-      this.session?.dispose();
-      this.session = undefined;
-      this.remoteClients = 0;
-      const stable = connectedAt ? Date.now() - connectedAt : 0;
-      const delay = this.backoff.nextDelayAfterClose(stable);
-      // A clean close with no prior socket error still leaves the card empty;
-      // give it an honest line so the reconnecting state is never blank.
-      if (this.lastError === null) {
-        this.lastError = `can't reach ${connectApexHost(credential.serverUrl)} — connection closed`;
-      }
-      this.nextRetryAt = Date.now() + delay;
-      this.options.log.warn(
-        `tunnel closed (code ${code}${reason.length > 0 ? `, ${reason.toString()}` : ""}); reconnecting in ${delay}ms`,
+      scheduleReconnect(
+        `tunnel closed (code ${code}${reason.length > 0 ? `, ${reason.toString()}` : ""})`,
       );
-      this.reconnectTimer = setTimeout(() => this.openTunnel(), delay);
-      this.publish();
     });
   }
 }
 
-/** Host shown in transport errors — the connect apex, e.g. "getbb.app". */
 function connectApexHost(serverUrl: string): string {
   try {
     return new URL(deriveConnectBaseUrl(serverUrl)).host;

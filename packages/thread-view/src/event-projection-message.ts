@@ -1,7 +1,9 @@
 import type {
   BackgroundTaskStatus,
   BackgroundTaskUsage,
+  ExtensionKind,
   JsonObject,
+  JsonValue,
   OwnershipChangeOperationMetadata,
   PendingInteractionUserAnswer,
   PendingInteractionUserQuestionQuestion,
@@ -10,31 +12,33 @@ import type {
   SystemMessageKind,
   SystemMessageSubject,
   Thread,
-  ThreadEventRow,
+  ThreadEventItemPresentation,
+  ThreadEventPlanStep,
   ThreadEventScope,
+  ThreadEventSearchMode,
   ThreadTurnInitiator,
   WorkflowProgressSnapshot,
 } from "@bb/domain";
 import type { EventProjection } from "./event-projection.js";
 
-export const eventProjectionMessageStatusValues = [
+const eventProjectionMessageStatusValues = [
   "streaming",
   "pending",
   "completed",
   "error",
   "interrupted",
 ] as const;
-export type EventProjectionMessageStatus =
+type EventProjectionMessageStatus =
   (typeof eventProjectionMessageStatusValues)[number];
 
-export const eventProjectionApprovalLifecycleStatusValues = [
+const eventProjectionApprovalLifecycleStatusValues = [
   "waiting_for_approval",
   "denied",
 ] as const;
 export type EventProjectionApprovalLifecycleStatus =
   (typeof eventProjectionApprovalLifecycleStatusValues)[number];
 
-export const eventProjectionPermissionGrantLifecycleValues = [
+const eventProjectionPermissionGrantLifecycleValues = [
   "pending",
   "resolving",
   "granted",
@@ -43,7 +47,7 @@ export const eventProjectionPermissionGrantLifecycleValues = [
 ] as const;
 export type EventProjectionPermissionGrantLifecycle =
   (typeof eventProjectionPermissionGrantLifecycleValues)[number];
-export const eventProjectionUserQuestionLifecycleValues = [
+const eventProjectionUserQuestionLifecycleValues = [
   "pending",
   "resolving",
   "answered",
@@ -51,6 +55,13 @@ export const eventProjectionUserQuestionLifecycleValues = [
 ] as const;
 export type EventProjectionUserQuestionLifecycle =
   (typeof eventProjectionUserQuestionLifecycleValues)[number];
+const eventProjectionPluginFormLifecycleValues = [
+  "pending",
+  "submitted",
+  "cancelled",
+] as const;
+export type EventProjectionPluginFormLifecycle =
+  (typeof eventProjectionPluginFormLifecycleValues)[number];
 
 export interface EventProjectionMessageBase {
   id: string;
@@ -63,19 +74,20 @@ export interface EventProjectionMessageBase {
   parentToolCallId?: string;
 }
 
-export const eventProjectionTurnRequestKindValues = [
-  "message",
-  "steer",
-] as const;
+interface EventProjectionPresentedMessage {
+  presentation?: ThreadEventItemPresentation;
+}
+
+const eventProjectionTurnRequestKindValues = ["message", "steer"] as const;
 export type EventProjectionTurnRequestKind =
   (typeof eventProjectionTurnRequestKindValues)[number];
 
-export const eventProjectionTurnRequestStatusValues = [
+const eventProjectionTurnRequestStatusValues = [
   "pending",
   "accepted",
   "rejected",
 ] as const;
-export type EventProjectionTurnRequestStatus =
+type EventProjectionTurnRequestStatus =
   (typeof eventProjectionTurnRequestStatusValues)[number];
 
 export interface EventProjectionTurnRequest {
@@ -88,8 +100,6 @@ export interface EventProjectionUserMessage extends EventProjectionMessageBase {
   kind: "user";
   initiator: ThreadTurnInitiator;
   senderThreadId: string | null;
-  // Family-B taxonomy fields carried from the decoded `client/turn/requested`
-  // event. Legacy events lacking them project as `unlabeled` / `null`.
   systemMessageKind: SystemMessageKind;
   systemMessageSubject: SystemMessageSubject | null;
   turnRequest: EventProjectionTurnRequest;
@@ -109,7 +119,6 @@ export interface EventProjectionAssistantTextMessage extends EventProjectionMess
   kind: "assistant-text";
   text: string;
   status: Extract<EventProjectionMessageStatus, "streaming" | "completed">;
-  /** True when this message came from a legacy persisted user-visible system event. */
   isLegacyUserMessage?: boolean;
 }
 
@@ -136,18 +145,18 @@ export type EventProjectionToolParsedIntent =
       cmd: string;
     };
 
-export interface EventProjectionDelegationMetadata {
+interface EventProjectionDelegationMetadata {
   subagentType?: string;
   description?: string;
+  model?: string;
 }
 
-export interface EventProjectionToolCallMessage extends EventProjectionMessageBase {
+export interface EventProjectionToolCallMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
   kind: "tool-call";
   toolName: string;
   toolArgs: JsonObject | null;
-  statusLabels?: { pending: string; completed: string };
   callId: string;
-  parsedIntents: EventProjectionToolParsedIntent[];
   output: string;
   completedAt: number | null;
   approvalStatus: EventProjectionApprovalLifecycleStatus | null;
@@ -157,7 +166,8 @@ export interface EventProjectionToolCallMessage extends EventProjectionMessageBa
   >;
 }
 
-export interface EventProjectionCommandMessage extends EventProjectionMessageBase {
+export interface EventProjectionCommandMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
   kind: "command";
   callId: string;
   command: string;
@@ -174,7 +184,8 @@ export interface EventProjectionCommandMessage extends EventProjectionMessageBas
   >;
 }
 
-export interface EventProjectionWebSearchMessage extends EventProjectionMessageBase {
+export interface EventProjectionWebSearchMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
   kind: "web-search";
   callId: string;
   queries: string[];
@@ -185,7 +196,8 @@ export interface EventProjectionWebSearchMessage extends EventProjectionMessageB
   >;
 }
 
-export interface EventProjectionWebFetchMessage extends EventProjectionMessageBase {
+export interface EventProjectionWebFetchMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
   kind: "web-fetch";
   callId: string;
   url: string;
@@ -198,7 +210,8 @@ export interface EventProjectionWebFetchMessage extends EventProjectionMessageBa
   >;
 }
 
-export interface EventProjectionImageViewMessage extends EventProjectionMessageBase {
+export interface EventProjectionImageViewMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
   kind: "image-view";
   callId: string;
   path: string;
@@ -209,6 +222,68 @@ export interface EventProjectionImageViewMessage extends EventProjectionMessageB
   >;
 }
 
+export interface EventProjectionImageGenerationMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
+  kind: "image-generation";
+  callId: string;
+  prompt: string | null;
+  path: string | null;
+  error: string | null;
+  transparentBackground: boolean;
+  completedAt: number | null;
+  status: Extract<
+    EventProjectionMessageStatus,
+    "pending" | "completed" | "error" | "interrupted"
+  >;
+}
+
+type EventProjectionItemActivityStatus = Extract<
+  EventProjectionMessageStatus,
+  "pending" | "completed" | "error" | "interrupted"
+>;
+
+export interface EventProjectionFileReadMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
+  kind: "file-read";
+  callId: string;
+  path: string;
+  cmd: string | null;
+  completedAt: number | null;
+  status: EventProjectionItemActivityStatus;
+}
+
+export interface EventProjectionSearchMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
+  kind: "search";
+  callId: string;
+  mode: ThreadEventSearchMode;
+  query: string;
+  path: string | null;
+  cmd: string | null;
+  completedAt: number | null;
+  status: EventProjectionItemActivityStatus;
+}
+
+export interface EventProjectionPlanStepsMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
+  kind: "plan-steps";
+  callId: string;
+  steps: ThreadEventPlanStep[];
+  explanation: string | null;
+  completedAt: number | null;
+  status: EventProjectionItemActivityStatus;
+}
+
+export interface EventProjectionExtensionMessage extends EventProjectionMessageBase {
+  kind: "extension";
+  callId: string;
+  extensionKind: ExtensionKind;
+  payload: JsonValue;
+  presentation: ThreadEventItemPresentation;
+  completedAt: number | null;
+  status: EventProjectionItemActivityStatus;
+}
+
 export interface EventProjectionFileEditChange {
   path: string;
   kind?: string;
@@ -216,7 +291,8 @@ export interface EventProjectionFileEditChange {
   diff?: string;
 }
 
-export interface EventProjectionFileEditMessage extends EventProjectionMessageBase {
+export interface EventProjectionFileEditMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
   kind: "file-edit";
   callId: string;
   changes: EventProjectionFileEditChange[];
@@ -229,8 +305,10 @@ export interface EventProjectionFileEditMessage extends EventProjectionMessageBa
   >;
 }
 
-export const eventProjectionOperationTypeValues = [
+const eventProjectionOperationTypeValues = [
+  "reasoning",
   "provider-unhandled",
+  "provider-environment",
   "warning",
   "deprecation",
   "thread-interrupted",
@@ -239,17 +317,17 @@ export const eventProjectionOperationTypeValues = [
   "compaction",
   "context-clear",
 ] as const;
-export type EventProjectionOperationType =
+type EventProjectionOperationType =
   (typeof eventProjectionOperationTypeValues)[number];
 
-export const eventProjectionThreadOperationKindValues = [
+const eventProjectionThreadOperationKindValues = [
   "ownership_change",
   "other",
 ] as const;
 export type EventProjectionThreadOperationKind =
   (typeof eventProjectionThreadOperationKindValues)[number];
 
-export const eventProjectionThreadOperationStatusValues = [
+const eventProjectionThreadOperationStatusValues = [
   "requested",
   "queued",
   "running",
@@ -271,7 +349,7 @@ export interface EventProjectionOwnershipChangeThreadOperationMetadata {
   metadata: OwnershipChangeOperationMetadata | null;
 }
 
-export interface EventProjectionOtherThreadOperationMetadata {
+interface EventProjectionOtherThreadOperationMetadata {
   operation: "other";
   rawOperation: string;
   status: EventProjectionThreadOperationStatus;
@@ -299,7 +377,7 @@ export interface EventProjectionProvisioningMetadata {
   transcript?: EventProjectionProvisioningTranscriptEntry[];
 }
 
-export interface EventProjectionApprovalTarget {
+interface EventProjectionApprovalTarget {
   itemId: string;
   toolName: string | null;
 }
@@ -346,11 +424,32 @@ export interface EventProjectionUserQuestionLifecycleMessage extends EventProjec
   statusReason: string | null;
 }
 
+export interface EventProjectionPluginFormLifecycleMessage extends EventProjectionMessageBase {
+  kind: "plugin-form-lifecycle";
+  interactionId: string;
+  lifecycle: EventProjectionPluginFormLifecycle;
+  status: Extract<
+    EventProjectionMessageStatus,
+    "pending" | "completed" | "error" | "interrupted"
+  >;
+  pluginId: string;
+  rendererId: string;
+  title: string;
+  statusReason: string | null;
+  presentation: ThreadEventItemPresentation;
+  payload: JsonValue | null;
+}
+
 export interface EventProjectionDelegationMessage
-  extends EventProjectionMessageBase, EventProjectionDelegationMetadata {
+  extends
+    EventProjectionMessageBase,
+    EventProjectionDelegationMetadata,
+    EventProjectionPresentedMessage {
   kind: "delegation";
   toolName: string;
   callId: string;
+  childRef: string | null;
+  background: boolean;
   output: string;
   completedAt: number | null;
   status: Extract<
@@ -360,19 +459,15 @@ export interface EventProjectionDelegationMessage
   childProjection: EventProjection;
 }
 
-/**
- * A provider background task — a dynamic workflow or a backgrounded shell
- * command, discriminated by `taskType`. One message per item across the whole
- * thread: the turn-scoped item/started anchors placement and later
- * thread-scoped progress/completed events replace its payload in place.
- */
-export interface EventProjectionWorkflowMessage extends EventProjectionMessageBase {
+export interface EventProjectionWorkflowMessage
+  extends EventProjectionMessageBase, EventProjectionPresentedMessage {
   kind: "workflow";
   itemId: string;
-  /** Raw SDK task discriminant (e.g. "local_workflow", "local_bash"). */
+  familyId: string | null;
   taskType: string;
   workflowName: string | null;
   description: string;
+  model: string | null;
   status: Extract<
     EventProjectionMessageStatus,
     "pending" | "completed" | "error" | "interrupted"
@@ -397,13 +492,6 @@ export interface EventProjectionErrorMessage extends EventProjectionMessageBase 
   willRetry?: boolean;
 }
 
-export interface EventProjectionDebugRawEventMessage extends EventProjectionMessageBase {
-  kind: "debug/raw-event";
-  rawType: string;
-  rawEvent: ThreadEventRow;
-  reason: "ignored-noise" | "duplicate-event" | "unhandled";
-}
-
 export type EventProjectionMessage =
   | EventProjectionUserMessage
   | EventProjectionAssistantTextMessage
@@ -412,28 +500,23 @@ export type EventProjectionMessage =
   | EventProjectionWebSearchMessage
   | EventProjectionWebFetchMessage
   | EventProjectionImageViewMessage
+  | EventProjectionImageGenerationMessage
+  | EventProjectionFileReadMessage
+  | EventProjectionSearchMessage
+  | EventProjectionPlanStepsMessage
+  | EventProjectionExtensionMessage
   | EventProjectionFileEditMessage
   | EventProjectionOperationMessage
   | EventProjectionPermissionGrantLifecycleMessage
   | EventProjectionUserQuestionLifecycleMessage
+  | EventProjectionPluginFormLifecycleMessage
   | EventProjectionDelegationMessage
   | EventProjectionWorkflowMessage
-  | EventProjectionErrorMessage
-  | EventProjectionDebugRawEventMessage;
+  | EventProjectionErrorMessage;
 
 export interface BuildEventProjectionMessagesOptions {
-  includeDebugRawEvents?: boolean;
-  includeProviderUnhandledOperations?: boolean;
+  includeDiagnosticOperations?: boolean;
   threadStatus?: Thread["status"];
-  /**
-   * Display name of the thread these messages belong to. Used by operation rows
-   * that describe a relationship to another thread. Empty string when the thread
-   * has no name; the title builders fall back to a bare verb.
-   */
   threadName: string;
-  /**
-   * Server-provided display name for the provider that owns this projection.
-   * Dynamic providers may not be known to this package's static fallback table.
-   */
   providerDisplayName?: string;
 }

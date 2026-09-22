@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useState } from "react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompactViewportOverrideProvider } from "@bb/shared-ui/hooks/use-compact-viewport";
 import {
@@ -14,12 +20,31 @@ import {
   type AppLayoutSidebarMode,
 } from "./AppLayoutSidebar";
 
+vi.mock("@/components/sidebar/useSidebarThreadReveal", () => ({
+  useSidebarThreadReveal: () => {},
+}));
+
+const mountCounts = vi.hoisted(() => ({ appSidebar: 0 }));
+
 vi.mock("@/components/sidebar/AppSidebar", async () => {
   const { Sidebar } = await vi.importActual<
     typeof import("@/components/ui/sidebar")
   >("@/components/ui/sidebar");
+  const { useEffect } = await vi.importActual<typeof import("react")>("react");
   return {
-    AppSidebar: () => <Sidebar>App sidebar</Sidebar>,
+    AppSidebar: ({ mobileHosted }: { mobileHosted?: { hidden: boolean } }) => {
+      useEffect(() => {
+        mountCounts.appSidebar += 1;
+      }, []);
+      if (mobileHosted) {
+        return (
+          <div data-testid="app-sidebar-body" hidden={mobileHosted.hidden}>
+            App sidebar
+          </div>
+        );
+      }
+      return <Sidebar>App sidebar</Sidebar>;
+    },
   };
 });
 
@@ -28,16 +53,35 @@ vi.mock("@/components/settings/SettingsSidebar", async () => {
     typeof import("@/components/ui/sidebar")
   >("@/components/ui/sidebar");
   return {
-    SettingsSidebar: () => <Sidebar>Settings sidebar</Sidebar>,
+    SettingsSidebar: ({ mobileHosted }: { mobileHosted?: boolean }) =>
+      mobileHosted ? (
+        <div data-testid="settings-sidebar-body">Settings sidebar</div>
+      ) : (
+        <Sidebar>Settings sidebar</Sidebar>
+      ),
   };
 });
 
-vi.mock("@/components/tools/ToolsSidebar", async () => {
+vi.mock("@/components/tools/ResourceSidebar", async () => {
   const { Sidebar } = await vi.importActual<
     typeof import("@/components/ui/sidebar")
   >("@/components/ui/sidebar");
   return {
-    ToolsSidebar: () => <Sidebar>Tools sidebar</Sidebar>,
+    ResourceSidebar: ({
+      mobileHosted,
+      workspace,
+    }: {
+      mobileHosted?: boolean;
+      workspace: "plugins" | "skills";
+    }) => {
+      const title =
+        workspace === "plugins" ? "Plugins sidebar" : "Skills sidebar";
+      return mobileHosted ? (
+        <div data-testid={`${workspace}-sidebar-body`}>{title}</div>
+      ) : (
+        <Sidebar>{title}</Sidebar>
+      );
+    },
   };
 });
 
@@ -57,9 +101,28 @@ function getMobilePanel(): HTMLElement {
   return panel;
 }
 
-function SidebarModeHarness() {
+function getShelfRevealTranslate(): string {
+  const backdrop = document.querySelector("[data-sidebar-mobile-backdrop]");
+  if (!(backdrop instanceof HTMLElement)) {
+    throw new Error("Expected the mobile sidebar backdrop");
+  }
+  return backdrop.style.translate;
+}
+
+function getAppSidebarBody(): HTMLElement {
+  return screen.getByTestId("app-sidebar-body");
+}
+
+function SidebarModeHarness({
+  onMode,
+}: {
+  onMode?: (mode: AppLayoutSidebarMode) => void;
+}) {
   const [mode, setMode] = useState<AppLayoutSidebarMode>("app");
   const closeMobileSidebar = useCloseMobileSidebar();
+  useEffect(() => {
+    onMode?.(mode);
+  }, [mode, onMode]);
   const navigate = (nextMode: AppLayoutSidebarMode) => {
     closeMobileSidebar();
     setMode(nextMode);
@@ -69,6 +132,12 @@ function SidebarModeHarness() {
     <>
       <button type="button" onClick={() => navigate("settings")}>
         Navigate to settings
+      </button>
+      <button type="button" onClick={() => navigate("plugins")}>
+        Navigate to plugins
+      </button>
+      <button type="button" onClick={() => navigate("skills")}>
+        Navigate to skills
       </button>
       <button type="button" onClick={() => navigate("app")}>
         Navigate back to app
@@ -92,10 +161,11 @@ function SidebarModeHarness() {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  mountCounts.appSidebar = 0;
 });
 
 describe("AppLayoutSidebar mobile mode transitions", () => {
-  it("waits for the current drawer to close before swapping sidebar modes", () => {
+  it("keeps one drawer panel and the app sidebar mounted across resource round trips", () => {
     vi.useFakeTimers();
     render(
       <CompactViewportOverrideProvider isCompactViewport>
@@ -108,49 +178,62 @@ describe("AppLayoutSidebar mobile mode transitions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
     settleMobileToggle();
 
-    const appPanel = getMobilePanel();
-    expect(appPanel.dataset.state).toBe("open");
-    expect(appPanel.textContent).toContain("App sidebar");
+    const panel = getMobilePanel();
+    expect(panel.dataset.state).toBe("open");
+    expect(getAppSidebarBody().hidden).toBe(false);
+    expect(screen.queryByTestId("settings-sidebar-body")).toBeNull();
+    expect(mountCounts.appSidebar).toBe(1);
 
     fireEvent.click(
       screen.getByRole("button", { name: "Navigate to settings" }),
     );
 
-    // The route/mode changes immediately, but the currently visible panel
-    // remains mounted for its one compositor-driven close.
-    expect(getMobilePanel()).toBe(appPanel);
-    expect(appPanel.textContent).toContain("App sidebar");
-    expect(appPanel.style.translate).toBe("-100%");
+    expect(getMobilePanel()).toBe(panel);
+    expect(getAppSidebarBody().hidden).toBe(false);
+    expect(screen.queryByTestId("settings-sidebar-body")).toBeNull();
+    expect(getShelfRevealTranslate()).toBe("0px");
 
     settleMobileToggle();
 
-    const settingsPanel = getMobilePanel();
-    expect(settingsPanel).not.toBe(appPanel);
-    expect(settingsPanel.dataset.state).toBe("closed");
-    expect(settingsPanel.textContent).toContain("Settings sidebar");
+    expect(getMobilePanel()).toBe(panel);
+    expect(panel.dataset.state).toBe("closed");
+    expect(getAppSidebarBody().hidden).toBe(true);
+    expect(screen.getByTestId("settings-sidebar-body").textContent).toBe(
+      "Settings sidebar",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
     settleMobileToggle();
     expect(getMobilePanel().dataset.state).toBe("open");
 
-    const reopenedSettingsPanel = getMobilePanel();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Navigate to plugins" }),
+    );
+    settleMobileToggle();
+    expect(screen.queryByTestId("settings-sidebar-body")).toBeNull();
+    expect(screen.getByTestId("plugins-sidebar-body")).toBeTruthy();
+    expect(screen.queryByTestId("skills-sidebar-body")).toBeNull();
+    expect(getAppSidebarBody().hidden).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
+    settleMobileToggle();
     fireEvent.click(
       screen.getByRole("button", { name: "Navigate back to app" }),
     );
 
-    expect(getMobilePanel()).toBe(reopenedSettingsPanel);
-    expect(reopenedSettingsPanel.textContent).toContain("Settings sidebar");
-    expect(reopenedSettingsPanel.style.translate).toBe("-100%");
+    expect(screen.getByTestId("plugins-sidebar-body")).toBeTruthy();
+    expect(getAppSidebarBody().hidden).toBe(true);
+    expect(getShelfRevealTranslate()).toBe("0px");
 
     settleMobileToggle();
 
-    const returnedAppPanel = getMobilePanel();
-    expect(returnedAppPanel).not.toBe(reopenedSettingsPanel);
-    expect(returnedAppPanel.dataset.state).toBe("closed");
-    expect(returnedAppPanel.textContent).toContain("App sidebar");
+    expect(getMobilePanel()).toBe(panel);
+    expect(screen.queryByTestId("plugins-sidebar-body")).toBeNull();
+    expect(getAppSidebarBody().hidden).toBe(false);
+    expect(mountCounts.appSidebar).toBe(1);
   });
 
-  it("swaps modes immediately when navigation does not close the drawer", () => {
+  it("swaps bodies immediately when navigation does not close the drawer", () => {
     vi.useFakeTimers();
     render(
       <CompactViewportOverrideProvider isCompactViewport>
@@ -163,17 +246,48 @@ describe("AppLayoutSidebar mobile mode transitions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
     settleMobileToggle();
 
-    const appPanel = getMobilePanel();
-    expect(appPanel.dataset.state).toBe("open");
-    expect(appPanel.textContent).toContain("App sidebar");
+    const panel = getMobilePanel();
+    expect(panel.dataset.state).toBe("open");
+    expect(getAppSidebarBody().hidden).toBe(false);
 
     fireEvent.click(
       screen.getByRole("button", { name: "Change route without closing" }),
     );
 
-    const settingsPanel = getMobilePanel();
-    expect(settingsPanel).not.toBe(appPanel);
-    expect(settingsPanel.dataset.state).toBe("open");
-    expect(settingsPanel.textContent).toContain("Settings sidebar");
+    expect(getMobilePanel()).toBe(panel);
+    expect(panel.dataset.state).toBe("open");
+    expect(getAppSidebarBody().hidden).toBe(true);
+    expect(screen.getByTestId("settings-sidebar-body")).toBeTruthy();
+  });
+
+  it("keeps separate sidebar shells per mode on wide viewports", () => {
+    render(
+      <CompactViewportOverrideProvider isCompactViewport={false}>
+        <SidebarProvider>
+          <SidebarModeHarness />
+        </SidebarProvider>
+      </CompactViewportOverrideProvider>,
+    );
+
+    expect(screen.getByText("App sidebar")).toBeTruthy();
+    expect(screen.queryByTestId("app-sidebar-body")).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Change route without closing" }),
+    );
+
+    expect(screen.getByText("Settings sidebar")).toBeTruthy();
+    expect(screen.queryByText("App sidebar")).toBeNull();
+    expect(screen.queryByTestId("settings-sidebar-body")).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Navigate to plugins" }),
+    );
+    expect(screen.getByText("Plugins sidebar")).toBeTruthy();
+    expect(screen.queryByText("Skills sidebar")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Navigate to skills" }));
+    expect(screen.getByText("Skills sidebar")).toBeTruthy();
+    expect(screen.queryByText("Plugins sidebar")).toBeNull();
   });
 });

@@ -6,16 +6,15 @@ import {
 import { Button } from "@bb/shared-ui/button";
 import { Input } from "@bb/shared-ui/input";
 import { Label } from "@bb/shared-ui/label";
-import {
-  DashedLineCircleIcon,
-  ViewIcon,
-  ViewOffSlashIcon,
-} from "@hugeicons/core-free-icons";
+import DashedLineCircleIcon from "@hugeicons/core-free-icons/DashedLineCircleIcon";
+import ViewIcon from "@hugeicons/core-free-icons/ViewIcon";
+import ViewOffSlashIcon from "@hugeicons/core-free-icons/ViewOffSlashIcon";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+  SECRET_REQUEST_RENDERER_ID,
   secretRequestPayloadSchema,
   secretRequestResponseSchema,
-} from "./src/contracts.js";
+} from "@bb/plugin-interaction-contracts";
 import { reconcileDotenv } from "./src/dotenv.js";
 
 function SecretRequestInteraction({
@@ -70,9 +69,7 @@ function SecretRequestInteraction({
       try {
         await submit({ values });
         setValues({});
-      } catch {
-        // The host renders the submission error outside this plugin form.
-      }
+      } catch {}
     } finally {
       setBusy(false);
     }
@@ -80,9 +77,7 @@ function SecretRequestInteraction({
   const cancelRequest = async () => {
     try {
       await cancel();
-    } catch {
-      // The host renders the cancellation error outside this plugin form.
-    }
+    } catch {}
   };
 
   return (
@@ -216,7 +211,7 @@ function SecretRequestInteraction({
 
 export default definePluginApp((app) => {
   app.slots.pendingInteraction({
-    id: "secret-request",
+    id: SECRET_REQUEST_RENDERER_ID,
     component: SecretRequestInteraction,
   });
 });

@@ -3,6 +3,7 @@ import type { TerminalSession } from "@bb/server-contract";
 import { StoryCard, StoryRow } from "../../../../.ladle/story-card";
 import { ThreadTerminalContent } from "./ThreadTerminalContent";
 import type { ThreadTerminalController } from "./useThreadTerminalController";
+import { makeTerminalSession } from "@/test/fixtures/terminal-sessions";
 
 export default {
   title: "terminal/Content",
@@ -10,22 +11,16 @@ export default {
 
 const THREAD_ID = "thr_terminal_story";
 
-const BASE_TERMINAL_SESSION: TerminalSession = {
+const BASE_TERMINAL_SESSION: TerminalSession = makeTerminalSession({
   id: "term_story_1",
   threadId: THREAD_ID,
   environmentId: "env_terminal_story",
   hostId: "host_terminal_story",
   title: "Terminal 1",
   initialCwd: "/Users/michael/project",
-  cols: 100,
-  rows: 30,
-  status: "running",
-  exitCode: null,
-  closeReason: null,
   createdAt: 1,
   updatedAt: 1,
-  lastUserInputAt: null,
-};
+});
 
 const RUNNING_SESSION: TerminalSession = {
   ...BASE_TERMINAL_SESSION,
@@ -55,16 +50,11 @@ const EXITED_SESSION: TerminalSession = {
 interface MakeControllerArgs {
   activeSession: TerminalSession | null;
   canCreateTerminal: boolean;
-  closingTerminalId: string | null;
-  emptyTerminalMessage: string;
   hasTerminalQueryError: boolean;
   isCreateTerminalPending: boolean;
   isPanelOpen: boolean;
-  isTerminalQueryLoading: boolean;
-  showTerminalPlaceholders: boolean;
   shouldRetainActiveTerminalView?: boolean;
   terminalBodyMessage: string;
-  visibleSessions: readonly TerminalSession[];
 }
 
 interface TerminalContentStageProps {
@@ -83,38 +73,26 @@ function noopTitleChange(_title: string): void {}
 function makeController({
   activeSession,
   canCreateTerminal,
-  closingTerminalId,
-  emptyTerminalMessage,
   hasTerminalQueryError,
   isCreateTerminalPending,
   isPanelOpen,
-  isTerminalQueryLoading,
-  showTerminalPlaceholders,
   shouldRetainActiveTerminalView = false,
   terminalBodyMessage,
-  visibleSessions,
 }: MakeControllerArgs): ThreadTerminalController {
   return {
     activeSession,
-    activeTerminalId: activeSession?.id ?? null,
     canCreateTerminal,
-    closingTerminalId,
-    emptyTerminalMessage,
     handleActiveTerminalSessionChange: noopSessionChange,
     handleActiveTerminalTitleChange: noopTitleChange,
     handleActiveTerminalUserInput: noopAction,
-    handleClosePanel: noopAction,
-    handleCloseTerminal: noopTerminalIdAction,
     handleCreateTerminal: noopAction,
     handleSelectTerminal: noopTerminalIdAction,
     hasTerminalQueryError,
     isCreateTerminalPending,
     isPanelOpen,
-    isTerminalQueryLoading,
-    showTerminalPlaceholders,
+    shouldMountTerminalView: isPanelOpen,
     shouldRetainActiveTerminalView,
     terminalBodyMessage,
-    visibleSessions,
   };
 }
 
@@ -124,15 +102,10 @@ function terminalController(
   return makeController({
     activeSession,
     canCreateTerminal: true,
-    closingTerminalId: null,
-    emptyTerminalMessage: "No terminals",
     hasTerminalQueryError: false,
     isCreateTerminalPending: false,
     isPanelOpen: true,
-    isTerminalQueryLoading: false,
-    showTerminalPlaceholders: false,
     terminalBodyMessage: "No terminals",
-    visibleSessions: [activeSession],
   });
 }
 
@@ -141,15 +114,10 @@ const disconnectedController = terminalController(DISCONNECTED_SESSION);
 const disconnectedUnavailableController = makeController({
   activeSession: DISCONNECTED_SESSION,
   canCreateTerminal: false,
-  closingTerminalId: null,
-  emptyTerminalMessage: "No terminals",
   hasTerminalQueryError: false,
   isCreateTerminalPending: false,
   isPanelOpen: true,
-  isTerminalQueryLoading: false,
-  showTerminalPlaceholders: false,
   terminalBodyMessage: "No terminals",
-  visibleSessions: [DISCONNECTED_SESSION],
 });
 
 const startingController = terminalController(STARTING_SESSION);
@@ -158,57 +126,37 @@ const exitedController = terminalController(EXITED_SESSION);
 const emptyController = makeController({
   activeSession: null,
   canCreateTerminal: true,
-  closingTerminalId: null,
-  emptyTerminalMessage: "No terminals",
   hasTerminalQueryError: false,
   isCreateTerminalPending: false,
   isPanelOpen: true,
-  isTerminalQueryLoading: false,
-  showTerminalPlaceholders: false,
   terminalBodyMessage: "No terminals",
-  visibleSessions: [],
 });
 
 const startingEmptyController = makeController({
   activeSession: null,
   canCreateTerminal: true,
-  closingTerminalId: null,
-  emptyTerminalMessage: "Starting terminal...",
   hasTerminalQueryError: false,
   isCreateTerminalPending: true,
   isPanelOpen: true,
-  isTerminalQueryLoading: false,
-  showTerminalPlaceholders: true,
   terminalBodyMessage: "Starting terminal...",
-  visibleSessions: [],
 });
 
 const loadingController = makeController({
   activeSession: null,
   canCreateTerminal: true,
-  closingTerminalId: null,
-  emptyTerminalMessage: "Starting terminal...",
   hasTerminalQueryError: false,
   isCreateTerminalPending: false,
   isPanelOpen: true,
-  isTerminalQueryLoading: true,
-  showTerminalPlaceholders: false,
   terminalBodyMessage: "Starting terminal...",
-  visibleSessions: [],
 });
 
 const queryErrorController = makeController({
   activeSession: null,
   canCreateTerminal: true,
-  closingTerminalId: null,
-  emptyTerminalMessage: "No terminals",
   hasTerminalQueryError: true,
   isCreateTerminalPending: false,
   isPanelOpen: true,
-  isTerminalQueryLoading: false,
-  showTerminalPlaceholders: false,
   terminalBodyMessage: "No terminals",
-  visibleSessions: [],
 });
 
 function TerminalContentStage({

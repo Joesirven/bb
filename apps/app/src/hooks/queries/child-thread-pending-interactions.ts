@@ -1,4 +1,4 @@
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, type UseQueryResult } from "@tanstack/react-query";
 import { useMemo } from "react";
 import type { PendingInteraction } from "@bb/domain";
 import { sdk } from "@/lib/sdk";
@@ -20,13 +20,16 @@ export interface ChildThreadPendingAttention {
   interaction: PendingInteraction;
 }
 
+export const EMPTY_CHILD_THREAD_PENDING_ATTENTION: readonly ChildThreadPendingAttention[] =
+  Object.freeze([]);
+
 export function collectChildThreadPendingAttention(
   children: readonly ChildThreadPendingAttentionSource[],
   interactionsByThreadId: ReadonlyMap<
     string,
     readonly PendingInteraction[] | undefined
   >,
-): ChildThreadPendingAttention[] {
+): readonly ChildThreadPendingAttention[] {
   const items: ChildThreadPendingAttention[] = [];
   for (const child of children) {
     if (!child.hasPendingInteraction) {
@@ -45,15 +48,25 @@ export function collectChildThreadPendingAttention(
       interaction,
     });
   }
-  return items;
+  return items.length === 0 ? EMPTY_CHILD_THREAD_PENDING_ATTENTION : items;
+}
+
+const EMPTY_INTERACTION_LISTS: readonly (
+  | readonly PendingInteraction[]
+  | undefined
+)[] = Object.freeze([]);
+
+function combinePendingInteractionLists(
+  results: UseQueryResult<readonly PendingInteraction[]>[],
+): readonly (readonly PendingInteraction[] | undefined)[] {
+  return results.length === 0
+    ? EMPTY_INTERACTION_LISTS
+    : results.map((result) => result.data);
 }
 
 export function useChildThreadPendingAttention(
   children: readonly ChildThreadPendingAttentionSource[],
-): ChildThreadPendingAttention[] {
-  // Thread-list realtime already flips `hasPendingInteraction`. Resolving
-  // from the parent invalidates the interaction query. Do not subscribe to
-  // each child detail stream.
+): readonly ChildThreadPendingAttention[] {
   const pendingChildIds = useMemo(
     () =>
       children
@@ -62,7 +75,7 @@ export function useChildThreadPendingAttention(
     [children],
   );
 
-  const queries = useQueries({
+  const interactionLists = useQueries({
     queries: pendingChildIds.map((threadId) => ({
       queryKey: threadPendingInteractionsQueryKey(threadId),
       queryFn: ({ signal }: { signal: AbortSignal }) =>
@@ -74,15 +87,16 @@ export function useChildThreadPendingAttention(
       refetchOnMount: true,
       ...REALTIME_OWNED_NO_FOCUS_QUERY_POLICY,
     })),
+    combine: combinePendingInteractionLists,
   });
 
   const interactionsByThreadId = useMemo(() => {
     const next = new Map<string, readonly PendingInteraction[] | undefined>();
     pendingChildIds.forEach((threadId, index) => {
-      next.set(threadId, queries[index]?.data);
+      next.set(threadId, interactionLists[index]);
     });
     return next;
-  }, [pendingChildIds, queries]);
+  }, [pendingChildIds, interactionLists]);
 
   return useMemo(
     () => collectChildThreadPendingAttention(children, interactionsByThreadId),

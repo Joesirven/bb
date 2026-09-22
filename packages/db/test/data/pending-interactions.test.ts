@@ -1,6 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { createConnection } from "../../src/connection.js";
-import { migrate } from "../../src/migrate.js";
 import { noopNotifier } from "../../src/notifier.js";
 import { createEnvironment } from "../../src/data/environments.js";
 import { upsertHost } from "../../src/data/hosts.js";
@@ -15,13 +13,12 @@ import {
   setPendingInteractionResolved,
 } from "../../src/data/pending-interactions.js";
 import { createThread } from "../../src/data/threads.js";
+import { createMigratedConnection } from "../helpers/migrated-connection.js";
 
 function setup() {
-  const db = createConnection(":memory:");
-  migrate(db);
+  const db = createMigratedConnection();
   const host = upsertHost(db, noopNotifier, {
     name: "test-host",
-    type: "persistent",
   });
   const { project } = createProject(db, noopNotifier, {
     name: "test-project",
@@ -32,9 +29,9 @@ function setup() {
     },
   });
   const environment = createEnvironment(db, noopNotifier, {
+      providerOwnsPath: false,
     projectId: project.id,
     hostId: host.id,
-    workspaceProvisionType: "unmanaged",
     status: "ready",
   });
   const thread = createThread(db, noopNotifier, {

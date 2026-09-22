@@ -2,29 +2,27 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  resolveRootComposePanelTogglePlacement,
-  RootComposeRightPanelToggle,
-} from "./RootComposeView";
+import { RootComposeRightPanelToggle } from "./RootComposeView";
 
-afterEach(cleanup);
+const { preloadThreadSecondaryPanel } = vi.hoisted(() => ({
+  preloadThreadSecondaryPanel: vi.fn(),
+}));
+
+vi.mock(
+  "@/components/secondary-panel/lazySecondaryPanelComponents",
+  async (importOriginal) => ({
+    ...(await importOriginal()),
+    preloadThreadSecondaryPanel,
+  }),
+);
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("RootComposeRightPanelToggle", () => {
-  it("hands the floating control off to aligned panel chrome when open", () => {
-    expect(
-      resolveRootComposePanelTogglePlacement({
-        isHosted: false,
-        isOpen: false,
-      }),
-    ).toEqual({ inlinePanelToggle: "button", showPinnedToggle: true });
-    expect(
-      resolveRootComposePanelTogglePlacement({ isHosted: false, isOpen: true }),
-    ).toEqual({ inlinePanelToggle: "button", showPinnedToggle: false });
-    expect(
-      resolveRootComposePanelTogglePlacement({ isHosted: true, isOpen: true }),
-    ).toEqual({ inlinePanelToggle: "button", showPinnedToggle: false });
-  });
-
   it("uses a disclosure state without painting the whole click target as selected", () => {
     const onToggle = vi.fn();
 
@@ -33,10 +31,40 @@ describe("RootComposeRightPanelToggle", () => {
     const button = screen.getByRole("button", { name: "Hide right panel" });
     expect(button.getAttribute("aria-expanded")).toBe("true");
     expect(button.getAttribute("aria-pressed")).toBeNull();
-    expect(button.className).toContain("h-[28px]");
-    expect(button.className).toContain("w-[28px]");
 
     fireEvent.click(button);
     expect(onToggle).toHaveBeenCalledOnce();
+  });
+
+  it("starts loading the panel from pointer or keyboard intent", () => {
+    render(<RootComposeRightPanelToggle isOpen={false} onToggle={vi.fn()} />);
+
+    const button = screen.getByRole("button", { name: "Show right panel" });
+    fireEvent.pointerDown(button);
+    fireEvent.focus(button);
+
+    expect(preloadThreadSecondaryPanel).toHaveBeenCalledTimes(2);
+  });
+
+  it("warms the panel chunk while the browser is idle", () => {
+    const cancelIdleCallback = vi.fn();
+    const requestIdleCallback = vi.fn(
+      (callback: IdleRequestCallback): number => {
+        callback({ didTimeout: false, timeRemaining: () => 50 });
+        return 7;
+      },
+    );
+    vi.stubGlobal("cancelIdleCallback", cancelIdleCallback);
+    vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+
+    render(<RootComposeRightPanelToggle isOpen={false} onToggle={vi.fn()} />);
+
+    expect(requestIdleCallback).toHaveBeenCalledWith(
+      preloadThreadSecondaryPanel,
+      { timeout: 1000 },
+    );
+    expect(preloadThreadSecondaryPanel).toHaveBeenCalledOnce();
+    cleanup();
+    expect(cancelIdleCallback).toHaveBeenCalledWith(7);
   });
 });

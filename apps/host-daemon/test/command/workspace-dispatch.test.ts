@@ -32,7 +32,6 @@ describe("workspace command dispatch", () => {
         maxUntrackedLineStatBytes: 8 * 1024 * 1024,
         workspaceContext: {
           workspacePath: "/tmp/env-1",
-          workspaceProvisionType: "unmanaged",
         },
         mergeBaseBranch: "main",
       },
@@ -44,7 +43,6 @@ describe("workspace command dispatch", () => {
         environmentId: "env-1",
         workspaceContext: {
           workspacePath: "/tmp/env-1",
-          workspaceProvisionType: "unmanaged",
         },
         target: { type: "all", mergeBaseBranch: "main" },
         maxDiffBytes: 2 * 1024 * 1024,
@@ -59,22 +57,8 @@ describe("workspace command dispatch", () => {
         environmentId: "env-1",
         workspaceContext: {
           workspacePath: "/tmp/env-1",
-          workspaceProvisionType: "unmanaged",
         },
         message: "Commit message",
-      },
-      harness.dispatchOptions(),
-    );
-    const squashResult = await dispatchCommand(
-      {
-        type: "workspace.squash_merge",
-        environmentId: "env-1",
-        workspaceContext: {
-          workspacePath: "/tmp/env-1",
-          workspaceProvisionType: "unmanaged",
-        },
-        targetBranch: "main",
-        commitMessage: "feat: squash merge",
       },
       harness.dispatchOptions(),
     );
@@ -91,11 +75,6 @@ describe("workspace command dispatch", () => {
     expect(commitResult).toEqual({
       commitSha: "commit-1",
       commitSubject: "Commit message",
-    });
-    expect(squashResult).toEqual({
-      merged: true,
-      commitSha: "merge-main",
-      commitSubject: "feat: squash merge",
     });
     expect(harness.workspaceState.statusReads).toBe(1);
     expect(harness.workspaceState.lastCommitMessage).toBe("Commit message");
@@ -121,7 +100,6 @@ describe("workspace command dispatch", () => {
         maxUntrackedLineStatBytes: 8 * 1024 * 1024,
         workspaceContext: {
           workspacePath,
-          workspaceProvisionType: "unmanaged",
         },
       },
       harness.dispatchOptions(),
@@ -129,13 +107,14 @@ describe("workspace command dispatch", () => {
 
     expect(result.outcome).toBe("available");
     expect(refreshed.state.statusReads).toBe(1);
-    expect(
-      harness.manager.get("env-late-git")?.workspace.isGitRepo,
-    ).toBe(true);
+    expect(harness.manager.get("env-late-git")?.workspace.isGitRepo).toBe(true);
   });
 
   it("covers workspace.pull_request", async () => {
     const harness = createHarness();
+    await harness.manager.replaceBaseShellEnv({
+      PATH: "/Users/test/.local/bin:/usr/bin",
+    });
     await harness.manager.ensureEnvironment({
       environmentId: "env-1",
       workspacePath: "/tmp/env-1",
@@ -164,12 +143,14 @@ describe("workspace command dispatch", () => {
         environmentId: "env-1",
         workspaceContext: {
           workspacePath: "/tmp/env-1",
-          workspaceProvisionType: "unmanaged",
         },
       },
       harness.dispatchOptions(),
     );
     expect(presentResult).toEqual({ outcome: "available", pullRequest });
+    expect(harness.workspaceState.pullRequestLookupShellPath).toBe(
+      "/Users/test/.local/bin:/usr/bin",
+    );
 
     harness.workspaceState.pullRequest = null;
     const absentResult = await dispatchOnlineRpcCommand(
@@ -178,15 +159,12 @@ describe("workspace command dispatch", () => {
         environmentId: "env-1",
         workspaceContext: {
           workspacePath: "/tmp/env-1",
-          workspaceProvisionType: "unmanaged",
         },
       },
       harness.dispatchOptions(),
     );
     expect(absentResult).toEqual({ outcome: "absent" });
 
-    // A failed gh lookup (missing binary, auth failure, timeout) must stay
-    // distinguishable from "checked and found no PR".
     harness.workspaceState.pullRequestLookupError =
       "gh pr view failed: authentication required";
     const unavailableResult = await dispatchOnlineRpcCommand(
@@ -195,7 +173,6 @@ describe("workspace command dispatch", () => {
         environmentId: "env-1",
         workspaceContext: {
           workspacePath: "/tmp/env-1",
-          workspaceProvisionType: "unmanaged",
         },
       },
       harness.dispatchOptions(),
@@ -235,7 +212,6 @@ describe("workspace command dispatch", () => {
         environmentId: "env-non-git-pr",
         workspaceContext: {
           workspacePath: "/tmp/non-git-pr-env",
-          workspaceProvisionType: "unmanaged",
         },
       },
       harness.dispatchOptions(),
@@ -246,6 +222,9 @@ describe("workspace command dispatch", () => {
 
   it("covers workspace.pull_request_action", async () => {
     const harness = createHarness({ isWorktree: true });
+    await harness.manager.replaceBaseShellEnv({
+      PATH: "/Users/test/.local/bin:/usr/bin",
+    });
     await harness.manager.ensureEnvironment({
       environmentId: "env-1",
       workspacePath: "/tmp/env-1",
@@ -259,7 +238,6 @@ describe("workspace command dispatch", () => {
           environmentId: "env-1",
           workspaceContext: {
             workspacePath: "/tmp/env-1",
-            workspaceProvisionType: "managed-worktree",
           },
         },
         harness.dispatchOptions(),
@@ -268,6 +246,9 @@ describe("workspace command dispatch", () => {
     expect(harness.workspaceState.lastPullRequestAction).toEqual({
       operation: "ready",
     });
+    expect(harness.workspaceState.pullRequestActionShellPath).toBe(
+      "/Users/test/.local/bin:/usr/bin",
+    );
 
     await expect(
       dispatchCommand(
@@ -277,7 +258,6 @@ describe("workspace command dispatch", () => {
           environmentId: "env-1",
           workspaceContext: {
             workspacePath: "/tmp/env-1",
-            workspaceProvisionType: "managed-worktree",
           },
         },
         harness.dispatchOptions(),
@@ -296,7 +276,6 @@ describe("workspace command dispatch", () => {
           environmentId: "env-1",
           workspaceContext: {
             workspacePath: "/tmp/env-1",
-            workspaceProvisionType: "managed-worktree",
           },
         },
         harness.dispatchOptions(),
@@ -319,7 +298,6 @@ describe("workspace command dispatch", () => {
         maxUntrackedLineStatBytes: 8 * 1024 * 1024,
         workspaceContext: {
           workspacePath: "/tmp/env-rehydrate",
-          workspaceProvisionType: "unmanaged",
         },
       },
       harness.dispatchOptions(),
@@ -332,7 +310,6 @@ describe("workspace command dispatch", () => {
     expect(result.workspaceStatus.workingTree.state).toBe("clean");
     expect(harness.provisions).toEqual([
       expect.objectContaining({
-        workspaceProvisionType: "unmanaged",
         path: "/tmp/env-rehydrate",
         signal: expect.any(AbortSignal),
       }),
@@ -355,7 +332,6 @@ describe("workspace command dispatch", () => {
         maxUntrackedLineStatBytes: 8 * 1024 * 1024,
         workspaceContext: {
           workspacePath: "/tmp/non-git-env",
-          workspaceProvisionType: "unmanaged",
         },
       },
       harness.dispatchOptions(),
@@ -366,7 +342,6 @@ describe("workspace command dispatch", () => {
         environmentId: "env-non-git",
         workspaceContext: {
           workspacePath: "/tmp/non-git-env",
-          workspaceProvisionType: "unmanaged",
         },
         target: { type: "uncommitted" },
         maxDiffBytes: 2 * 1024 * 1024,
@@ -401,6 +376,9 @@ describe("workspace command dispatch", () => {
         type: "host.list_files",
         path: tempDir,
         limit: 1000,
+        includeHidden: false,
+        respectGitIgnore: false,
+        excludeNames: [],
       },
       harness.dispatchOptions(),
     );
@@ -421,6 +399,9 @@ describe("workspace command dispatch", () => {
         type: "host.list_paths",
         path: tempDir,
         limit: 1000,
+        includeHidden: false,
+        respectGitIgnore: false,
+        excludeNames: [],
         includeFiles: true,
         includeDirectories: true,
       },
@@ -452,6 +433,9 @@ describe("workspace command dispatch", () => {
         type: "host.list_files",
         path: missingPath,
         limit: 1000,
+        includeHidden: false,
+        respectGitIgnore: false,
+        excludeNames: [],
       },
       harness.dispatchOptions(),
     );
@@ -470,6 +454,9 @@ describe("workspace command dispatch", () => {
         type: "host.list_paths",
         path: missingPath,
         limit: 1000,
+        includeHidden: false,
+        respectGitIgnore: false,
+        excludeNames: [],
         includeFiles: true,
         includeDirectories: true,
       },
@@ -496,6 +483,9 @@ describe("workspace command dispatch", () => {
           type: "host.list_files",
           path: symlinkRoot,
           limit: 1000,
+          includeHidden: false,
+          respectGitIgnore: false,
+          excludeNames: [],
         },
         harness.dispatchOptions(),
       ),
@@ -521,7 +511,9 @@ describe("workspace command dispatch", () => {
     );
 
     expect(result.path).toBe(filePath);
-    expect(result.content).toBe("durable thread notes");
+    expect("content" in result ? result.content : undefined).toBe(
+      "durable thread notes",
+    );
     expect(result.contentEncoding).toBe("utf8");
     expect(result.sizeBytes).toBe("durable thread notes".length);
   });
@@ -541,7 +533,9 @@ describe("workspace command dispatch", () => {
     );
 
     expect(result.path).toBe(filePath);
-    expect(result.content).toBe("explicit host notes");
+    expect("content" in result ? result.content : undefined).toBe(
+      "explicit host notes",
+    );
     expect(result.contentEncoding).toBe("utf8");
     expect(result.sizeBytes).toBe("explicit host notes".length);
   });
@@ -583,7 +577,9 @@ describe("workspace command dispatch", () => {
     );
 
     expect(result.path).toBe(imagePath);
-    expect(result.content).toBe(imageBytes.toString("base64"));
+    expect("content" in result ? result.content : undefined).toBe(
+      imageBytes.toString("base64"),
+    );
     expect(result.contentEncoding).toBe("base64");
     expect(result.mimeType).toBe("image/png");
     expect(result.sizeBytes).toBe(imageBytes.length);
@@ -919,7 +915,7 @@ describe("workspace command dispatch", () => {
 
     expect(result.mimeType).toBe("image/svg+xml");
     expect(result.contentEncoding).toBe("utf8");
-    expect(result.content).toBe(svg);
+    expect("content" in result ? result.content : undefined).toBe(svg);
   });
 
   it("falls back to base64 for declared text files whose bytes are not valid utf8", async () => {
@@ -940,6 +936,8 @@ describe("workspace command dispatch", () => {
 
     expect(result.mimeType).toBe("text/plain");
     expect(result.contentEncoding).toBe("base64");
-    expect(result.content).toBe(bytes.toString("base64"));
+    expect("content" in result ? result.content : undefined).toBe(
+      bytes.toString("base64"),
+    );
   });
 });

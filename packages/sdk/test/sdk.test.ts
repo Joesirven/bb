@@ -31,15 +31,19 @@ function makeEnvironment(overrides: EnvironmentOverrides = {}): Environment {
     projectId: "proj_test",
     hostId: "host_test",
     path: "/workspace",
-    managed: false,
     isGitRepo: true,
     isWorktree: false,
-    workspaceProvisionType: "unmanaged",
     baseBranch: null,
     branchName: null,
     defaultBranch: null,
     mergeBaseBranch: null,
     status: "ready",
+    environmentProviderId: null,
+    environmentProviderSelection: null,
+    environmentProviderInstanceKey: null,
+    lifecycle: { phase: "active", retireAt: null, teardown: null },
+    managed: false,
+    workspaceProvisionType: null,
     createdAt: 1,
     updatedAt: 2,
     ...overrides,
@@ -72,7 +76,6 @@ function bodyText(init: RequestInit | undefined): string | undefined {
 
 function jsonResponse(args: QueuedJsonResponse): Response {
   const status = args.status ?? 200;
-  // 204 is a null-body status; the Response constructor throws on a body.
   if (status === 204) {
     return new Response(null, { status });
   }
@@ -103,6 +106,129 @@ function createFetchQueue(
 }
 
 describe("@bb/sdk", () => {
+  it("creates a DigitalOcean machine through the SDK without a project", async () => {
+    const host = {
+      id: "host_do",
+      name: "Dev box",
+      type: "ephemeral",
+      status: "connected",
+      machineProviderId: "digitalocean",
+      lifecycle: {
+        phase: "active",
+        suspendedAt: null,
+
+        message: null,
+        teardown: null,
+      },
+      maxPermissionMode: "full",
+      lastSeenAt: 1,
+      lastRejectedProtocolVersion: null,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const creating = {
+      ...host,
+      status: "disconnected",
+      lifecycle: {
+        ...host.lifecycle,
+        phase: "creating",
+        message: "Creating DigitalOcean machine…",
+      },
+    };
+    const queue = createFetchQueue([{ body: creating }, { body: host }]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+    expect(
+      await sdk.hosts.experimental_create({
+        machineProviderId: "digitalocean",
+        inputs: {},
+      }),
+    ).toEqual(host);
+    expect(queue.requests).toEqual([
+      {
+        bodyText: JSON.stringify({
+          machineProviderId: "digitalocean",
+          inputs: {},
+        }),
+        method: "POST",
+        url: "http://bb.test/api/v1/hosts",
+      },
+      {
+        bodyText: undefined,
+        method: "GET",
+        url: "http://bb.test/api/v1/hosts/host_do",
+      },
+    ]);
+  });
+
+  it("requests a machine join code without a host type", async () => {
+    const queue = createFetchQueue([
+      { body: { joinCode: "one", hostId: "host_1", expiresAt: 1 } },
+    ]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+
+    await sdk.hosts.createJoinCode();
+
+    expect(queue.requests).toEqual([
+      {
+        bodyText: JSON.stringify({}),
+        method: "POST",
+        url: "http://bb.test/api/v1/hosts/join-codes",
+      },
+    ]);
+  });
+
+  it("reads provider installation events through the response instance", async () => {
+    const events = [
+      {
+        type: "started",
+        provider: "codex",
+        command: "npm install --global @openai/codex",
+      },
+      {
+        type: "completed",
+        provider: "codex",
+        exitCode: 0,
+        signal: null,
+        success: true,
+      },
+    ];
+    const response = new Response(null, {
+      status: 200,
+      headers: { "content-type": "application/x-ndjson" },
+    });
+    Object.defineProperty(response, "text", {
+      value: async () =>
+        events.map((event) => JSON.stringify(event)).join("\n"),
+    });
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: async () => response,
+        runtime: "node",
+      }),
+    });
+
+    await expect(
+      sdk.hosts.installProviderCli({
+        hostId: "host_test",
+        provider: "codex",
+        actionKind: "install",
+      }),
+    ).resolves.toEqual(events);
+  });
+
   it("sends thread pane presentation actions through the typed transport", async () => {
     const queue = createFetchQueue([{ body: { delivered: 3 } }]);
     const sdk = createBbSdk({
@@ -142,6 +268,34 @@ describe("@bb/sdk", () => {
     expect("on" in sdk).toBe(false);
   });
 
+  it("maps thread event filters and reverse pagination onto the public query", async () => {
+    const queue = createFetchQueue([{ body: [] }]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+
+    await expect(
+      sdk.threads.events.list({
+        beforeSeq: "10",
+        limit: "2",
+        order: "desc",
+        threadId: "thr_test",
+        types: ["system/error", "turn/completed"],
+      }),
+    ).resolves.toEqual([]);
+    expect(queue.requests).toEqual([
+      {
+        bodyText: undefined,
+        method: "GET",
+        url: "http://bb.test/api/v1/threads/thr_test/events?beforeSeq=10&limit=2&order=desc&types=system%2Ferror%2Cturn%2Fcompleted",
+      },
+    ]);
+  });
+
   it("forwards read abort signals to fetch", async () => {
     const controller = new AbortController();
     let receivedSignal: AbortSignal | null | undefined;
@@ -160,6 +314,29 @@ describe("@bb/sdk", () => {
     await expect(
       sdk.threads.list({ signal: controller.signal }),
     ).resolves.toEqual([]);
+    expect(receivedSignal).toBe(controller.signal);
+  });
+
+  it("forwards thread read action abort signals to fetch", async () => {
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | null | undefined;
+    const fetch: FetchImplementation = async (_input, init) => {
+      receivedSignal = init?.signal;
+      return jsonResponse({ body: {} });
+    };
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch,
+        runtime: "node",
+      }),
+    });
+
+    await sdk.threads.markRead({
+      signal: controller.signal,
+      threadId: "thr_test",
+    });
+
     expect(receivedSignal).toBe(controller.signal);
   });
 
@@ -262,6 +439,38 @@ describe("@bb/sdk", () => {
         bodyText: JSON.stringify({ themeId: "nord", faviconColor: "purple" }),
         method: "PUT",
         url: "http://bb.test/api/v1/settings/appearance",
+      },
+    ]);
+  });
+
+  it("resolves a theme by id without touching the active appearance", async () => {
+    const resolved = {
+      themeId: "plugin:pack:ocean",
+      customCss: ":root { --canvas: black; }",
+      faviconColor: "purple" as const,
+      resolvedCodeTheme: {
+        dark: "github-dark",
+        light: "github-light",
+        files: {},
+      },
+    };
+    const queue = createFetchQueue([{ body: resolved }]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+
+    await expect(
+      sdk.theme.resolve({ themeId: "plugin:pack:ocean" }),
+    ).resolves.toEqual(resolved);
+    expect(queue.requests).toEqual([
+      {
+        bodyText: undefined,
+        method: "GET",
+        url: "http://bb.test/api/v1/settings/themes/plugin:pack:ocean",
       },
     ]);
   });
@@ -527,7 +736,7 @@ describe("@bb/sdk", () => {
     });
 
     await expect(
-      sdk.providers.list({ hostId: "host_remote" }),
+      sdk.providers.list({ capability: "usage", hostId: "host_remote" }),
     ).resolves.toEqual([]);
     await expect(
       sdk.providers.models({
@@ -540,7 +749,7 @@ describe("@bb/sdk", () => {
       {
         bodyText: undefined,
         method: "GET",
-        url: "http://bb.test/api/v1/system/providers?hostId=host_remote",
+        url: "http://bb.test/api/v1/system/providers?capability=usage&hostId=host_remote",
       },
       {
         bodyText: undefined,
@@ -553,8 +762,8 @@ describe("@bb/sdk", () => {
   it("targets provider usage at an explicit machine", async () => {
     const usage = {
       codex: { status: "unauthenticated" as const },
-      claudeCode: { status: "unauthenticated" as const },
-      cursor: { status: "unauthenticated" as const },
+      "claude-code": { status: "unauthenticated" as const },
+      "acp-cursor": { status: "unauthenticated" as const },
     };
     const queue = createFetchQueue([{ body: usage }]);
     const sdk = createBbSdk({
@@ -566,20 +775,42 @@ describe("@bb/sdk", () => {
     });
 
     await expect(
-      sdk.system.usageLimits({ hostId: "host_remote" }),
+      sdk.system.usageLimits({
+        hostId: "host_remote",
+        providerId: "codex",
+      }),
     ).resolves.toEqual(usage);
     expect(queue.requests).toEqual([
       {
         bodyText: undefined,
         method: "GET",
-        url: "http://bb.test/api/v1/system/usage-limits?hostId=host_remote",
+        url: "http://bb.test/api/v1/system/usage-limits?hostId=host_remote&providerId=codex",
       },
     ]);
   });
 
-  it("routes onboarding agent status through a reused environment", async () => {
-    const overview = { agents: [] };
-    const queue = createFetchQueue([{ body: overview }]);
+  it("lists environment providers as an array for a project and machine", async () => {
+    const providers = [
+      {
+        id: "project-checkout",
+        displayName: "Project checkout",
+        description: "Prepare a workspace for this thread.",
+        icon: "Folder",
+        logoUrl: null,
+        pluginId: "environment-project-checkout",
+        requires: {
+          projectCheckout: true,
+          gitCheckout: false,
+          gitRemote: false,
+          projectless: false,
+        },
+        inputs: null,
+        acceptsEmptyInputs: true,
+        machineAvailability: {},
+        availability: { status: "available" as const },
+      },
+    ];
+    const queue = createFetchQueue([{ body: { providers } }]);
     const sdk = createBbSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
@@ -589,13 +820,39 @@ describe("@bb/sdk", () => {
     });
 
     await expect(
-      sdk.system.onboardingAgents({ environmentId: "env_remote" }),
-    ).resolves.toEqual(overview);
+      sdk.environments.listProviders({
+        projectId: "proj_test",
+        hostId: "host_test",
+      }),
+    ).resolves.toEqual(providers);
     expect(queue.requests).toEqual([
       {
         bodyText: undefined,
         method: "GET",
-        url: "http://bb.test/api/v1/system/onboarding/agents?environmentId=env_remote",
+        url: "http://bb.test/api/v1/system/environment-providers?projectId=proj_test&hostId=host_test",
+      },
+    ]);
+  });
+
+  it("routes onboarding agent status through a reused environment", async () => {
+    const states = { providers: [] };
+    const queue = createFetchQueue([{ body: states }]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+
+    await expect(
+      sdk.system.providerStates({ environmentId: "env_remote" }),
+    ).resolves.toEqual(states);
+    expect(queue.requests).toEqual([
+      {
+        bodyText: undefined,
+        method: "GET",
+        url: "http://bb.test/api/v1/system/providers/state?environmentId=env_remote",
       },
     ]);
   });
@@ -987,7 +1244,7 @@ describe("@bb/sdk", () => {
     );
   });
 
-  it("fills thread fork defaults and preserves an agent-only context seed", async () => {
+  it("defaults thread forks to source-environment reuse and preserves an agent-only context seed", async () => {
     const queue = createFetchQueue([{ body: { id: "thr_fork" }, status: 201 }]);
     const sdk = createBbSdk({
       transport: createHttpTransport({
@@ -1025,7 +1282,6 @@ describe("@bb/sdk", () => {
       ],
       origin: "sdk",
       visibility: "visible",
-      workspace: "isolated",
     });
   });
 
@@ -1059,7 +1315,7 @@ describe("@bb/sdk", () => {
   it("forwards every public permission mode through thread surfaces", async () => {
     const queue = createFetchQueue([
       { body: { id: "thr_auto" }, status: 201 },
-      { body: null, status: 204 },
+      { body: { ok: true, delivery: "sent" } },
       { body: { id: "qmsg_full" }, status: 201 },
     ]);
     const sdk = createBbSdk({
@@ -1085,6 +1341,10 @@ describe("@bb/sdk", () => {
       input: [{ type: "text", text: "Accept edits", mentions: [] }],
       mode: "start",
       permissionMode: "accept-edits",
+      pluginSubmission: {
+        pluginId: "example-plugin",
+        data: { action: "hold" },
+      },
     });
     await sdk.threads.queuedMessages.create({
       threadId: "thr_auto",
@@ -1096,7 +1356,13 @@ describe("@bb/sdk", () => {
       queue.requests.map((request) => JSON.parse(request.bodyText ?? "{}")),
     ).toEqual([
       expect.objectContaining({ permissionMode: "auto" }),
-      expect.objectContaining({ permissionMode: "accept-edits" }),
+      expect.objectContaining({
+        permissionMode: "accept-edits",
+        pluginSubmission: {
+          pluginId: "example-plugin",
+          data: { action: "hold" },
+        },
+      }),
       expect.objectContaining({ permissionMode: "full" }),
     ]);
   });
@@ -1227,6 +1493,168 @@ describe("@bb/sdk", () => {
     });
   });
 
+  // The queue list is cross-thread by design: an omitted filter drops out of
+  // the query string entirely rather than narrowing on `undefined`.
+  it("routes queued-row reads onto the cross-thread queue route and a row's own operations onto its thread", async () => {
+    const queue = createFetchQueue([
+      { body: [] },
+      { body: { ok: true, delivery: "sent" } },
+      { body: null, status: 204 },
+    ]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+
+    await sdk.threads.queue.list();
+    await sdk.threads.queuedMessages.send({
+      threadId: "thr_123",
+      queuedMessageId: "qm_1",
+      mode: "auto",
+    });
+    await sdk.threads.queuedMessages.delete({
+      threadId: "thr_123",
+      queuedMessageId: "qm_1",
+    });
+
+    expect(
+      queue.requests.map((request) => `${request.method} ${request.url}`),
+    ).toEqual([
+      "GET http://bb.test/api/v1/queued-messages?",
+      "POST http://bb.test/api/v1/threads/thr_123/queued-messages/qm_1/send",
+      "DELETE http://bb.test/api/v1/threads/thr_123/queued-messages/qm_1",
+    ]);
+    expect(queue.requests[1].bodyText).toBe(JSON.stringify({ mode: "auto" }));
+  });
+
+  it("applies both queue list filters and queues a scheduled send on the queue", async () => {
+    const queue = createFetchQueue([
+      { body: [] },
+      {
+        body: {
+          ok: true,
+          delivery: "queued",
+          queuedMessage: {
+            id: "qm_1",
+            waitingOn: { kind: "time" },
+            sendAt: 1750,
+          },
+        },
+      },
+    ]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+
+    await sdk.threads.queue.list({
+      threadId: "thr_123",
+      waitHolder: "plugin:concurrency-limit",
+    });
+    await expect(
+      sdk.threads.send({
+        threadId: "thr_123",
+        input: [{ type: "text", text: "later", mentions: [] }],
+        mode: "auto",
+        sendAt: 1750,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      delivery: "queued",
+      queuedMessage: {
+        id: "qm_1",
+        waitingOn: { kind: "time" },
+        sendAt: 1750,
+      },
+    });
+
+    expect(queue.requests[0].url).toBe(
+      "http://bb.test/api/v1/queued-messages?threadId=thr_123&waitHolder=plugin%3Aconcurrency-limit",
+    );
+    expect(queue.requests[1].bodyText).toBe(
+      JSON.stringify({
+        input: [{ type: "text", text: "later", mentions: [] }],
+        mode: "auto",
+        sendAt: 1750,
+      }),
+    );
+  });
+
+  // A limiter gate counts on every dispatch, so an omitted filter must drop out
+  // of the query string rather than narrow the count on the string "undefined".
+  it("counts threads over the grouped count route with only the given filters", async () => {
+    const queue = createFetchQueue([
+      { body: { total: 4 } },
+      {
+        body: {
+          total: 4,
+          groups: [
+            { key: "host_a", count: 3 },
+            { key: null, count: 1 },
+          ],
+        },
+      },
+    ]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+
+    await expect(sdk.threads.count()).resolves.toEqual({ total: 4 });
+    await expect(
+      sdk.threads.count({
+        status: "active",
+        hostId: "host_a",
+        providerId: "codex",
+        projectId: "proj_123",
+        // The root-parent sentinel: "threads with no parent at all".
+        parentThreadId: "none",
+        groupBy: "host",
+      }),
+    ).resolves.toEqual({
+      total: 4,
+      groups: [
+        { key: "host_a", count: 3 },
+        { key: null, count: 1 },
+      ],
+    });
+
+    expect(queue.requests[0].url).toBe("http://bb.test/api/v1/threads/count?");
+    expect(queue.requests[1].url).toBe(
+      "http://bb.test/api/v1/threads/count?status=active&hostId=host_a&providerId=codex&projectId=proj_123&parentThreadId=none&groupBy=host",
+    );
+  });
+
+  it("lists the running threads over the running route with no query", async () => {
+    const rows = [
+      { id: "thr_a", hostId: "host_a" },
+      // Admitted but not yet placed: counts globally, on no host's pool.
+      { id: "thr_b", hostId: null },
+    ];
+    const queue = createFetchQueue([{ body: rows }]);
+    const sdk = createBbSdk({
+      transport: createHttpTransport({
+        baseUrl: "http://bb.test",
+        fetch: queue.fetch,
+        runtime: "node",
+      }),
+    });
+
+    await expect(sdk.threads.listRunning()).resolves.toEqual(rows);
+    // No filters at all: the occupying set is small, and a caller that needs
+    // more than "which ids, on which hosts" fetches the threads it named.
+    expect(queue.requests[0].url).toBe("http://bb.test/api/v1/threads/running");
+  });
+
   it("exposes thread section mutations", async () => {
     const queue = createFetchQueue([
       {
@@ -1304,6 +1732,8 @@ describe("@bb/sdk", () => {
       enabled: true,
       description: "Notes",
       name: "Notes",
+      screenshots: [],
+      collections: [],
       icon: null,
       iconUrl: null,
       status: "running" as const,
@@ -1317,6 +1747,8 @@ describe("@bb/sdk", () => {
       app: { hasApp: false, bundle: null },
       logoUrl: null,
       logoDarkUrl: null,
+      providerIds: [],
+      icons: {},
     };
     const catalog = {
       pluginCount: 1,
@@ -1377,6 +1809,13 @@ describe("@bb/sdk", () => {
               incompatibleReason: null,
             },
           ],
+          collections: [
+            {
+              id: "featured",
+              displayName: "Featured",
+              pluginIds: ["notes"],
+            },
+          ],
         },
       },
     ]);
@@ -1410,9 +1849,16 @@ describe("@bb/sdk", () => {
     await expect(sdk.plugins.catalog.status()).resolves.toEqual(catalog);
     await expect(
       sdk.plugins.catalog.search({ query: "notes" }),
-    ).resolves.toMatchObject([
-      { entryId: "notes", pluginId: "notes", compatible: true },
-    ]);
+    ).resolves.toMatchObject({
+      results: [{ entryId: "notes", pluginId: "notes", compatible: true }],
+      collections: [
+        {
+          id: "featured",
+          displayName: "Featured",
+          pluginIds: ["notes"],
+        },
+      ],
+    });
     expect(queue.requests).toEqual([
       {
         bodyText: undefined,
@@ -1422,7 +1868,6 @@ describe("@bb/sdk", () => {
       {
         bodyText: JSON.stringify({
           source: "npm:@bb/notes@^1",
-          selection: { kind: "root" },
         }),
         method: "POST",
         url: "http://bb.test/api/v1/plugins/install",

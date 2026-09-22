@@ -7,6 +7,7 @@ on:
     paths:
       - "apps/web/**"
       - "packages/connect-db/**"
+      - "changelog-parser.ts"
   workflow_dispatch:
 
 env:
@@ -28,7 +29,7 @@ concurrency:
 jobs:
   deploy:
     name: Deploy getbb.app site to Cloudflare Workers
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:

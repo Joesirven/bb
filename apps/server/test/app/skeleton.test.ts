@@ -62,7 +62,11 @@ describe("server skeleton", () => {
     const harness = await createTestAppHarness();
     const { app } = createApp(harness.deps, {
       bbAppArtifactService: {
-        getTarballPath: async () => "/unused",
+        getArtifact: async () => ({
+          digest: "a".repeat(64),
+          path: "/unused",
+          size: 0,
+        }),
         getVersion: async () => "3.2.1-test",
       },
     });
@@ -82,19 +86,47 @@ describe("server skeleton", () => {
     const harness = await createTestAppHarness();
     const tarballPath = join(harness.config.dataDir, "fixture.tgz");
     writeFileSync(tarballPath, "tarball-bytes");
-    const getTarballPath = vi.fn(async () => tarballPath);
+    const digest = "b".repeat(64);
+    const getArtifact = vi.fn(async () => ({
+      digest,
+      path: tarballPath,
+      size: 13,
+    }));
     const { app } = createApp(harness.deps, {
-      bbAppArtifactService: { getTarballPath, getVersion: async () => "test" },
+      bbAppArtifactService: { getArtifact, getVersion: async () => "test" },
     });
     try {
       const response = await app.request("/install/bb-app.tgz");
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe("application/gzip");
+      expect(response.headers.get("etag")).toBe(`"sha256-${digest}"`);
+      expect(response.headers.get("x-bb-artifact-sha256")).toBe(digest);
       expect(await response.text()).toBe("tarball-bytes");
-      expect(getTarballPath).toHaveBeenCalledOnce();
+      const unchanged = await app.request("/install/bb-app.tgz", {
+        headers: { "if-none-match": `"sha256-${digest}"` },
+      });
+      expect(unchanged.status).toBe(304);
+      expect(await unchanged.text()).toBe("");
+      expect(getArtifact).toHaveBeenCalledTimes(2);
     } finally {
       await harness.cleanup();
     }
+  });
+
+  it("echoes the launcher's launch id on /health only when one was given", async () => {
+    await withTestHarness({ launchId: "launch-123" }, async (harness) => {
+      const response = await harness.app.request("/health");
+      expect(response.status).toBe(200);
+      await expect(readJson(response)).resolves.toEqual({
+        ok: true,
+        launchId: "launch-123",
+      });
+    });
+    await withTestHarness(async (harness) => {
+      await expect(
+        readJson(await harness.app.request("/health")),
+      ).resolves.toEqual({ ok: true });
+    });
   });
 
   it("serves public routes without auth", async () => {
@@ -116,10 +148,10 @@ describe("server skeleton", () => {
           hostId: "host-1",
           instanceId: "instance-1",
           hostName: "Host",
-          hostType: "persistent",
           hasMachineCredential: false,
           platform: "darwin",
           dataDir: "/tmp/host-data",
+          localApiPort: null,
           protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
           activeThreads: [],
         }),

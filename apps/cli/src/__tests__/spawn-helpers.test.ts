@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS } from "@bb/sdk";
 import {
   buildSpawnEnvironment,
   looksLikePath,
   requireHostId,
 } from "../commands/thread/spawn.js";
 import {
-  DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS,
   DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS,
-  parseThreadWaitTimeoutSeconds,
+  parseThreadWaitTimeoutMs,
   parseThreadWaitPollIntervalMs,
   parseServiceTier,
   parsePermissionMode,
@@ -16,13 +16,13 @@ import {
 const acceptedParserCases = [
   {
     label: "wait timeout default",
-    parse: () => parseThreadWaitTimeoutSeconds(undefined),
-    expected: DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS,
+    parse: () => parseThreadWaitTimeoutMs(undefined),
+    expected: DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS * 1000,
   },
   {
     label: "decimal wait timeout",
-    parse: () => parseThreadWaitTimeoutSeconds("1.5"),
-    expected: 1.5,
+    parse: () => parseThreadWaitTimeoutMs("1.5"),
+    expected: 1500,
   },
   {
     label: "poll interval default",
@@ -97,7 +97,7 @@ describe("requireHostId", () => {
 describe("buildSpawnEnvironment", () => {
   const HOST_ID = "test-host-id";
 
-  it("returns unmanaged host with null path when no flags are provided", () => {
+  it("returns unmanaged host with null path when a host is explicit", () => {
     const result = buildSpawnEnvironment({
       defaultPersonalWorkspace: false,
       hostId: HOST_ID,
@@ -109,15 +109,12 @@ describe("buildSpawnEnvironment", () => {
     });
   });
 
-  it("returns personal workspace when personal project defaults are active", () => {
+  it("returns project-default when no environment flags are provided", () => {
     const result = buildSpawnEnvironment({
       defaultPersonalWorkspace: true,
       hostId: null,
     });
-    expect(result).toEqual({
-      type: "host",
-      workspace: { type: "personal" },
-    });
+    expect(result).toEqual({ type: "project-default" });
   });
 
   it("throws for unsupported managed environment kinds", () => {
@@ -143,6 +140,19 @@ describe("buildSpawnEnvironment", () => {
         type: "managed-worktree",
         baseBranch: { kind: "default" },
       },
+    });
+  });
+
+  it("returns personal for --new-environment personal with host", () => {
+    const result = buildSpawnEnvironment({
+      defaultPersonalWorkspace: false,
+      newEnvironmentKind: "personal",
+      hostId: HOST_ID,
+    });
+    expect(result).toEqual({
+      type: "host",
+      hostId: HOST_ID,
+      workspace: { type: "personal" },
     });
   });
 
@@ -259,30 +269,41 @@ describe("buildSpawnEnvironment", () => {
   });
 });
 
-describe("parseThreadWaitTimeoutSeconds", () => {
-  it("throws for negative numbers", () => {
-    expect(() => parseThreadWaitTimeoutSeconds("-1")).toThrow(
-      "non-negative number",
-    );
+describe("parseThreadWaitTimeoutMs", () => {
+  it("reads a unit suffix instead of truncating it to the leading number", () => {
+    expect(parseThreadWaitTimeoutMs("4h")).toBe(4 * 60 * 60 * 1000);
+    expect(parseThreadWaitTimeoutMs("420s")).toBe(420_000);
+    expect(parseThreadWaitTimeoutMs("1500ms")).toBe(1500);
   });
 
-  it("throws for non-numeric strings", () => {
-    expect(() => parseThreadWaitTimeoutSeconds("abc")).toThrow(
-      "non-negative number",
-    );
+  it("keeps a bare number as seconds and allows zero", () => {
+    expect(parseThreadWaitTimeoutMs("590")).toBe(590_000);
+    expect(parseThreadWaitTimeoutMs("0")).toBe(0);
+  });
+
+  it("rejects negative numbers, words, and unknown units", () => {
+    for (const value of ["-1", "abc", "4hours", "1h30m", ""]) {
+      expect(() => parseThreadWaitTimeoutMs(value)).toThrow(
+        `Invalid --timeout value '${value}'. Expected a number of seconds or a duration with a unit (500ms, 90s, 5m, 2h).`,
+      );
+    }
   });
 });
 
 describe("parseThreadWaitPollIntervalMs", () => {
+  it("keeps a bare number as milliseconds", () => {
+    expect(parseThreadWaitPollIntervalMs("2s")).toBe(2000);
+  });
+
   it("throws for zero", () => {
     expect(() => parseThreadWaitPollIntervalMs("0")).toThrow(
-      "positive integer",
+      "--poll-interval must be greater than zero.",
     );
   });
 
   it("throws for negative numbers", () => {
     expect(() => parseThreadWaitPollIntervalMs("-100")).toThrow(
-      "positive integer",
+      "Invalid --poll-interval value '-100'",
     );
   });
 });

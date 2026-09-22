@@ -1,14 +1,10 @@
+import { sweepProviderLifecycles } from "../../../apps/server/src/services/environments/environment-engine.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
-import {
-  createAgentRuntimeWithAdapters,
-  createFakeAdapter,
-  type ProviderAdapterFactory,
-} from "@bb/agent-runtime/test";
 import type { DbConnection } from "@bb/db";
 import { defaultFeatureFlags } from "@bb/domain";
 import {
@@ -19,14 +15,16 @@ import {
   type HostDaemon,
   type HostDaemonApp,
 } from "@bb/host-daemon/test";
-import { createHostDaemonClient } from "@bb/host-daemon-contract";
 import { initDb } from "../../../apps/server/src/db.js";
 import { createLifecycleDedupers } from "../../../apps/server/src/lifecycle-dedupers.js";
 import { createApp } from "../../../apps/server/src/server.js";
+import { createAiServiceRegistry } from "../../../apps/server/src/services/ai/ai-service-registry.js";
 import { PendingInteractionLifecycle } from "../../../apps/server/src/services/interactions/pending-interactions.js";
 import { createMachineAuthService } from "../../../apps/server/src/services/machine-auth.js";
-import { createProviderRegistryService } from "../../../apps/server/src/services/providers/provider-registry.js";
-import { resolveAcpAgentCapabilitiesForProviderId } from "../../../apps/server/src/services/system/acp-launch-spec.js";
+import {
+  createProviderRegistryService,
+  type ProviderRegistryService,
+} from "../../../apps/server/src/services/providers/provider-registry.js";
 import {
   recordFirstPartyProviderBridgeArtifacts,
   registerFakeProviders,
@@ -39,6 +37,7 @@ import {
 import { SkillTreeRegistry } from "../../../apps/server/src/services/skills/injected-skills.js";
 import { PluginHostArtifactRegistry } from "../../../apps/server/src/services/plugins/plugin-host-artifact-registry.js";
 import { createAppVersionService } from "../../../apps/server/src/services/system/app-version.js";
+import { createProviderNativeRootsCache } from "../../../apps/server/src/services/providers/native-roots.js";
 import { createBbAppManagedConfigReloader } from "../../../apps/server/src/services/system/bb-app-managed-config.js";
 import { createNoopTelemetryService } from "../../../apps/server/src/services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "../../../apps/server/src/services/terminals/terminal-session-lifecycle.js";
@@ -49,10 +48,12 @@ import type {
 import { HostSharedPortCoordinator } from "../../../apps/server/src/ws/host-shared-ports.js";
 import { NotificationHub } from "../../../apps/server/src/ws/hub.js";
 import { WatchInterestCoordinator } from "../../../apps/server/src/ws/watch-interests.js";
+import { WorkspaceReadCaches } from "../../../apps/server/src/services/environments/workspace-read-cache.js";
 import { createPublicApiClient } from "@bb/server-contract";
+import { resolveProjectEnvCandidates } from "@bb/test-helpers";
 import { waitForHostConnected } from "./assertions.js";
 import { createIntegrationFetch } from "./fetch.js";
-import { removePathWithRetry } from "./remove-path.js";
+import { isNodeError, removePathWithRetry } from "./remove-path.js";
 import { createTestGitRepo } from "./seed.js";
 
 const repoRoot = path.resolve(
@@ -66,7 +67,6 @@ const TEST_SERVER_HOST = "127.0.0.1";
 let loadedProjectEnvPath: string | null | undefined;
 
 type PublicApiClient = ReturnType<typeof createPublicApiClient>;
-type InternalHostDaemonClient = ReturnType<typeof createHostDaemonClient>;
 
 const testLogger: ServerLogger = {
   debug(): void {},
@@ -76,36 +76,39 @@ const testLogger: ServerLogger = {
 };
 
 export interface RunningTestServer {
+  sweepEnvironments(): Promise<void>;
   baseUrl: string;
   close(): Promise<void>;
   config: ServerRuntimeConfig;
   db: DbConnection;
   hub: NotificationHub;
   machineAuth: Awaited<ReturnType<typeof createMachineAuthService>>;
+  providerRegistry: ProviderRegistryService;
 }
 
 export interface IntegrationHarness {
   api: PublicApiClient;
   cleanup(): Promise<void>;
   crashDaemon(): Promise<void>;
-  daemon: HostDaemon;
   daemonApp: HostDaemonApp;
-  daemonDataDir: string;
   db: DbConnection;
   hostId: string;
   hub: NotificationHub;
-  internal: InternalHostDaemonClient;
   repoDir: string;
   restartDaemon(reason?: string): Promise<void>;
   server: RunningTestServer;
   serverUrl: string;
   shutdownDaemon(reason?: string): Promise<void>;
   startDaemon(): Promise<void>;
-  threadStorageRootPath: string;
 }
 
-export interface CreateHarnessOptions {
-  adapterFactory?: ProviderAdapterFactory;
+export const PROJECT_CHECKOUT_BUILTIN_PLUGIN = "environment-project-checkout";
+
+interface CreateHarnessOptions {
+  serverPort?: number;
+  bindHost?: "127.0.0.1" | "0.0.0.0";
+  staticDir?: string;
+  builtinPlugins?: readonly string[];
 }
 
 export type WithHarnessCallback<T> = (
@@ -117,7 +120,6 @@ interface HarnessDaemonResources {
   daemon: HostDaemon;
   daemonApp: HostDaemonApp;
   hostId: string;
-  hostKey: string;
   releaseLock: () => Promise<void>;
 }
 
@@ -134,23 +136,6 @@ function requireListeningAddress(
   return address;
 }
 
-function hasAdapterFactoryOverride(options: CreateHarnessOptions): boolean {
-  return Object.prototype.hasOwnProperty.call(options, "adapterFactory");
-}
-
-function resolveAdapterFactory(
-  options: CreateHarnessOptions,
-): ProviderAdapterFactory | undefined {
-  if (hasAdapterFactoryOverride(options)) {
-    return options.adapterFactory;
-  }
-  return () => createFakeAdapter();
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error;
-}
-
 function isRetryableSessionOpenFailure(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -158,41 +143,12 @@ function isRetryableSessionOpenFailure(error: unknown): boolean {
   );
 }
 
-async function resolveProjectEnvCandidates(): Promise<string[]> {
-  const candidates = new Set<string>([path.join(repoRoot, ".env")]);
-  const gitMetadataPath = path.join(repoRoot, ".git");
-
-  try {
-    const gitMetadata = await fs.stat(gitMetadataPath);
-    if (!gitMetadata.isFile()) {
-      return [...candidates];
-    }
-
-    const gitdirPointer = await fs.readFile(gitMetadataPath, "utf8");
-    const match = /^gitdir:\s*(.+)\s*$/m.exec(gitdirPointer);
-    if (!match?.[1]) {
-      return [...candidates];
-    }
-
-    const worktreeGitDir = path.resolve(repoRoot, match[1]);
-    const commonGitDir = path.dirname(path.dirname(worktreeGitDir));
-    candidates.add(path.join(path.dirname(commonGitDir), ".env"));
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") {
-      return [...candidates];
-    }
-    throw error;
-  }
-
-  return [...candidates];
-}
-
 export async function loadProjectEnvFile(): Promise<string | null> {
   if (loadedProjectEnvPath !== undefined) {
     return loadedProjectEnvPath;
   }
 
-  for (const candidate of await resolveProjectEnvCandidates()) {
+  for (const candidate of await resolveProjectEnvCandidates(repoRoot)) {
     try {
       await fs.access(candidate);
       process.loadEnvFile(candidate);
@@ -212,7 +168,6 @@ export async function loadProjectEnvFile(): Promise<string | null> {
 
 async function startIntegrationServer(
   tmpRoot: string,
-  threadStorageRootPath: string,
   options: CreateHarnessOptions,
 ): Promise<RunningTestServer> {
   const serverDataDir = path.join(tmpRoot, "server-data");
@@ -227,11 +182,10 @@ async function startIntegrationServer(
   const hub = new NotificationHub();
   const sharedPorts = new HostSharedPortCoordinator({ db, hub });
   const watchInterests = new WatchInterestCoordinator({ db, hub });
+  const workspaceReadCaches = new WorkspaceReadCaches({ hub });
   const config: ServerRuntimeConfig = {
-    appSurface: "web",
     appVersion: "0.0.0-dev",
     builtinSkillsRootPath,
-    customAcpAgents: [],
     customModels: [],
     dataDir: serverDataDir,
     featureFlags: defaultFeatureFlags,
@@ -239,21 +193,13 @@ async function startIntegrationServer(
     inferenceFallbackModel: "test/mock-fallback-model",
     inferenceModel: "test/mock-model",
     inheritedSkillsRootPaths: [],
-    // Integration tests never refresh the catalog; an unroutable host keeps
-    // an accidental refresh off the network.
     marketplaceUrl: "https://marketplace.invalid/marketplace.json",
     openAiApiKey: process.env.OPENAI_API_KEY ?? "test-openai-key",
     appUrl: "https://bb.example.test",
     serverPort: 0,
     sharedSkillRoots: { user: [], project: [] },
-    threadStorageRootPath,
     transcriptionModel: "test/mock-transcription",
     isDevelopment: false,
-    // The integration harness runs no periodic sweep and has no time control, so
-    // the archive grace window is disabled here: archiving the last live thread
-    // tears down its workspace immediately, as these tests expect. The grace
-    // window itself is covered by the server-level cleanup tests.
-    managedEnvironmentRetireGraceMs: 0,
   };
   const terminalSessions = new TerminalSessionLifecycle({
     attachTimeoutMs: 50,
@@ -277,26 +223,12 @@ async function startIntegrationServer(
   });
   const telemetry = createNoopTelemetryService();
   const skillTreeRegistry = new SkillTreeRegistry();
-  const providerRegistry = createProviderRegistryService({
-    resolveAcpAgentCapabilities: (providerId) =>
-      resolveAcpAgentCapabilitiesForProviderId({ config }, providerId),
-  });
-  // Providers come only from plugin declarations. This harness runs no plugin
-  // service, so it registers the first-party declarations directly, exactly as
-  // their plugins would.
+  const providerRegistry = createProviderRegistryService({});
   await registerFirstPartyProviders(providerRegistry);
   const pluginHostArtifacts = new PluginHostArtifactRegistry();
-  // The fake providers these tests drive are declarations too: every
-  // bridge-bound command carries a `bridgeLaunch`, so a provider with no
-  // declaration and no artifact cannot have a command built for it at all. The
-  // daemon side runs a fake adapter and never reads the launch.
-  registerFakeProviders(providerRegistry, pluginHostArtifacts);
-  // Every first-party bridge except Pi's ships as a plugin artifact, and the
-  // daemon has no bridge for those providers without one on the wire. The
-  // dynamic ACP tier depends on it most: `acp-<slug>` ids are never
-  // registered, so the ACP plugin's artifact is the only thing that launches
-  // a configured agent.
+  await registerFakeProviders(providerRegistry, pluginHostArtifacts);
   await recordFirstPartyProviderBridgeArtifacts(pluginHostArtifacts);
+  const aiServices = createAiServiceRegistry();
   const pendingInteractions = new PendingInteractionLifecycle({
     config,
     db,
@@ -306,6 +238,7 @@ async function startIntegrationServer(
     machineAuth,
     providerRegistry,
     pluginHostArtifacts,
+    aiServices,
     skillTreeRegistry,
     telemetry,
     terminalSessions,
@@ -315,11 +248,13 @@ async function startIntegrationServer(
     config,
     logger: testLogger,
   });
-  const { app, injectWebSocket } = createApp({
+  const serverDeps = {
     appVersion,
     bbAppManagedConfig,
     providerRegistry,
+    providerNativeRoots: createProviderNativeRootsCache(),
     pluginHostArtifacts,
+    aiServices,
     config,
     db,
     hub,
@@ -332,17 +267,20 @@ async function startIntegrationServer(
     telemetry,
     terminalSessions,
     watchInterests,
-  });
+    workspaceReadCaches,
+  };
+  const { app, injectWebSocket, pluginService } = createApp(
+    serverDeps,
+    options.staticDir === undefined
+      ? undefined
+      : { staticDir: options.staticDir },
+  );
 
   let addressInfo: ListeningAddress | null = null;
   const server = serve(
     {
-      // The client always connects to 127.0.0.1, so bind the test server to
-      // 127.0.0.1 too. If we leave the host unspecified, this server can end
-      // up on ::1 while another local process owns 127.0.0.1 on the same
-      // port, and the client will hit that other process instead.
-      hostname: TEST_SERVER_HOST,
-      port: 0,
+      hostname: options.bindHost ?? TEST_SERVER_HOST,
+      port: options.serverPort ?? 0,
       fetch: app.fetch,
     },
     (info) => {
@@ -359,12 +297,30 @@ async function startIntegrationServer(
   config.serverPort = port;
   const baseUrl = `http://${TEST_SERVER_HOST}:${port}`;
 
+  pluginService.bindSdk({ baseUrl });
+  const builtinPlugins = new Set([
+    PROJECT_CHECKOUT_BUILTIN_PLUGIN,
+    ...(options.builtinPlugins ?? []),
+  ]);
+  for (const name of builtinPlugins) {
+    const entry = await pluginService.install(`builtin:${name}`, {
+      kind: "root",
+    });
+    if (entry.status !== "running") {
+      throw new Error(
+        `builtin plugin ${name} did not start: ${entry.statusDetail ?? entry.status}`,
+      );
+    }
+  }
+
   return {
+    sweepEnvironments: () => sweepProviderLifecycles(serverDeps),
     baseUrl,
     config,
     db,
     hub,
     machineAuth,
+    providerRegistry,
     async close(): Promise<void> {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -382,8 +338,6 @@ async function startIntegrationServer(
 async function startHarnessDaemon(
   dataDir: string,
   server: RunningTestServer,
-  threadStorageRootPath: string,
-  options: CreateHarnessOptions,
 ): Promise<HarnessDaemonResources> {
   const releaseLock = await acquireDaemonLock(dataDir);
 
@@ -391,32 +345,18 @@ async function startHarnessDaemon(
     const identity = await loadHostIdentity({ dataDir });
     const hostKey = await server.machineAuth.issueDaemonHostKey({
       hostId: identity.hostId,
-      hostType: "persistent",
     });
-    // The harness issues an in-memory host key instead of running persistent
-    // enrollment. Once that succeeds, persist the generated host ID so daemon
-    // restarts stay attached to the same host.
     await persistHostId({ dataDir, hostId: identity.hostId });
-    const adapterFactory = resolveAdapterFactory(options);
     const daemonApp = await createHostDaemonApp({
-      createRuntime: adapterFactory
-        ? (runtimeOptions) =>
-            createAgentRuntimeWithAdapters({
-              ...runtimeOptions,
-              adapterFactory,
-            })
-        : undefined,
       dataDir,
       hostKey,
       hostId: identity.hostId,
       hostName: identity.hostName,
-      hostType: "persistent",
       instanceId: randomUUID(),
       localApiConfig: null,
       logger: testLogger,
       releaseLock,
       serverUrl: server.baseUrl,
-      threadStorageRootPath,
     });
     for (
       let attempt = 1;
@@ -442,7 +382,6 @@ async function startHarnessDaemon(
       daemon: daemonApp.daemon,
       daemonApp,
       hostId: identity.hostId,
-      hostKey,
       releaseLock,
     };
   } catch (error) {
@@ -485,29 +424,19 @@ export async function createIntegrationHarness(
       return;
     }
 
-    daemonResources = await startHarnessDaemon(
-      daemonDataDir,
-      server,
-      threadStorageRootPath,
-      options,
-    );
+    daemonResources = await startHarnessDaemon(daemonDataDir, server);
     if (daemonResources.hostId !== harness.hostId) {
       const mismatchedResources = daemonResources;
       daemonResources = null;
       await mismatchedResources.daemon
-        .shutdown("integration-host-id-mismatch")
+        .shutdown("integration-host-id-mismatch", 0)
         .catch(() => undefined);
       throw new Error(
         `Restarted daemon host ID ${mismatchedResources.hostId} did not match existing harness host ID ${harness.hostId}`,
       );
     }
-    harness.daemon = daemonResources.daemon;
     harness.daemonApp = daemonResources.daemonApp;
     harness.hostId = daemonResources.hostId;
-    harness.internal = createHostDaemonClient(
-      server.baseUrl,
-      daemonResources.hostKey,
-    );
     await waitForHostConnected(harness.api);
   }
 
@@ -519,7 +448,7 @@ export async function createIntegrationHarness(
     }
     const currentResources = daemonResources;
     daemonResources = null;
-    await currentResources.daemon.shutdown(reason);
+    await currentResources.daemon.shutdown(reason, 0);
   }
 
   async function restartDaemon(reason = "integration-restart"): Promise<void> {
@@ -556,40 +485,31 @@ export async function createIntegrationHarness(
   }
 
   try {
-    server = await startIntegrationServer(
-      tmpRoot,
-      threadStorageRootPath,
-      options,
-    );
+    server = await startIntegrationServer(tmpRoot, options);
     const api = createPublicApiClient(server.baseUrl, {
       fetch: createIntegrationFetch(),
     });
-    daemonResources = await startHarnessDaemon(
-      daemonDataDir,
-      server,
-      threadStorageRootPath,
-      options,
-    );
+    daemonResources = await startHarnessDaemon(daemonDataDir, server);
     await waitForHostConnected(api);
+    await persistHostId({
+      dataDir: server.config.dataDir,
+      hostId: daemonResources.hostId,
+    });
 
     harness = {
       api,
       cleanup,
       crashDaemon,
-      daemon: daemonResources.daemon,
       daemonApp: daemonResources.daemonApp,
-      daemonDataDir,
       db: server.db,
       hostId: daemonResources.hostId,
       hub: server.hub,
-      internal: createHostDaemonClient(server.baseUrl, daemonResources.hostKey),
       repoDir,
       restartDaemon,
       server,
       serverUrl: server.baseUrl,
       shutdownDaemon,
       startDaemon,
-      threadStorageRootPath,
     };
 
     return harness;

@@ -1,20 +1,21 @@
+import { ProjectAttachmentError } from "@bb/domain";
 import { HTTPException } from "hono/http-exception";
 import type { ThreadEventScopeKind, ThreadEventType } from "@bb/domain";
 import type { ServerLogger } from "./types.js";
 
-export interface ApiErrorBody {
+interface ApiErrorBody {
   code: string;
   message: string;
   details?: unknown;
   retryable?: boolean;
 }
 
-export interface ApiErrorOptions {
+interface ApiErrorOptions {
   details?: unknown;
   retryable?: boolean;
 }
 
-export interface TurnStartGuardFailureDetails {
+interface TurnStartGuardFailureDetails {
   eventType: ThreadEventType;
   scopeKind: ThreadEventScopeKind;
   threadId: string;
@@ -78,6 +79,9 @@ export function errorToResponse(
   error: unknown,
   logger: ServerLogger,
 ): Response {
+  if (error instanceof ProjectAttachmentError) {
+    return new ApiError(400, "invalid_request", error.message).toResponse();
+  }
   if (error instanceof TurnStartGuardError) {
     logger.warn(
       { err: error, ...error.details },

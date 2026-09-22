@@ -1,38 +1,20 @@
-/**
- * Shared adapter utilities.
- *
- * Functions and constants duplicated across the claude-code, pi, and codex
- * adapters are extracted here so each adapter imports from one place.
- */
-
 import { z } from "zod";
-import type { ThreadEventItem } from "@bb/domain";
-import { contentWrapperSchema, textBlockSchema } from "./tool-arg-schemas.js";
+import type {
+  ThreadEventItem,
+  ThreadEventTokenUsageBreakdown,
+} from "@bb/domain";
+import { textBlockSchema } from "./tool-arg-schemas.js";
 import { getStringProperty, isRecord } from "./provider-visibility-helpers.js";
 
-export interface NormalizeProviderCommandOutputArgs {
-  emptyPlaceholders: readonly string[];
-  text: string;
-}
-
-export interface DiffCumulativeTextArgs {
-  nextText: string;
-  previousText?: string;
-}
-
-export interface DiffCumulativeTextResult {
-  delta: string;
-  nextText: string;
-  reset: boolean;
-}
+const contentWrapperSchema = z
+  .object({
+    content: z.array(z.unknown()),
+  })
+  .passthrough();
 
 const shellEnvironmentVariableKeySchema = z
   .string()
   .regex(/^[A-Z_][A-Z0-9_]*$/i);
-
-// ---------------------------------------------------------------------------
-// Diff helpers
-// ---------------------------------------------------------------------------
 
 type LineDiffOperation =
   | { type: "add"; line: string }
@@ -184,10 +166,6 @@ function formatLineDiff(args: {
   return [...args.headers, ...body].join("\n") + "\n";
 }
 
-/**
- * Builds a compact unified-diff-like string from old/new text pairs.
- * Exported so each adapter can call it with its own arg names.
- */
 export function buildEditDiff(
   filePath: string,
   oldString: string | undefined,
@@ -229,10 +207,6 @@ export function buildEditDiff(
   return undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Shared item helpers
-// ---------------------------------------------------------------------------
-
 export function toOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -256,12 +230,6 @@ export function withParentToolCallId<TItem extends ThreadEventItem>(
   };
 }
 
-/**
- * The environment overrides a bridge may hand its provider: the requested
- * variables minus any name a shell would refuse. A rejected name is dropped,
- * never passed through — a provider that inherits an unquotable name can fail
- * its whole session on one bad key.
- */
 export function buildShellEnvOverrides(
   envVars?: Record<string, string>,
 ): Record<string, string> {
@@ -275,39 +243,16 @@ export function buildShellEnvOverrides(
   return overrides;
 }
 
-/**
- * The same overrides expressed as a codex/pi-style `shell_environment_policy`
- * config bag, for providers whose session construction takes config keys
- * rather than an environment map.
- */
-export function buildShellEnvironmentPolicyConfig(
-  envVars?: Record<string, string>,
-): Record<string, string> | undefined {
-  if (!envVars) {
-    return undefined;
-  }
-  const config: Record<string, string> = {};
-  for (const [key, value] of Object.entries(buildShellEnvOverrides(envVars))) {
-    config[`shell_environment_policy.set.${key}`] = value;
-  }
-  return Object.keys(config).length > 0 ? config : undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Numeric helpers
-// ---------------------------------------------------------------------------
-
 export function toNonNegativeNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : 0;
 }
 
-export function normalizeProviderCommandOutput(
-  args: NormalizeProviderCommandOutputArgs,
-): string | undefined {
-  // Compare placeholders against trimmed provider text, but preserve the
-  // original bytes for real process output so downstream rendering stays exact.
+export function normalizeProviderCommandOutput(args: {
+  emptyPlaceholders: readonly string[];
+  text: string;
+}): string | undefined {
   const trimmedText = args.text.trim();
   if (
     args.emptyPlaceholders.some((placeholder) => placeholder === trimmedText)
@@ -317,41 +262,6 @@ export function normalizeProviderCommandOutput(
   return args.text.length > 0 ? args.text : undefined;
 }
 
-export function diffCumulativeText(
-  args: DiffCumulativeTextArgs,
-): DiffCumulativeTextResult | null {
-  const previousText = args.previousText ?? "";
-  if (args.nextText.length === 0 || args.nextText === previousText) {
-    return null;
-  }
-  if (previousText.length === 0) {
-    return {
-      delta: args.nextText,
-      nextText: args.nextText,
-      reset: false,
-    };
-  }
-  if (args.nextText.startsWith(previousText)) {
-    const delta = args.nextText.slice(previousText.length);
-    return delta.length > 0
-      ? {
-          delta,
-          nextText: args.nextText,
-          reset: false,
-        }
-      : null;
-  }
-  return {
-    delta: args.nextText,
-    nextText: args.nextText,
-    reset: true,
-  };
-}
-
-/**
- * Extracts text from tool result content.
- * Handles strings, arrays of text blocks, and `{ content: [...] }` wrappers.
- */
 export function extractResultText(content: unknown): string {
   if (content === null || content === undefined) return "";
   if (typeof content === "string") return content;
@@ -433,4 +343,42 @@ function describeResultContentBlock(block: unknown): string | null {
     return `[${type}: ${url}]`;
   }
   return `[${type}]`;
+}
+
+export const ZERO_TOKEN_USAGE: ThreadEventTokenUsageBreakdown = {
+  totalTokens: 0,
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  outputTokens: 0,
+  reasoningOutputTokens: 0,
+};
+
+export function addTokenUsage(
+  total: ThreadEventTokenUsageBreakdown,
+  last: ThreadEventTokenUsageBreakdown,
+): ThreadEventTokenUsageBreakdown {
+  return {
+    totalTokens: total.totalTokens + last.totalTokens,
+    inputTokens: total.inputTokens + last.inputTokens,
+    cachedInputTokens: total.cachedInputTokens + last.cachedInputTokens,
+    ...(total.cacheReadInputTokens === undefined &&
+    last.cacheReadInputTokens === undefined
+      ? {}
+      : {
+          cacheReadInputTokens:
+            (total.cacheReadInputTokens ?? 0) +
+            (last.cacheReadInputTokens ?? 0),
+        }),
+    ...(total.cacheWriteInputTokens === undefined &&
+    last.cacheWriteInputTokens === undefined
+      ? {}
+      : {
+          cacheWriteInputTokens:
+            (total.cacheWriteInputTokens ?? 0) +
+            (last.cacheWriteInputTokens ?? 0),
+        }),
+    outputTokens: total.outputTokens + last.outputTokens,
+    reasoningOutputTokens:
+      total.reasoningOutputTokens + last.reasoningOutputTokens,
+  };
 }

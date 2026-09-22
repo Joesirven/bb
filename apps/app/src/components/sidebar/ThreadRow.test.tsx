@@ -6,6 +6,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
@@ -28,9 +29,9 @@ vi.mock("@/components/thread/ThreadActionsProvider", () => ({
     renameThread: mocks.renameThread,
   }),
 }));
-import { SidebarThreadTitleMentionResourcesProvider } from "./SidebarThreadTitleMentions";
+import { TooltipProvider } from "@bb/shared-ui/tooltip";
+import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadTitleMentions";
 import {
-  SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS,
   SIDEBAR_SUCCESS_STATUS_COLOR_CLASS,
   SIDEBAR_WORKING_STATUS_COLOR_CLASS,
 } from "./sidebarRowClasses";
@@ -38,68 +39,42 @@ import {
   EMPTY_SIDEBAR_THREAD_SHORTCUT_KEYS,
   SidebarThreadShortcutKeysContext,
 } from "./sidebarThreadShortcuts";
+import { collectPluginAppRegistrations } from "@get-bb/plugin-sdk/internal/plugin-app-collector";
 import {
   resetPluginThreadRowStatusesForTest,
   setPluginThreadRowStatus,
 } from "@/lib/plugin-thread-row-status";
+import {
+  removePluginSlotRegistrations,
+  setPluginSlotRegistrations,
+} from "@/lib/plugin-slots";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { SPLIT_LAYOUT_STORAGE_KEY } from "@/lib/split-layout/persistence";
-import { NO_COLLAPSED_CHILD_ACTIVITY } from "@/lib/thread-activity";
-
-vi.mock("@/hooks/useThreadSplitsEnabled", () => ({
-  useThreadSplitsEnabled: () => true,
-}));
+import { NO_COLLAPSED_CHILD_ACTIVITY } from "@bb/client-core";
+import { sdk } from "@/lib/sdk";
+import { makeThreadListEntry as makeThreadListEntryFixture } from "@bb/test-helpers/domain-fixtures";
 
 vi.mock("@/components/thread/ThreadActionsMenu", () => ({
   ThreadActionsContextMenu: ({ children }: { children: ReactNode }) => (
     <>{children}</>
   ),
   ThreadActionsMenu: () => null,
+  ThreadArchiveQuickAction: () => null,
 }));
 
 function createThread(
   overrides: Partial<ThreadListEntry> = {},
 ): ThreadListEntry {
-  return {
+  return makeThreadListEntryFixture({
     id: "thr_test",
-    projectId: "proj_test",
-    environmentId: null,
-    providerId: "codex",
     title: "Thread",
     titleFallback: "Thread",
-    sectionId: null,
-    status: "idle",
-    parentThreadId: null,
-    sourceThreadId: null,
-    originKind: null,
-    originPluginId: null,
-    visibility: "visible",
-    archivedAt: null,
-    pinnedAt: null,
-    pinSortKey: null,
-    deletedAt: null,
     lastReadAt: 0,
     latestAttentionAt: 1,
     createdAt: 1,
     updatedAt: 1,
-    activity: {
-      activeWorkflowCount: 0,
-      activeBackgroundAgentCount: 0,
-      activeBackgroundCommandCount: 0,
-      activePlanModeCount: 0,
-      activeGoalCount: 0,
-    },
-    hasPendingInteraction: false,
-    environmentHostId: null,
-    environmentName: null,
-    environmentBranchName: null,
-    environmentWorkspaceDisplayKind: "other",
-    runtime: {
-      displayStatus: "idle",
-      hostReconnectGraceExpiresAt: null,
-    },
     ...overrides,
-  };
+  });
 }
 
 const DEFAULT_OPTIONS: ThreadRowOptions = {
@@ -109,16 +84,14 @@ const DEFAULT_OPTIONS: ThreadRowOptions = {
 };
 
 function ThreadRowTestHarness({
-  accessibleTitle,
-  displayTitle,
+  crossProjectId = null,
   hasComposerDraft = false,
   isActive = false,
   options = DEFAULT_OPTIONS,
   shortcutKey,
   thread,
 }: {
-  accessibleTitle?: string;
-  displayTitle?: string;
+  crossProjectId?: string | null;
   hasComposerDraft?: boolean;
   isActive?: boolean;
   options?: ThreadRowOptions;
@@ -136,17 +109,18 @@ function ThreadRowTestHarness({
 
   return (
     <MemoryRouter>
-      <SidebarThreadShortcutKeysContext.Provider value={shortcutKeys}>
-        <ThreadRow
-          projectId={thread.projectId}
-          thread={thread}
-          isActive={isActive}
-          hasComposerDraft={hasComposerDraft}
-          options={options}
-          displayTitle={displayTitle}
-          accessibleTitle={accessibleTitle}
-        />
-      </SidebarThreadShortcutKeysContext.Provider>
+      <TooltipProvider>
+        <SidebarThreadShortcutKeysContext.Provider value={shortcutKeys}>
+          <ThreadRow
+            projectId={thread.projectId}
+            thread={thread}
+            crossProjectId={crossProjectId}
+            isActive={isActive}
+            hasComposerDraft={hasComposerDraft}
+            options={options}
+          />
+        </SidebarThreadShortcutKeysContext.Provider>
+      </TooltipProvider>
     </MemoryRouter>
   );
 }
@@ -248,7 +222,8 @@ afterEach(() => {
   mocks.renameThread.mockReset();
   resetSidebarTitleDoubleClickForTest();
   resetPluginThreadRowStatusesForTest();
-  // The layout is tab-scoped, so it lands in both stores (createTabScopedStorage).
+  removePluginSlotRegistrations("icon-probe");
+  expect(vi.isMockFunction(sdk.threads.resolveMentions)).toBe(false);
   window.localStorage.removeItem(SPLIT_LAYOUT_STORAGE_KEY);
   window.sessionStorage.removeItem(SPLIT_LAYOUT_STORAGE_KEY);
 });
@@ -360,28 +335,6 @@ describe("ThreadRow", () => {
     },
   );
 
-  it("uses the opaque split tint on a sticky parent thread row", () => {
-    const { container } = renderSplitThreadRow({
-      options: {
-        kind: "parent",
-        depth: 0,
-        isCompact: false,
-        isCollapsed: false,
-        childCount: 1,
-        childActivity: NO_COLLAPSED_CHILD_ACTIVITY,
-        stickyLevel: 0,
-        onToggleCollapsed: vi.fn(),
-      },
-    });
-
-    const stickyRow = container.querySelector(
-      '[data-sidebar-sticky-tier="parent"]',
-    );
-    expect(stickyRow?.classList).toContain(
-      SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS,
-    );
-  });
-
   it.each([
     ["idle", createThread()],
     ["unread error only", createThread({ status: "error" })],
@@ -443,7 +396,10 @@ describe("ThreadRow", () => {
   );
 
   it("puts the draft icon in the trailing status slot", () => {
-    const { container } = renderThreadRow({ hasComposerDraft: true });
+    const { container } = renderThreadRow({
+      hasComposerDraft: true,
+      thread: createThread({ lastReadAt: 1, latestAttentionAt: 1 }),
+    });
 
     const draftIcon = container.querySelector('[data-icon="Edit"]');
     expect(draftIcon).not.toBeNull();
@@ -457,12 +413,56 @@ describe("ThreadRow", () => {
     expect(screen.queryByLabelText("Unread thread succeeded")).toBeNull();
   });
 
+  it("draws a plugin's own registered artwork, and falls back for a name it never registered", () => {
+    function Beacon() {
+      return <svg data-plugin-mark="beacon" />;
+    }
+    setPluginSlotRegistrations(
+      "icon-probe",
+      collectPluginAppRegistrations({
+        __bbPluginApp: true,
+        setup(app) {
+          app.experimental_icons.register({
+            name: "icon-probe/beacon",
+            component: Beacon,
+          });
+        },
+      }),
+    );
+    setPluginThreadRowStatus("thr_test", "icon-probe", {
+      icon: "icon-probe/beacon",
+      label: "Registered artwork",
+    });
+    const { container } = renderThreadRow({
+      thread: createThread({ lastReadAt: 1, latestAttentionAt: 1 }),
+    });
+
+    expect(
+      container.querySelector('[data-plugin-mark="beacon"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      setPluginThreadRowStatus("thr_test", "icon-probe", {
+        icon: "icon-probe/undeclared",
+        label: "Unregistered name",
+      });
+    });
+
+    expect(container.querySelector('[data-plugin-mark="beacon"]')).toBeNull();
+    expect(
+      screen.getByLabelText("Unregistered name").getAttribute("data-icon"),
+    ).toBe("Zap");
+  });
+
   it("replaces the draft icon with a plugin status and restores it when cleared", () => {
     setPluginThreadRowStatus("thr_test", "composer-status-test", {
       icon: "AiContentGenerator01",
       label: "Plugin improving draft",
     });
-    const { container } = renderThreadRow({ hasComposerDraft: true });
+    const { container } = renderThreadRow({
+      hasComposerDraft: true,
+      thread: createThread({ lastReadAt: 1, latestAttentionAt: 1 }),
+    });
 
     const runningIcon = screen.getByLabelText("Plugin improving draft");
     expect(runningIcon.getAttribute("data-icon")).toBe("AiContentGenerator01");
@@ -524,12 +524,6 @@ describe("ThreadRow", () => {
     const runningIcon = screen.getByLabelText("Plugin running");
     expect(runningIcon.getAttribute("data-icon")).toBe("AiContentGenerator01");
     expect(Array.from(runningIcon.classList)).toContain("animate-shine-icon");
-    expect(Array.from(runningIcon.classList)).toContain(
-      "motion-safe:[animation-duration:1.5s]",
-    );
-    expect(Array.from(runningIcon.classList)).not.toContain(
-      "animate-shine-icon-status",
-    );
     expect(Array.from(runningIcon.parentElement?.classList ?? [])).toContain(
       "text-success",
     );
@@ -644,7 +638,7 @@ describe("ThreadRow", () => {
     });
 
     render(
-      <SidebarThreadTitleMentionResourcesProvider
+      <ThreadTitleMentionResourcesProvider
         sectionNamesById={
           new Map([
             ["sec_mentioned", "Mention section"],
@@ -662,7 +656,7 @@ describe("ThreadRow", () => {
               "Compare @thread:thr_mentioned in @project:proj_mentioned, @section:sec_mentioned, legacy @folder:sec_legacy, and @apps/app/src/ThreadRow.tsx",
           })}
         />
-      </SidebarThreadTitleMentionResourcesProvider>,
+      </ThreadTitleMentionResourcesProvider>,
     );
 
     expect(screen.getByText("Mention target").closest("a")).toBeNull();
@@ -679,61 +673,154 @@ describe("ThreadRow", () => {
     expect(screen.getByTitle(resolvedTitle)).not.toBeNull();
   });
 
-  it("keeps an explicit accessible title while resolving its mentions", () => {
-    const mentionedThread = createThread({
-      id: "thr_visible",
-      title: "Visible target",
-      titleFallback: "Visible target",
-    });
-    const onToggleCollapsed = vi.fn();
+  it("resolves a serialized thread title mention outside the sidebar cache", async () => {
+    const resolveMentions = vi
+      .spyOn(sdk.threads, "resolveMentions")
+      .mockResolvedValue([
+        {
+          threadId: "thr_dcwivn5n8w",
+          projectId: "proj_mentioned",
+          label: "Mention target",
+        },
+      ]);
 
-    render(
-      <SidebarThreadTitleMentionResourcesProvider
-        sectionNamesById={new Map([["sec_accessible", "Accessible section"]])}
-        projectNamesById={new Map()}
-        threadById={new Map([[mentionedThread.id, mentionedThread]])}
+    try {
+      render(
+        <ThreadTitleMentionResourcesProvider
+          sectionNamesById={new Map()}
+          projectNamesById={new Map()}
+          threadById={new Map()}
+        >
+          <ThreadRowTestHarness
+            thread={createThread({
+              title: "Continue from @thread:thr_dcwivn5n8w",
+              titleFallback: "Continue from @thread:thr_dcwivn5n8w",
+            })}
+          />
+        </ThreadTitleMentionResourcesProvider>,
+      );
+
+      expect(screen.queryByText("thr_dcwivn5n8w")).toBeNull();
+      expect(
+        screen.getByRole("link", { name: "Open Continue from Thread" }),
+      ).not.toBeNull();
+      await waitFor(() => expect(resolveMentions).toHaveBeenCalledTimes(1));
+      expect(screen.getByText("Mention target")).not.toBeNull();
+      expect(screen.queryByText("thr_dcwivn5n8w")).toBeNull();
+      expect(
+        screen.getByRole("link", {
+          name: "Open Continue from Mention target",
+        }),
+      ).not.toBeNull();
+    } finally {
+      resolveMentions.mockRestore();
+    }
+  });
+
+  it("keeps missing naked thread ids literal across sidebar labels", async () => {
+    const missingThreadId = "thr_dcwivn5n8w";
+    const resolveMentions = vi
+      .spyOn(sdk.threads, "resolveMentions")
+      .mockResolvedValue([]);
+
+    try {
+      render(
+        <ThreadTitleMentionResourcesProvider
+          sectionNamesById={new Map()}
+          projectNamesById={new Map()}
+          threadById={new Map()}
+        >
+          <ThreadRowTestHarness
+            thread={createThread({
+              id: "thr_canonical",
+              title: `Canonical @thread:${missingThreadId}`,
+              titleFallback: `Canonical @thread:${missingThreadId}`,
+            })}
+          />
+          <ThreadRowTestHarness
+            thread={createThread({
+              id: "thr_naked",
+              title: `Naked ${missingThreadId}`,
+              titleFallback: `Naked ${missingThreadId}`,
+            })}
+          />
+        </ThreadTitleMentionResourcesProvider>,
+      );
+
+      await waitFor(() => expect(resolveMentions).toHaveBeenCalledTimes(1));
+      expect(
+        await screen.findByRole("link", {
+          name: "Open Canonical Unavailable thread",
+        }),
+      ).not.toBeNull();
+      expect(screen.getByTitle("Canonical Unavailable thread")).not.toBeNull();
+
+      const nakedTitle = `Naked ${missingThreadId}`;
+      expect(
+        screen.getByRole("link", { name: `Open ${nakedTitle}` }),
+      ).not.toBeNull();
+      expect(screen.getByTitle(nakedTitle).textContent).toBe(nakedTitle);
+    } finally {
+      resolveMentions.mockRestore();
+    }
+  });
+
+  it("marks a child from another project with the project name", () => {
+    const { container } = render(
+      <ThreadTitleMentionResourcesProvider
+        sectionNamesById={new Map()}
+        projectNamesById={new Map([["proj_other", "Web App"]])}
+        threadById={new Map()}
       >
         <ThreadRowTestHarness
-          accessibleTitle="Full path in @section:sec_accessible"
-          displayTitle="Leaf @thread:thr_visible"
-          thread={createThread({ title: "Fallback raw title" })}
-          options={{
-            kind: "parent",
-            depth: 1,
-            isCompact: false,
-            isCollapsed: false,
-            childCount: 1,
-            childActivity: {
-              pending: false,
-              working: false,
-              hasUnsubmittedDraft: false,
-              runtimeWorking: false,
-              workflow: false,
-              backgroundAgent: false,
-              backgroundCommand: false,
-              planMode: false,
-              goal: false,
-              unread: false,
-              unreadError: false,
-            },
-            onToggleCollapsed,
-          }}
+          crossProjectId="proj_other"
+          thread={createThread({
+            parentThreadId: "thr_parent",
+            projectId: "proj_other",
+          })}
         />
-      </SidebarThreadTitleMentionResourcesProvider>,
+      </ThreadTitleMentionResourcesProvider>,
     );
 
-    expect(screen.getByText("Visible target")).not.toBeNull();
+    const marker = container.querySelector(
+      "[data-sidebar-thread-cross-project]",
+    );
+    expect(marker?.getAttribute("aria-label")).toBe("In project Web App");
+    expect(marker?.querySelector('[data-icon="FolderExport"]')).not.toBeNull();
     expect(
-      screen.getByRole("link", {
-        name: "Open Full path in Accessible section",
-      }),
-    ).not.toBeNull();
-    expect(screen.getByTitle("Full path in Accessible section")).not.toBeNull();
+      marker?.closest("[data-sidebar-thread-trailing-indicator]"),
+    ).toBeNull();
     expect(
-      screen.getByRole("button", {
-        name: "Collapse Full path in Accessible section threads",
-      }),
-    ).not.toBeNull();
+      screen.getByRole("link", { name: "Open Thread" }).getAttribute("href"),
+    ).toBe("/projects/proj_other/threads/thr_test");
+  });
+
+  it("opens the thread when the cross-project marker is clicked", () => {
+    const { container } = render(
+      <ThreadRowTestHarness
+        crossProjectId="proj_other"
+        thread={createThread({
+          parentThreadId: "thr_parent",
+          projectId: "proj_other",
+        })}
+      />,
+    );
+    const link = screen.getByRole("link", { name: "Open Thread" });
+    const onLinkClick = vi.fn();
+    link.addEventListener("click", onLinkClick);
+
+    fireEvent.click(
+      container.querySelector("[data-sidebar-thread-cross-project]")!,
+    );
+
+    expect(onLinkClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits the cross-project marker for same-project rows", () => {
+    const { container } = renderThreadRow({});
+    expect(
+      container.querySelector("[data-sidebar-thread-cross-project]"),
+    ).toBeNull();
   });
 
   it("renders a complete Unicode path mention instead of an ASCII prefix", () => {
@@ -811,6 +898,116 @@ describe("ThreadRow", () => {
     ).toBe("CircleQuestion");
   });
 
+  it("clocks a thread with queued work, and drops the clock once it runs", () => {
+    const { rerenderThreadRow } = renderThreadRow({
+      thread: createThread({
+        lastReadAt: 1,
+        latestAttentionAt: 1,
+        queuedWork: "waiting",
+      }),
+    });
+
+    expect(
+      screen
+        .getByLabelText("Thread has a message waiting to send")
+        .getAttribute("data-icon"),
+    ).toBe("Clock");
+
+    rerenderThreadRow(
+      createThread({
+        lastReadAt: 1,
+        latestAttentionAt: 1,
+        queuedWork: "waiting",
+        runtime: { displayStatus: "active", hostReconnectGraceExpiresAt: null },
+      }),
+    );
+    expect(
+      screen.queryByLabelText("Thread has a message waiting to send"),
+    ).toBeNull();
+    expect(
+      screen.getByLabelText("Thread working").getAttribute("data-icon"),
+    ).toBe("Loading");
+  });
+
+  it("shows unread success instead of queued work", () => {
+    renderThreadRow({
+      thread: createThread({
+        status: "idle",
+        lastReadAt: 1_000,
+        latestAttentionAt: 2_000,
+        queuedWork: "waiting",
+      }),
+    });
+
+    expect(screen.getByLabelText("Unread thread succeeded")).not.toBeNull();
+    expect(
+      screen.queryByLabelText("Thread has a message waiting to send"),
+    ).toBeNull();
+  });
+
+  it("gives a failed queued row the same glyph a failed thread gets", () => {
+    renderThreadRow({
+      thread: createThread({
+        lastReadAt: 1,
+        latestAttentionAt: 1,
+        queuedWork: "failed",
+      }),
+    });
+    const queueFailure = screen.getByLabelText("Queued message failed to send");
+
+    cleanup();
+    renderThreadRow({
+      thread: createThread({
+        status: "error",
+        lastReadAt: 0,
+        latestAttentionAt: 10,
+      }),
+    });
+    const threadFailure = screen.getByLabelText("Unread thread failed");
+
+    expect(queueFailure.getAttribute("data-icon")).toBe("CircleX");
+    expect(threadFailure.getAttribute("data-icon")).toBe(
+      queueFailure.getAttribute("data-icon"),
+    );
+    expect(queueFailure.getAttribute("class")).toBe(
+      threadFailure.getAttribute("class"),
+    );
+  });
+
+  it.each([true, false])(
+    "reserves a stable action slot beside a parent disclosure (collapsed: %s)",
+    (isCollapsed) => {
+      const onToggleCollapsed = vi.fn();
+      renderThreadRow({
+        thread: createThread({
+          title: "Nested discussion with enough text to fill the sidebar width",
+        }),
+        options: {
+          kind: "parent",
+          depth: 1,
+          isCompact: false,
+          isCollapsed,
+          childCount: 1,
+          childActivity: NO_COLLAPSED_CHILD_ACTIVITY,
+          onToggleCollapsed,
+        },
+      });
+      const toggle = screen.getByRole("button", {
+        name: /(?:Expand|Collapse) Nested discussion/,
+      });
+      const titleContainer = toggle.parentElement;
+      expect(
+        titleContainer?.classList.contains("bb-sidebar-hover-actions-inset"),
+      ).toBe(false);
+      expect(titleContainer?.classList.contains("pr-7.5")).toBe(true);
+      expect(
+        titleContainer?.classList.contains("max-md:pointer-coarse:pr-0"),
+      ).toBe(true);
+      fireEvent.click(toggle);
+      expect(onToggleCollapsed).toHaveBeenCalledWith("thr_test");
+    },
+  );
+
   it("keeps the parent-thread disclosure caret visible on mobile", () => {
     renderThreadRow({
       thread: createThread({ title: "Parent thread" }),
@@ -844,6 +1041,34 @@ describe("ThreadRow", () => {
     ).toBe("always");
   });
 
+  it.each([
+    { isCollapsed: true, expectedHoverReveal: false },
+    { isCollapsed: false, expectedHoverReveal: true },
+  ])(
+    "sets parent-thread disclosure hover reveal to $expectedHoverReveal when collapsed is $isCollapsed",
+    ({ expectedHoverReveal, isCollapsed }) => {
+      renderThreadRow({
+        thread: createThread({ title: "Parent thread" }),
+        options: {
+          kind: "parent",
+          depth: 1,
+          isCompact: false,
+          isCollapsed,
+          childCount: 1,
+          childActivity: NO_COLLAPSED_CHILD_ACTIVITY,
+          onToggleCollapsed: vi.fn(),
+        },
+      });
+
+      const toggle = screen.getByRole("button", {
+        name: `${isCollapsed ? "Expand" : "Collapse"} Parent thread threads`,
+      });
+      expect(toggle.classList.contains("bb-sidebar-hover-actions")).toBe(
+        expectedHoverReveal,
+      );
+    },
+  );
+
   it("shows its Command shortcut in place of an active indicator", () => {
     renderThreadRow({
       shortcutKey: "3",
@@ -869,8 +1094,6 @@ describe("ThreadRow", () => {
   });
 
   it("shows the pending-input glyph while the runtime is still active", () => {
-    // A thread blocked on AskUserQuestion keeps an active runtime for as long as
-    // the question is open, so the spinner must not win this row.
     renderThreadRow({
       thread: createThread({
         hasPendingInteraction: true,
@@ -969,8 +1192,6 @@ describe("ThreadRow", () => {
   ] as const)(
     "shows concurrent %s activity before runtime work",
     (activityKey, modeLabel) => {
-      // Plan and goal describe how the running turn behaves, and their glyphs
-      // shimmer, so they stay legible instead of collapsing into the spinner.
       renderThreadRow({
         thread: createThread({
           status: "active",

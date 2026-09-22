@@ -5,7 +5,7 @@ import { ExecutionControls } from "@/components/promptbox/ExecutionControls";
 import type {
   PromptMentionSuggestion,
   ProviderCommandSuggestion,
-} from "@/components/promptbox/mentions/types";
+} from "@bb/client-core";
 import {
   PromptBoxInternal,
   type HistoryConfig,
@@ -23,6 +23,7 @@ import {
   makeExecutionControlsProps,
   makeTypeaheadConfig as makeTypeahead,
 } from "../../../.ladle/story-fixtures";
+import { orderPromptMentionSuggestions } from "@/hooks/promptMentionCandidates";
 
 export default {
   title: "promptbox/Prompt Box Internal",
@@ -47,10 +48,6 @@ const promptActions: readonly PromptBoxAction[] = [
   CREATE_PLUGIN_PROMPT_ACTION,
 ];
 
-// ---------------------------------------------------------------------------
-// Voice fixtures — story-only PromptVoiceConfig values for the recording UX.
-// ---------------------------------------------------------------------------
-
 const idleVoice: PromptVoiceConfig = {
   state: "idle",
   isSupported: true,
@@ -69,10 +66,6 @@ const transcribingVoice: PromptVoiceConfig = {
   ...idleVoice,
   state: "transcribing",
 };
-
-// ---------------------------------------------------------------------------
-// Mock attachments
-// ---------------------------------------------------------------------------
 
 const mockAttachments: UploadedPromptAttachment[] = [
   {
@@ -98,10 +91,6 @@ const mockAttachments: UploadedPromptAttachment[] = [
   },
 ];
 
-// ---------------------------------------------------------------------------
-// History fixture (Up/Down recall)
-// ---------------------------------------------------------------------------
-
 const historyEntries = [
   {
     text: "fix the timeline pagination bug",
@@ -116,13 +105,6 @@ const baseHistory: HistoryConfig = {
   entries: historyEntries,
   onSelectEntry: noop,
 };
-
-// ---------------------------------------------------------------------------
-// Live @-mention corpus. The WithLiveMentions row holds the active query in
-// state (fed by `onQueryChange`) and filters this corpus back into the
-// `suggestions` prop — mirroring production's usePromptMentions: threads
-// first, then paths, capped at PROMPT_MENTION_LIMIT.
-// ---------------------------------------------------------------------------
 
 const PROMPT_MENTION_LIMIT = 8;
 
@@ -167,6 +149,7 @@ const liveMentionThreads: PromptMentionSuggestion[] = [
     projectId: "proj_promptbox",
     threadId: "thr_qfk8ksbxkk",
     title: "Wire up promptbox stories",
+    relation: null,
   },
   {
     kind: "thread",
@@ -175,6 +158,7 @@ const liveMentionThreads: PromptMentionSuggestion[] = [
     projectId: "proj_promptbox",
     threadId: "thr_mgr_kj4n2x",
     title: "Parent: app/timeline cleanup sprint",
+    relation: null,
   },
   {
     kind: "thread",
@@ -183,6 +167,7 @@ const liveMentionThreads: PromptMentionSuggestion[] = [
     projectId: "proj_promptbox",
     threadId: "thr_4hge9xn14m",
     title: "Review flow cleanup",
+    relation: null,
   },
 ];
 
@@ -276,10 +261,6 @@ function filterLiveCommands(query: string): ProviderCommandSuggestion[] {
     commandHaystack(suggestion).includes(needle),
   );
 }
-
-// ---------------------------------------------------------------------------
-// Per-row controlled value + helpers
-// ---------------------------------------------------------------------------
 
 interface StoryMentionArgs {
   resource: PromptMentionResource;
@@ -634,10 +615,6 @@ const planGoalCommandPillsFixture = buildPromptPillsFixture(
   ],
 );
 
-// ---------------------------------------------------------------------------
-// Story rows. Each row is its own controlled instance.
-// ---------------------------------------------------------------------------
-
 function DefaultRow() {
   const { value, mentionRanges, onChange } = useControlledValue("");
   return (
@@ -679,8 +656,6 @@ function WithAttachmentsRow() {
 }
 
 function WithBlockquoteRow() {
-  // The shape "Add to chat" produces: a `> ` quote block, then the user's
-  // reply on the line below. The editor renders it as a real blockquote.
   const { value, mentionRanges, onChange } = useControlledValue(
     "> First we backfill the new column with a default value at the server\n> boundary, then flip reads once every row is populated.\nWhich phase is safe to deploy on a Friday?",
   );
@@ -793,7 +768,7 @@ function WithLiveSkillsRow() {
       typeahead={makeTypeahead(
         {},
         {
-          trigger: "/",
+          triggers: ["/"],
           suggestions,
           isLoading: false,
           isError: false,
@@ -846,7 +821,10 @@ function WithLiveMentionsRow() {
       onSubmit={noop}
       placeholder="Type @ to mention a file, folder, section, or thread"
       typeahead={makeTypeahead({
-        suggestions,
+        results: orderPromptMentionSuggestions({
+          query: query ?? "",
+          suggestions,
+        }),
         onQueryChange: setQuery,
       })}
       mentionMenuPlacement="bottom"

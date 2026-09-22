@@ -17,6 +17,7 @@ export {
   type FakeLogEntry,
   type FakeLogLevel,
   type FakeMentionProviderRecord,
+  type ExperimentalFakeHostRpcCall,
   type FakePluginHarness,
   type FakePluginHost,
   type FakePluginBehaviorDrivers,
@@ -33,4 +34,17 @@ export {
   type FakeSdkHarness,
   type FakeSdkOverrides,
 } from "./fake-sdk.js";
-export { makeThreadResponse } from "./fixtures.js";
+export {
+  makeHostResponse,
+  makeMessageDispatchHookContext,
+  makePluginAgentConfigurationContext,
+  makeQueueEntry,
+  makeThreadResponse,
+  makeTurnFailedEvent,
+} from "./fixtures.js";
+export {
+  scanPublicSdkOnly as experimental_scanPublicSdkOnly,
+  type PublicSdkOnlyScan,
+  type PublicSdkOnlyScanOptions,
+  type PublicSdkOnlyViolation,
+} from "./public-sdk-only.js";

@@ -2,7 +2,9 @@ import {
   getEnvironment,
   getHost,
   getSessionById,
+  getStoredProviderModelCatalog,
   getThread,
+  replaceStoredProviderModelCatalog,
   updateHost,
 } from "@bb/db";
 import {
@@ -13,8 +15,9 @@ import {
   HOST_DAEMON_PROTOCOL_VERSION,
   hostDaemonSessionOpenResponseSchema,
 } from "@bb/host-daemon-contract";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { setPluginMachineProviderBridge } from "../../src/services/plugins/plugin-machine-provider-registry.js";
 import { readJson } from "../helpers/json.js";
 import {
   seedEnvironment,
@@ -27,6 +30,10 @@ import {
 import { withTestHarness } from "../helpers/test-app.js";
 
 const API = "/api/v1";
+
+afterEach(() => {
+  setPluginMachineProviderBridge(undefined);
+});
 
 async function createJoinCode(
   app: Parameters<typeof requestJoinCode>[0],
@@ -49,15 +56,41 @@ function requestJoinCode(app: {
 }
 
 describe("public host management", () => {
+  it("enrolls a host from a public join code", async () => {
+    await withTestHarness(async (harness) => {
+      const issued = await createJoinCode(harness.app);
+      const response = await harness.app.request("/internal/hosts/enroll", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${issued.joinCode}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          hostId: issued.hostId,
+          hostName: "Modal abc1",
+        }),
+      });
+
+      expect(response.status).toBe(201);
+      expect(getHost(harness.db, issued.hostId)).toMatchObject({
+        name: "Modal abc1",
+      });
+      const hostsResponse = await harness.app.request("/api/v1/hosts");
+      expect(hostsResponse.status).toBe(200);
+      expect(await readJson(hostsResponse)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: issued.hostId }),
+        ]),
+      );
+    });
+  });
+
   it("preserves a renamed host across a daemon reconnect", async () => {
     await withTestHarness(async (harness) => {
       const issued = await createJoinCode(harness.app);
       expect(issued.joinCode).toMatch(/^bbde_/u);
       expect(issued.expiresAt).toBeGreaterThan(Date.now());
       expect(issued.expiresAt).toBeLessThanOrEqual(Date.now() + 15 * 60 * 1000);
-      // Minting must not create a host row — an unredeemed code would leave a
-      // phantom offline machine in the Machines pane. The row is born at
-      // enroll with the daemon-reported name.
       expect(getHost(harness.db, issued.hostId)).toBeNull();
 
       const enrollResponse = await harness.app.request(
@@ -67,12 +100,12 @@ describe("public host management", () => {
           headers: {
             authorization: `Bearer ${issued.joinCode}`,
             "content-type": "application/json",
+            "x-bb-gate-auth": "machine",
+            "x-bb-gate-machine-id": "machine-cloud-1",
           },
           body: JSON.stringify({
-            connectMachineId: "machine-cloud-1",
             hostId: issued.hostId,
             hostName: "Build Machine",
-            hostType: "persistent",
           }),
         },
       );
@@ -82,7 +115,6 @@ describe("public host management", () => {
       expect(getHost(harness.db, issued.hostId)).toMatchObject({
         connectMachineId: "machine-cloud-1",
         name: "Build Machine",
-        type: "persistent",
       });
 
       const renameResponse = await harness.app.request(
@@ -106,17 +138,18 @@ describe("public host management", () => {
           headers: {
             authorization: `Bearer ${enrolled.hostKey}`,
             "content-type": "application/json",
+            "x-bb-gate-auth": "machine",
+            "x-bb-gate-machine-id": "machine-cloud-2",
           },
           body: JSON.stringify({
             activeThreads: [],
-            connectMachineId: "machine-cloud-2",
             dataDir: "/tmp/remote-bb",
             hasMachineCredential: true,
             hostId: issued.hostId,
             hostName: "Build Machine",
-            hostType: "persistent",
             instanceId: "instance-cloud-2",
             loadedEnvironments: [],
+            localApiPort: 38_888,
             platform: "linux",
             protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
           }),
@@ -160,12 +193,11 @@ describe("public host management", () => {
           connectMachineId: "machine-forged",
           hostId: issued.hostId,
           hostName: "Forged Machine",
-          hostType: "persistent",
         }),
       });
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(400);
       expect(await readJson(response)).toMatchObject({
-        code: "connect_machine_id_mismatch",
+        code: "invalid_request",
       });
       expect(getHost(harness.db, issued.hostId)).toBeNull();
     });
@@ -199,8 +231,18 @@ describe("public host management", () => {
           method: "POST",
           headers: { "x-bb-gate-auth": "machine" },
         }),
-        // The permission ceiling is the control that stops one machine from
-        // running privileged work on another, so a machine must never set it.
+        harness.app.request(`${API}/hosts/${host.id}/suspend`, {
+          method: "POST",
+          headers: { "x-bb-gate-auth": "machine" },
+        }),
+        harness.app.request(`${API}/hosts/${host.id}/resume`, {
+          method: "POST",
+          headers: { "x-bb-gate-auth": "machine" },
+        }),
+        harness.app.request(`${API}/hosts/${host.id}/retry-cleanup`, {
+          method: "POST",
+          headers: { "x-bb-gate-auth": "machine" },
+        }),
         harness.app.request(`${API}/hosts/${host.id}/permission-ceiling`, {
           method: "PATCH",
           headers: {
@@ -371,12 +413,10 @@ describe("public host management", () => {
       });
       const hostKey = await harness.deps.machineAuth.issueDaemonHostKey({
         hostId: host.id,
-        hostType: "persistent",
       });
       const enrollKey = await harness.deps.machineAuth.issueHostEnrollKey({
         enrollSource: "loopback",
         hostId: host.id,
-        hostType: "persistent",
       });
 
       const response = await harness.app.request(`${API}/hosts/${host.id}`, {
@@ -417,7 +457,6 @@ describe("public host management", () => {
           body: JSON.stringify({
             hostId: host.id,
             hostName: host.name,
-            hostType: "persistent",
           }),
         },
       );
@@ -428,6 +467,32 @@ describe("public host management", () => {
         { method: "DELETE" },
       );
       expect(secondDelete.status).toBe(404);
+    });
+  });
+
+  it("deletes a removed host's stored provider model catalogs", async () => {
+    await withTestHarness(async (harness) => {
+      const primary = seedHost(harness.deps, { id: "host_primary" });
+      seedPrimaryHost(harness.deps, primary.id);
+      const host = seedHost(harness.deps, { id: "host_remove_catalogs" });
+      const key = { hostId: host.id, providerId: "codex", scopeKey: "" };
+      replaceStoredProviderModelCatalog(harness.db, {
+        row: {
+          ...key,
+          fingerprint: "fingerprint",
+          modelsJson: "[]",
+          selectedOnlyModelsJson: "[]",
+          fetchedAt: 1,
+        },
+        pruneWorkspaceRowsFetchedBefore: null,
+      });
+
+      const response = await harness.app.request(`${API}/hosts/${host.id}`, {
+        method: "DELETE",
+      });
+
+      expect(response.status).toBe(200);
+      expect(getStoredProviderModelCatalog(harness.db, key)).toBeNull();
     });
   });
 
@@ -449,24 +514,24 @@ describe("public host management", () => {
   });
 
   it("asks the connect plugin to revoke the removed host's cloud machine", async () => {
-    // Starts the real plugin service, which loads the builtin provider
-    // plugins; they are the registry's only source, so the harness must not
-    // pre-register copies of the same declarations.
-    await withTestHarness({ seedFirstPartyProviders: false }, async (harness) => {
+    await withTestHarness(async (harness) => {
       const primary = seedHost(harness.deps, { id: "host_primary" });
       seedPrimaryHost(harness.deps, primary.id);
       const host = seedHost(harness.deps, {
         connectMachineId: "machine-cloud-remove",
         id: "host_cloud_remove",
       });
-      await harness.pluginService.start();
-      const connectPlugin = harness.pluginService
-        .list()
-        .find((plugin) => plugin.source === "builtin:connect");
-      expect(connectPlugin).toBeDefined();
-      if (!connectPlugin) throw new Error("connect plugin was not installed");
+      const connectPlugin = await harness.pluginService.install(
+        "builtin:connect",
+        { kind: "root" },
+      );
+      expect(connectPlugin).toMatchObject({
+        source: "builtin:connect",
+        status: "running",
+      });
       const revokeHandler = vi.fn(async () => ({ ok: true }));
       const revokeRecord = {
+        publication: null,
         inputSchema: z.object({ machineId: z.string() }),
         outputSchema: z.object({ ok: z.literal(true) }),
         handler: revokeHandler,
@@ -479,23 +544,16 @@ describe("public host management", () => {
         .spyOn(harness.pluginService, "invokeRpcHandler")
         .mockResolvedValue({ ok: true, result: { ok: true } });
 
-      try {
-        const response = await harness.app.request(`${API}/hosts/${host.id}`, {
-          method: "DELETE",
-        });
-        expect(response.status).toBe(200);
-        expect(invoke).toHaveBeenCalledWith(
-          connectPlugin.id,
-          "revokeMachine",
-          revokeRecord,
-          { machineId: "machine-cloud-remove" },
-        );
-      } finally {
-        await harness.pluginService.stop();
-      }
+      const response = await harness.app.request(`${API}/hosts/${host.id}`, {
+        method: "DELETE",
+      });
+      expect(response.status).toBe(200);
+      expect(invoke).toHaveBeenCalledWith(
+        connectPlugin.id,
+        "revokeMachine",
+        revokeRecord,
+        { machineId: "machine-cloud-remove" },
+      );
     });
-    // Starting the plugin service builds and loads the builtin plugins, which
-    // is real work; the other plugin-service suites budget 30s+ for it. The
-    // 5s default is a coin flip on a loaded CI runner.
   }, 30_000);
 });

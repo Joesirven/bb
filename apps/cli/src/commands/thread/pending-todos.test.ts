@@ -106,6 +106,8 @@ describe("fetchThreadPendingTodos", () => {
   ): ThreadTimelineResponse {
     return {
       activePromptMode: null,
+      contextBoundarySeq: null,
+      completedTurnDisplay: "collapse",
       activeThinking: null,
       activeWorkflows: [],
       activeBackgroundCommands: [],

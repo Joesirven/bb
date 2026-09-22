@@ -25,22 +25,18 @@ import {
   type CommandDispatchOptions,
 } from "./command-dispatch.js";
 import { isExpectedOnlineRpcFailureError } from "./command-dispatch-support.js";
+import { roundDurationMs } from "@bb/process-utils";
 import type { HostDaemonLogger } from "./logger.js";
 import { RuntimeManager } from "./runtime-manager.js";
 import type { PluginHostManager } from "./plugin-host-manager.js";
+import { runInSerialLane } from "./serial-lane.js";
 
 type CommandRouterLogger = Pick<HostDaemonLogger, "debug" | "warn">;
 
 type EnvironmentLaneMode = HostDaemonCommandEnvironmentLane;
-type ThreadStartCommand = Extract<HostDaemonCommand, { type: "thread.start" }>;
-type ThreadStopCommand = Extract<HostDaemonCommand, { type: "thread.stop" }>;
-type TurnSubmitCommand = Extract<HostDaemonCommand, { type: "turn.submit" }>;
-type ThreadStartOrTurnSubmitCommand = ThreadStartCommand | TurnSubmitCommand;
 
 interface ReadWriteLaneState {
-  /** All admitted read and write work. Writes wait on this tail. */
   tail: Promise<void>;
-  /** Last admitted write. Reads wait on this tail, then join `tail`. */
   writeTail: Promise<void>;
 }
 
@@ -51,12 +47,6 @@ interface ReadWriteLaneArgs<T> {
   work: () => Promise<T>;
 }
 
-interface SerialLaneArgs<T> {
-  key: string;
-  lanes: Map<string, Promise<void>>;
-  work: () => Promise<T>;
-}
-
 interface ReadWriteLaneIdleArgs {
   key: string;
   lanes: Map<string, ReadWriteLaneState>;
@@ -64,64 +54,32 @@ interface ReadWriteLaneIdleArgs {
   tail: Promise<void>;
 }
 
-interface ProviderExecutionLane {
-  processKey: string;
-  processMode: EnvironmentLaneMode;
-  sessionKey: string;
-}
-
-interface ProviderProcessLaneKeyArgs {
-  environmentId: string;
-  providerId: string | null;
-  threadId: string;
-}
-
-interface CreateProviderExecutionLaneArgs extends ProviderProcessLaneKeyArgs {
-  processMode: EnvironmentLaneMode;
-  sessionId: string;
-}
-
-interface ThreadProviderLaneIdentity {
-  environmentId: string;
-  providerId: string | null;
-  providerThreadId: string | null;
-  threadId: string;
-}
-
-interface ThreadProviderLaneTarget {
-  environmentId: string;
-  threadId: string;
-}
-
-interface InFlightThreadProviderLane {
-  count: number;
-  lane: ProviderExecutionLane;
-}
-
 type CommandRouterTask = Promise<HostDaemonCommandResultForCommand>;
 
 export interface CommandRouterOptions {
+  emitEnvironmentHookProgress?: CommandDispatchOptions["emitEnvironmentHookProgress"];
+  desktopBrowserBroker?: CommandDispatchOptions["desktopBrowserBroker"];
   dataDir: CommandDispatchOptions["dataDir"];
   fetchProjectAttachment: CommandDispatchOptions["fetchProjectAttachment"];
   fetchSkillTree?: CommandDispatchOptions["fetchSkillTree"];
   fetchPluginHostArtifact?: CommandDispatchOptions["fetchPluginHostArtifact"];
   runtimeManager: RuntimeManager;
-  terminalManager?: CommandDispatchOptions["terminalManager"];
   eventSink: CommandDispatchOptions["eventSink"];
-  listModels?: CommandDispatchOptions["listModels"];
+  listModels: CommandDispatchOptions["listModels"];
+  providerHealth: CommandDispatchOptions["providerHealth"];
+  providerUsage: CommandDispatchOptions["providerUsage"];
+  providerInstallationStatus: CommandDispatchOptions["providerInstallationStatus"];
+  providerInstallationRun: CommandDispatchOptions["providerInstallationRun"];
+  refreshShellEnv: CommandDispatchOptions["refreshShellEnv"];
   resolveInteractiveRequest?: CommandDispatchOptions["resolveInteractiveRequest"];
   pluginHostManager?: PluginHostManager;
   ensureConnectTunnelIdentity?: CommandDispatchOptions["ensureConnectTunnelIdentity"];
+  serverMove?: CommandDispatchOptions["serverMove"];
   threadStorageRootPath: string;
   logger: CommandRouterLogger;
 }
 
 const HOST_COMMAND_LIFECYCLE_LOG_THRESHOLD_MS = 1_000;
-const CODEX_PROVIDER_ID = "codex";
-
-function roundDurationMs(durationMs: number): number {
-  return Math.round(durationMs * 10) / 10;
-}
 
 function elapsedMs(startedAtMs: number): number {
   return performance.now() - startedAtMs;
@@ -130,19 +88,9 @@ function elapsedMs(startedAtMs: number): number {
 export class CommandRouter {
   private readonly logger;
   private readonly environmentLanes = new Map<string, ReadWriteLaneState>();
-  // Per-thread barrier keyed by threadId. A turn submission
-  // (turn.submit/thread.start) waits for an in-flight thread.unarchive of the
-  // same thread so it cannot resume a still-archived provider session.
   private readonly threadUnarchiveBarriers = new Map<string, Promise<void>>();
-  // Provider process lanes protect commands that share one provider process,
-  // while session lanes serialize commands for one provider thread/session.
-  private readonly providerProcessLanes = new Map<string, ReadWriteLaneState>();
-  private readonly providerSessionLaneTails = new Map<string, Promise<void>>();
+  private readonly threadLaneTails = new Map<string, Promise<void>>();
   private readonly threadTurnLaneTails = new Map<string, Promise<void>>();
-  private readonly inFlightThreadProviderLanes = new Map<
-    string,
-    InFlightThreadProviderLane
-  >();
 
   constructor(private readonly options: CommandRouterOptions) {
     this.logger = options.logger;
@@ -225,7 +173,7 @@ export class CommandRouter {
       }
       return this.options.pluginHostManager.dispose(command);
     }
-    const environmentLaneMode = this.getEnvironmentLaneMode(command);
+    const environmentLaneMode = hostDaemonEnvironmentLaneForCommand(command);
     const result =
       environmentLaneMode && "environmentId" in command
         ? this.runInEnvironmentLane(
@@ -243,20 +191,19 @@ export class CommandRouter {
   private executeLiveDaemonCommand(
     command: HostDaemonCommand,
   ): Promise<HostDaemonCommandResultForCommand> {
-    const environmentLaneMode = this.getEnvironmentLaneMode(command);
-    const providerLane = this.resolveProviderLane(command);
+    const environmentLaneMode = hostDaemonEnvironmentLaneForCommand(command);
+    const threadLaneKey = this.resolveThreadLaneKey(command);
     const task = this.runAfterThreadUnarchiveBarrier(command, () =>
       this.runInThreadTurnLane(command, () =>
         this.runInExecutionLanes(
           command,
           environmentLaneMode,
-          providerLane,
+          threadLaneKey,
           () => this.executeLiveDaemonCommandBody(command),
         ),
       ),
     );
     this.registerThreadUnarchiveBarrier(command, task);
-    this.registerInFlightThreadProviderLane(command, task);
     return task;
   }
 
@@ -264,8 +211,6 @@ export class CommandRouter {
     command: HostDaemonCommand,
   ): Promise<HostDaemonCommandResultForCommand> {
     const result = await dispatchCommand(command, this.createDispatchOptions());
-    // Commands that emit thread events before completing preserve the previous
-    // event-before-result ordering under live RPC.
     if (shouldFlushEventsBeforeReportingCommandResult(command)) {
       await this.options.eventSink.flush();
     }
@@ -288,14 +233,15 @@ export class CommandRouter {
   private runInExecutionLanes<T>(
     command: HostDaemonCommand,
     environmentLaneMode: EnvironmentLaneMode | null,
-    providerLane: ProviderExecutionLane | null,
+    threadLaneKey: string | null,
     work: () => Promise<T>,
   ): Promise<T> {
-    const providerWork = providerLane
-      ? () => this.runInProviderLane(providerLane, work)
-      : work;
+    const threadWork =
+      threadLaneKey === null
+        ? work
+        : () => runInSerialLane(this.threadLaneTails, threadLaneKey, work);
     if (!environmentLaneMode) {
-      return providerWork();
+      return threadWork();
     }
     if (!("environmentId" in command) || !command.environmentId) {
       throw new Error(`Command ${command.type} is missing environmentId`);
@@ -303,7 +249,7 @@ export class CommandRouter {
     return this.runInEnvironmentLane(
       command.environmentId,
       environmentLaneMode,
-      providerWork,
+      threadWork,
     );
   }
 
@@ -314,22 +260,7 @@ export class CommandRouter {
     if (command.type !== "thread.start" && command.type !== "turn.submit") {
       return work();
     }
-    return this.runInSerialLane({
-      key: command.threadId,
-      lanes: this.threadTurnLaneTails,
-      work,
-    });
-  }
-
-  private runInProviderLane<T>(
-    lane: ProviderExecutionLane,
-    work: () => Promise<T>,
-  ): Promise<T> {
-    return this.runInProviderProcessLane(
-      lane.processKey,
-      lane.processMode,
-      () => this.runInProviderSessionLane(lane.sessionKey, work),
-    );
+    return runInSerialLane(this.threadTurnLaneTails, command.threadId, work);
   }
 
   private createDispatchOptions(): CommandDispatchOptions {
@@ -338,12 +269,19 @@ export class CommandRouter {
       fetchSkillTree: this.options.fetchSkillTree,
       fetchPluginHostArtifact: this.options.fetchPluginHostArtifact,
       runtimeManager: this.options.runtimeManager,
-      terminalManager: this.options.terminalManager,
+      desktopBrowserBroker: this.options.desktopBrowserBroker,
       dataDir: this.options.dataDir,
       eventSink: this.options.eventSink,
       listModels: this.options.listModels,
+      providerHealth: this.options.providerHealth,
+      providerUsage: this.options.providerUsage,
+      providerInstallationStatus: this.options.providerInstallationStatus,
+      providerInstallationRun: this.options.providerInstallationRun,
+      refreshShellEnv: this.options.refreshShellEnv,
+      emitEnvironmentHookProgress: this.options.emitEnvironmentHookProgress,
       resolveInteractiveRequest: this.options.resolveInteractiveRequest,
       ensureConnectTunnelIdentity: this.options.ensureConnectTunnelIdentity,
+      serverMove: this.options.serverMove,
       threadStorageRootPath: this.options.threadStorageRootPath,
       logger: this.options.logger,
     };
@@ -389,12 +327,6 @@ export class CommandRouter {
     return state;
   }
 
-  /**
-   * Order a turn submission after any in-flight unarchive for the same thread.
-   * thread.unarchive runs on the provider maintenance runtime while turn.submit
-   * resumes the thread runtime, so the two are otherwise unordered and a turn
-   * can reach the provider before the session is unarchived.
-   */
   private async runAfterThreadUnarchiveBarrier<T>(
     command: HostDaemonCommand,
     work: () => Promise<T>,
@@ -428,50 +360,6 @@ export class CommandRouter {
     });
   }
 
-  private runInProviderProcessLane<T>(
-    key: string,
-    mode: EnvironmentLaneMode,
-    work: () => Promise<T>,
-  ): Promise<T> {
-    return this.runInReadWriteLane({
-      key,
-      lanes: this.providerProcessLanes,
-      mode,
-      work,
-    });
-  }
-
-  private runInProviderSessionLane<T>(
-    key: string,
-    work: () => Promise<T>,
-  ): Promise<T> {
-    return this.runInSerialLane({
-      key,
-      lanes: this.providerSessionLaneTails,
-      work,
-    });
-  }
-
-  private runInSerialLane<T>({
-    key,
-    lanes,
-    work,
-  }: SerialLaneArgs<T>): Promise<T> {
-    const previousTail = lanes.get(key) ?? Promise.resolve();
-    const next = previousTail.catch(() => undefined).then(work);
-    const done = next.then(
-      () => undefined,
-      () => undefined,
-    );
-    lanes.set(key, done);
-    void done.then(() => {
-      if (lanes.get(key) === done) {
-        lanes.delete(key);
-      }
-    });
-    return next;
-  }
-
   private runInReadWriteLane<T>({
     key,
     lanes,
@@ -487,8 +375,6 @@ export class CommandRouter {
         () => undefined,
       );
       const previousTail = state.tail;
-      // Reads only wait for earlier writes, so adjacent reads can run together.
-      // They still join the full tail so later writes wait for every active read.
       const tail = Promise.all([
         previousTail.catch(() => undefined),
         done,
@@ -522,214 +408,19 @@ export class CommandRouter {
     });
   }
 
-  private getProviderProcessLaneKey(args: ProviderProcessLaneKeyArgs): string {
-    // Legacy or thread.stop paths can lack provider ownership. Bucket them
-    // together per environment so unknown ownership stays conservative without
-    // serializing unrelated environments.
-    const providerKey = args.providerId ?? "unknown-provider";
-    if (providerKey !== CODEX_PROVIDER_ID) {
-      return `${args.environmentId}\0${providerKey}`;
-    }
-    return `${args.environmentId}\0${providerKey}\0thread:${args.threadId}`;
-  }
-
-  private getProviderSessionLaneKey(
-    processKey: string,
-    sessionId: string,
-  ): string {
-    return `${processKey}\0${sessionId}`;
-  }
-
-  private createProviderExecutionLane(
-    args: CreateProviderExecutionLaneArgs,
-  ): ProviderExecutionLane {
-    const processKey = this.getProviderProcessLaneKey({
-      environmentId: args.environmentId,
-      providerId: args.providerId,
-      threadId: args.threadId,
-    });
-    return {
-      processKey,
-      processMode: args.processMode,
-      sessionKey: this.getProviderSessionLaneKey(processKey, args.sessionId),
-    };
-  }
-
-  private getThreadProviderLaneIdentityKey(
-    args: ThreadProviderLaneTarget,
-  ): string {
-    return `${args.environmentId}\0${args.threadId}`;
-  }
-
-  private createThreadProviderExecutionLane(
-    identity: ThreadProviderLaneIdentity,
-    processMode: EnvironmentLaneMode,
-  ): ProviderExecutionLane {
-    const sessionId =
-      identity.providerThreadId === null
-        ? `thread:${identity.threadId}`
-        : `provider-thread:${identity.providerThreadId}`;
-    return this.createProviderExecutionLane({
-      environmentId: identity.environmentId,
-      processMode,
-      providerId: identity.providerId,
-      sessionId,
-      threadId: identity.threadId,
-    });
-  }
-
-  private createInFlightThreadStopLane(
-    command: ThreadStartOrTurnSubmitCommand,
-  ): ProviderExecutionLane {
-    if (command.type === "thread.start") {
-      return this.createThreadProviderExecutionLane(
-        {
-          environmentId: command.environmentId,
-          providerId: command.providerId,
-          providerThreadId: null,
-          threadId: command.threadId,
-        },
-        "write",
-      );
-    }
-
-    return this.createThreadProviderExecutionLane(
-      {
-        environmentId: command.environmentId,
-        providerId: command.resumeContext.providerId,
-        providerThreadId: command.resumeContext.providerThreadId,
-        threadId: command.threadId,
-      },
-      "write",
-    );
-  }
-
-  private getInFlightThreadStopProviderLane(
-    command: ThreadStopCommand,
-  ): ProviderExecutionLane | null {
-    const entry = this.inFlightThreadProviderLanes.get(
-      this.getThreadProviderLaneIdentityKey(command),
-    );
-    return entry?.lane ?? null;
-  }
-
-  private registerInFlightThreadProviderLane(
-    command: HostDaemonCommand,
-    task: CommandRouterTask,
-  ): void {
-    if (command.type !== "thread.start" && command.type !== "turn.submit") {
-      return;
-    }
-
-    const key = this.getThreadProviderLaneIdentityKey(command);
-    const existing = this.inFlightThreadProviderLanes.get(key);
-    if (existing) {
-      existing.count += 1;
-    } else {
-      this.inFlightThreadProviderLanes.set(key, {
-        count: 1,
-        lane: this.createInFlightThreadStopLane(command),
-      });
-    }
-
-    void task.then(
-      () => this.unregisterInFlightThreadProviderLane(key),
-      () => this.unregisterInFlightThreadProviderLane(key),
-    );
-  }
-
-  private unregisterInFlightThreadProviderLane(key: string): void {
-    const existing = this.inFlightThreadProviderLanes.get(key);
-    if (!existing) {
-      return;
-    }
-    if (existing.count > 1) {
-      existing.count -= 1;
-      return;
-    }
-    this.inFlightThreadProviderLanes.delete(key);
-  }
-
-  private resolveProviderLane(
-    command: HostDaemonCommand,
-  ): ProviderExecutionLane | null {
+  private resolveThreadLaneKey(command: HostDaemonCommand): string | null {
     switch (command.type) {
       case "thread.start":
-        return this.createProviderExecutionLane({
-          environmentId: command.environmentId,
-          processMode: "read",
-          providerId: command.providerId,
-          sessionId: `thread:${command.threadId}`,
-          threadId: command.threadId,
-        });
       case "turn.submit":
-        return this.createProviderExecutionLane({
-          environmentId: command.environmentId,
-          processMode: "read",
-          providerId: command.resumeContext.providerId,
-          sessionId: `provider-thread:${command.resumeContext.providerThreadId}`,
-          threadId: command.threadId,
-        });
       case "thread.archive":
-        return this.createProviderExecutionLane({
-          environmentId: command.environmentId,
-          processMode: "read",
-          providerId: command.providerId,
-          sessionId: `provider-thread:${command.providerThreadId}`,
-          threadId: command.threadId,
-        });
       case "interactive.resolve":
-        return this.createProviderExecutionLane({
-          environmentId: command.environmentId,
-          processMode: "read",
-          providerId: command.providerId,
-          sessionId: `provider-thread:${command.providerThreadId}`,
-          threadId: command.threadId,
-        });
       case "thread.stop":
-      case "thread.plan.cancel": {
-        const session = this.options.runtimeManager
-          .get(command.environmentId)
-          ?.runtime.getProviderSession(command.threadId);
-        if (session) {
-          return this.createThreadProviderExecutionLane(
-            {
-              environmentId: command.environmentId,
-              providerId: session.providerId,
-              providerThreadId: session.providerThreadId,
-              threadId: command.threadId,
-            },
-            "write",
-          );
-        }
-        return command.type === "thread.stop"
-          ? this.getInFlightThreadStopProviderLane(command)
-          : null;
-      }
-      case "thread.goal.clear": {
-        const session = this.options.runtimeManager
-          .get(command.environmentId)
-          ?.runtime.getProviderSession(command.threadId);
-        return this.createThreadProviderExecutionLane(
-          {
-            environmentId: command.environmentId,
-            providerId: session?.providerId ?? command.resumeContext.providerId,
-            providerThreadId:
-              session?.providerThreadId ??
-              command.resumeContext.providerThreadId,
-            threadId: command.threadId,
-          },
-          "write",
-        );
-      }
+      case "thread.storage.delete":
+      case "thread.plan.cancel":
+      case "thread.goal.clear":
+        return `${command.environmentId}\0thread:${command.threadId}`;
       default:
         return null;
     }
-  }
-
-  private getEnvironmentLaneMode(
-    command: HostDaemonCommand | HostDaemonOnlineRpcCommand,
-  ): EnvironmentLaneMode | null {
-    return hostDaemonEnvironmentLaneForCommand(command);
   }
 }

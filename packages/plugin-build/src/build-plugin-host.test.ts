@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   readdir,
   rm,
   utimes,
@@ -10,14 +11,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  buildPluginHost,
-  HOST_ARTIFACT_RUNTIME_STUBS,
-} from "./build-plugin-host.js";
+import { buildPluginHost } from "./build-plugin-host.js";
 import { resolvePluginBuildToolchain } from "./toolchain.js";
-
-const SECOND_CONSUMER_SDK_SPECIFIER = "@get-bb/host-artifact-consumer";
 
 function testToolchain() {
   return resolvePluginBuildToolchain(join(process.cwd(), ".unused-toolchain"));
@@ -27,7 +24,6 @@ describe("plugin host build", () => {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
-    delete HOST_ARTIFACT_RUNTIME_STUBS[SECOND_CONSUMER_SDK_SPECIFIER];
     await Promise.all(
       tempDirs
         .splice(0)
@@ -36,8 +32,6 @@ describe("plugin host build", () => {
   });
 
   it("builds a self-contained Node artifact with identity and digest metadata", async () => {
-    // Keep the fixture outside the workspace so this proves the build does
-    // not accidentally resolve the SDK from BB's own node_modules tree.
     const dir = await mkdtemp(join(tmpdir(), "bb-host-build-test-"));
     tempDirs.push(dir);
     await mkdir(join(dir, "dist"), { recursive: true });
@@ -63,25 +57,22 @@ describe("plugin host build", () => {
     await writeFile(
       join(dir, "host.ts"),
       [
-        'import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";',
+        'import { experimental_defineHostEntry, type ExperimentalHostEntry } from "@get-bb/plugin-sdk/host";',
         'import { defineRpcContract } from "@get-bb/plugin-sdk";',
-        `import { defineConsumer } from "${SECOND_CONSUMER_SDK_SPECIFIER}";`,
         'const schema = { "~standard": { validate(value: unknown) { return { value }; } } };',
         "const contract = defineRpcContract({ echo: {",
         "  input: schema,",
         "  output: schema,",
         "} });",
-        "export default experimental_defineHostEntry({",
+        "const entry: ExperimentalHostEntry<typeof contract> = experimental_defineHostEntry({",
         "  contract,",
         "  experimental_signals: { changed: { payload: schema } },",
         "  handlers: { echo: (input) => input },",
         "});",
-        'export const consumer = defineConsumer("provider-bridge");',
+        "export default entry;",
         "",
       ].join("\n"),
     );
-    HOST_ARTIFACT_RUNTIME_STUBS[SECOND_CONSUMER_SDK_SPECIFIER] =
-      "export function defineConsumer(value) { return value; }";
 
     const result = await buildPluginHost(
       dir,
@@ -114,11 +105,9 @@ describe("plugin host build", () => {
         experimental_signals: { changed: { payload: unknown } };
         handlers: { echo: (input: string) => string };
       };
-      consumer: string;
     };
     expect(builtEntry.default.experimental_apiVersion).toBe(1);
     expect(builtEntry.default.experimental_signals).toHaveProperty("changed");
-    expect(builtEntry.consumer).toBe("provider-bridge");
     expect(builtEntry.default.handlers.echo("from-artifact")).toBe(
       "from-artifact",
     );
@@ -245,11 +234,6 @@ describe("plugin host build", () => {
   });
 
   it("bundles the published bridge surface without stubbing it", async () => {
-    // `@get-bb/plugin-sdk/provider-bridge` is real published code — schemas and pure
-    // helpers, nothing daemon-pinned — so it is deliberately NOT in the
-    // runtime-stub table: a bridge plugin depends on the SDK and the build
-    // inlines its published, self-contained bundle. The plugin's own sources
-    // still cannot reach a private package (the test above).
     const dir = await mkdtemp(join(process.cwd(), ".host-build-bridge-test-"));
     tempDirs.push(dir);
     await writeFile(
@@ -257,6 +241,7 @@ describe("plugin host build", () => {
       JSON.stringify({
         name: "bb-plugin-host-bridge-fixture",
         version: "1.0.0",
+        type: "module",
         engines: { bb: ">=0.0" },
         bb: {
           name: "Bridge surface fixture",
@@ -274,19 +259,16 @@ describe("plugin host build", () => {
     await writeFile(
       join(dir, "host.ts"),
       [
-        'import { experimental_defineProviderBridge, turnScope, threadStartParamsSchema } from "@get-bb/plugin-sdk/provider-bridge";',
+        'import { experimental_compareVersions, experimental_defineProviderBridge, threadDeltaSchema, threadStartParamsSchema } from "@get-bb/plugin-sdk/provider-bridge";',
+        "export const compareVersions = experimental_compareVersions;",
         "export const experimental_providerBridge = experimental_defineProviderBridge({",
         "  handleLine(line) {",
         "    threadStartParamsSchema.safeParse(JSON.parse(line));",
-        '    process.stdout.write(JSON.stringify(turnScope("thr_1", "turn_1")));',
+        '    process.stdout.write(JSON.stringify(threadDeltaSchema.parse({ kind: "turn.open" })));',
         "  },",
         "});",
         "export default {};",
       ].join("\n"),
-    );
-
-    expect(Object.keys(HOST_ARTIFACT_RUNTIME_STUBS)).not.toContain(
-      "@get-bb/plugin-sdk/provider-bridge",
     );
     const result = await buildPluginHost(
       dir,
@@ -294,10 +276,96 @@ describe("plugin host build", () => {
       await testToolchain(),
     );
     const bundle = await readFile(result.jsPath, "utf8");
-    // Self-contained: the private packages behind the surface are inlined, so
-    // an installed plugin never needs them on disk.
     expect(bundle).not.toMatch(/from\s*"@bb\//u);
     expect(bundle).toContain("experimental_apiVersion");
+    expect(bundle).not.toMatch(/(?:from\s*|require\()["']semver/u);
+    const builtEntry = await import(
+      `${pathToFileURL(result.jsPath).href}?test=${Date.now()}`
+    );
+    expect(
+      builtEntry.compareVersions("1.0.0-beta.9", "1.0.0-beta.10"),
+    ).toBeLessThan(0);
+    expect(
+      builtEntry.compareVersions("1.0.0-rc.10", "1.0.0-rc.2"),
+    ).toBeGreaterThan(0);
+    expect(() => builtEntry.compareVersions("invalid", "0.0.0")).toThrow();
+  });
+
+  describe("host contract imports without a usable SDK", () => {
+    const manifest = {
+      name: "bb-plugin-host-contract-fixture",
+      version: "1.0.0",
+      engines: { bb: ">=0.0" },
+      bb: {
+        name: "Host contract fixture",
+        description: "Imports a host contract from the SDK.",
+        branding: { icon: "Cpu" },
+        server: "./server.ts",
+        host: "./host.ts",
+      },
+    };
+    const hostSource = [
+      "import {",
+      "  experimental_defineHostEntry,",
+      "  experimental_nativeRootsHostContract,",
+      "  type ExperimentalHostEntry,",
+      '} from "@get-bb/plugin-sdk/host";',
+      "export default experimental_defineHostEntry({",
+      "  contract: experimental_nativeRootsHostContract,",
+      "  handlers: { resolveNativeRoots: () => ({ roots: [] }) },",
+      "});",
+      "",
+    ].join("\n");
+
+    async function writeFixture(dir: string): Promise<void> {
+      await writeFile(join(dir, "package.json"), JSON.stringify(manifest));
+      await writeFile(
+        join(dir, "server.ts"),
+        "export default function plugin() {}\n",
+      );
+      await writeFile(join(dir, "host.ts"), hostSource);
+    }
+
+    it("names the missing SDK dependency when the plugin has no node_modules", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "bb-host-no-sdk-test-"));
+      tempDirs.push(dir);
+      await writeFixture(dir);
+
+      await expect(
+        buildPluginHost(dir, "0.9.0-test", await testToolchain()),
+      ).rejects.toThrow(
+        '"@get-bb/plugin-sdk/host" is not installed for this plugin (no node_modules/@get-bb/plugin-sdk); a host entry that imports experimental_nativeRootsHostContract needs the SDK as a dependency',
+      );
+    });
+
+    it("names the unbuilt SDK dist when the package is installed without it", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "bb-host-unbuilt-sdk-test-"));
+      tempDirs.push(dir);
+      await writeFixture(dir);
+      const sdkDir = join(dir, "node_modules", "@get-bb", "plugin-sdk");
+      await mkdir(sdkDir, { recursive: true });
+      await writeFile(
+        join(sdkDir, "package.json"),
+        JSON.stringify({
+          name: "@get-bb/plugin-sdk",
+          version: "0.0.0-test",
+          type: "module",
+          exports: {
+            "./host": {
+              types: "./bundled-types/bb-plugin-sdk-host.d.ts",
+              import: "./dist/host.js",
+              default: "./dist/host.js",
+            },
+          },
+        }),
+      );
+
+      await expect(
+        buildPluginHost(dir, "0.9.0-test", await testToolchain()),
+      ).rejects.toThrow(
+        `"@get-bb/plugin-sdk/host" is installed for this plugin but its dist is not built: run the SDK build (${join(await realpath(sdkDir), "dist", "host.js")} is missing); a host entry that imports experimental_nativeRootsHostContract needs the built SDK`,
+      );
+    });
   });
 
   it("rejects relative type imports into private BB workspace packages", async () => {

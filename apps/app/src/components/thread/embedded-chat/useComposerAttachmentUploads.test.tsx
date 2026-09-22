@@ -2,8 +2,10 @@
 
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { InlineQueuedMessageEditState } from "./useInlineQueuedMessageEditing";
-import type { PromptDraftAttachment } from "@/lib/prompt-draft";
+import type { InlineComposerDraftSession } from "./useActiveComposerDraft";
+import type { PromptDraftAttachment } from "@bb/client-core";
+import { BbHttpError } from "@bb/sdk/browser";
+import { createDeferredPromise } from "@bb/test-helpers";
 import {
   useComposerAttachmentUploads,
   useDraftAttachmentUploads,
@@ -17,29 +19,11 @@ vi.mock("@/hooks/mutations/project-mutations", () => ({
   useUploadPromptAttachment: () => ({ mutateAsync: mocks.upload }),
 }));
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, reject, resolve };
-}
-
-function makeInlineEdit(editSessionId: number): InlineQueuedMessageEditState {
-  return {
-    draft: { attachments: [], mentions: [], text: "queued" },
-    editSessionId,
-    expectedUpdatedAt: 1,
-    model: "gpt-5",
-    ownerThreadId: "thr_1",
-    permissionMode: "auto",
-    queuedMessageId: "qmsg_1",
-    queuedMessageIndex: 0,
-    reasoningLevel: "medium",
-    serviceTier: "default",
-  };
+function makeInlineSession(
+  editSessionId: number,
+  setDraft = vi.fn(),
+): InlineComposerDraftSession {
+  return { editSessionId, setDraft };
 }
 
 describe("useComposerAttachmentUploads", () => {
@@ -48,20 +32,19 @@ describe("useComposerAttachmentUploads", () => {
   });
 
   it("keeps bottom and queued attachment operations independent", async () => {
-    const bottomUpload = deferred<never>();
-    const inlineUpload = deferred<never>();
+    const bottomUpload = createDeferredPromise<never>();
+    const inlineUpload = createDeferredPromise<never>();
     mocks.upload
       .mockReturnValueOnce(bottomUpload.promise)
       .mockReturnValueOnce(inlineUpload.promise);
-    const inline = makeInlineEdit(1);
+    const inline = makeInlineSession(1);
     const inlineRef = { current: inline };
     const { result } = renderHook(() =>
       useComposerAttachmentUploads({
         projectId: "proj_1",
         addDraftAttachment: vi.fn(),
-        inlineEditingQueuedMessage: inline,
-        inlineEditingQueuedMessageRef: inlineRef,
-        commitInlineQueuedMessage: vi.fn(),
+        inlineEditSessionId: inline.editSessionId,
+        inlineSessionRef: inlineRef,
       }),
     );
 
@@ -106,25 +89,24 @@ describe("useComposerAttachmentUploads", () => {
   });
 
   it("does not leak a dismissed upload into a later queued edit", async () => {
-    const oldUpload = deferred<never>();
+    const oldUpload = createDeferredPromise<never>();
     mocks.upload.mockReturnValueOnce(oldUpload.promise);
-    const firstEdit = makeInlineEdit(1);
-    const inlineRef: { current: InlineQueuedMessageEditState | null } = {
+    const setDraft = vi.fn();
+    const firstEdit = makeInlineSession(1, setDraft);
+    const inlineRef: { current: InlineComposerDraftSession | null } = {
       current: firstEdit,
     };
-    const commitInlineQueuedMessage = vi.fn();
     const { result, rerender } = renderHook(
-      ({ inline }: { inline: InlineQueuedMessageEditState | null }) =>
+      ({ inline }: { inline: InlineComposerDraftSession | null }) =>
         useComposerAttachmentUploads({
           projectId: "proj_1",
           addDraftAttachment: vi.fn(),
-          inlineEditingQueuedMessage: inline,
-          inlineEditingQueuedMessageRef: inlineRef,
-          commitInlineQueuedMessage,
+          inlineEditSessionId: inline?.editSessionId ?? null,
+          inlineSessionRef: inlineRef,
         }),
       {
         initialProps: {
-          inline: firstEdit as InlineQueuedMessageEditState | null,
+          inline: firstEdit as InlineComposerDraftSession | null,
         },
       },
     );
@@ -142,7 +124,7 @@ describe("useComposerAttachmentUploads", () => {
     expect(result.current.isAttachingInlineFiles).toBe(false);
     expect(result.current.inlineAttachmentError).toBeNull();
 
-    const secondEdit = makeInlineEdit(2);
+    const secondEdit = makeInlineSession(2, setDraft);
     inlineRef.current = secondEdit;
     rerender({ inline: secondEdit });
     await act(async () => {
@@ -152,11 +134,43 @@ describe("useComposerAttachmentUploads", () => {
 
     expect(result.current.isAttachingInlineFiles).toBe(false);
     expect(result.current.inlineAttachmentError).toBeNull();
-    expect(commitInlineQueuedMessage).not.toHaveBeenCalled();
+    expect(setDraft).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's reason when it refuses an upload", async () => {
+    const message =
+      "HEIC images are not supported. Convert the image to JPEG or PNG before attaching it.";
+    mocks.upload
+      .mockRejectedValueOnce(
+        new BbHttpError({
+          body: { code: "invalid_request", message },
+          code: "invalid_request",
+          message,
+          status: 400,
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const { result } = renderHook(() =>
+      useDraftAttachmentUploads({
+        projectId: "proj_1",
+        target: { key: "bottom", addAttachment: vi.fn() },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleAttachFiles([
+        new File(["heic"], "IMG_0001.heic", { type: "image/heic" }),
+        new File(["png"], "shot.png", { type: "image/png" }),
+      ]);
+    });
+
+    expect(result.current.attachmentError).toBe(
+      `Failed to attach IMG_0001.heic, shot.png: ${message}`,
+    );
   });
 
   it("does not leak a dismissed upload into a later independent draft", async () => {
-    const oldUpload = deferred<PromptDraftAttachment>();
+    const oldUpload = createDeferredPromise<PromptDraftAttachment>();
     mocks.upload.mockReturnValueOnce(oldUpload.promise);
     const addFirstAttachment = vi.fn();
     const addSecondAttachment = vi.fn();

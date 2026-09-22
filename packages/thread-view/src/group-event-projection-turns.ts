@@ -11,11 +11,11 @@ import { assertNever } from "./assert-never.js";
 import type { EventMeta } from "./event-decode.js";
 import {
   assertTerminalMessageIncludedInMessages,
-  findProjectionTerminalMessage,
   getProjectionSummaryCount,
 } from "./apply-turn-message-detail.js";
+import { findLastTerminalTimelineMessage } from "./timeline-message-helpers.js";
+import { isExternalUserBoundaryForTurn } from "./external-user-boundaries.js";
 
-/** A typed thread event paired with its row metadata. */
 export interface ThreadEventWithMeta {
   event: ThreadEvent;
   meta: EventMeta;
@@ -25,6 +25,7 @@ type TurnCompletedEvent = Extract<ThreadEvent, { type: "turn/completed" }>;
 type TurnStartedEvent = Extract<ThreadEvent, { type: "turn/started" }>;
 
 interface ProjectionTurnDraft {
+  completionSequence: number | null;
   messages: EventProjectionMessage[];
   turn: EventProjectionTurn;
 }
@@ -97,6 +98,7 @@ function createProjectionTurn(
     scope: event.scope,
   });
   return {
+    completionSequence: null,
     messages: [],
     turn: {
       turnId,
@@ -141,6 +143,7 @@ function updateProjectionTurnCompletion(
   });
   draft.turn.completedAt = meta.createdAt;
   draft.turn.status = toEventProjectionTurnStatus(event.status);
+  draft.completionSequence ??= meta.seq;
 }
 
 function addProjectionTurnMessage(
@@ -156,32 +159,30 @@ function addProjectionTurnMessage(
   });
 }
 
-function isExternalUserBoundaryForTurn(
-  turnId: string,
-  turn: EventProjectionTurn,
-  message: EventProjectionMessage,
-): boolean {
-  if (message.kind !== "user" || message.initiator !== "user") {
-    return false;
-  }
-  if (
-    message.sourceSeqStart <= turn.sourceSeqStart ||
-    message.sourceSeqStart >= turn.sourceSeqEnd
-  ) {
-    return false;
-  }
-  return message.scope.kind !== "turn" || message.scope.turnId !== turnId;
-}
-
 function applyExternalUserBoundaries(
   turnsById: Map<string, ProjectionTurnDraft>,
   messages: EventProjectionMessage[],
 ): void {
+  const userMessages = messages.flatMap((message) =>
+    message.kind === "user" && message.initiator === "user"
+      ? [
+          {
+            sequence: message.sourceSeqStart,
+            turnId: message.scope.kind === "turn" ? message.scope.turnId : null,
+          },
+        ]
+      : [],
+  );
   for (const [turnId, draft] of turnsById) {
+    const span = {
+      completionSequence: draft.completionSequence,
+      sequenceStart: draft.turn.sourceSeqStart,
+      turnId,
+    };
     const boundarySeqs = new Set<number>();
-    for (const message of messages) {
-      if (isExternalUserBoundaryForTurn(turnId, draft.turn, message)) {
-        boundarySeqs.add(message.sourceSeqStart);
+    for (const message of userMessages) {
+      if (isExternalUserBoundaryForTurn(span, message)) {
+        boundarySeqs.add(message.sequence);
       }
     }
     if (boundarySeqs.size > 0) {
@@ -210,7 +211,7 @@ function createEventProjectionEntry(
     );
   }
 
-  const terminalMessage = findProjectionTerminalMessage(turnDraft.messages);
+  const terminalMessage = findLastTerminalTimelineMessage(turnDraft.messages);
   const turn: EventProjectionTurn = {
     ...turnDraft.turn,
     summaryCount: getProjectionSummaryCount(
@@ -248,11 +249,8 @@ export function groupEventProjectionTurns(
         type: event.type,
         scope: event.scope,
       });
-      const existing = turnsById.get(turnId);
-      if (existing) {
-        throw new Error(
-          `Timeline projection found duplicate turn/started for ${turnId}`,
-        );
+      if (turnsById.has(turnId)) {
+        continue;
       }
       turnsById.set(turnId, createProjectionTurn(event, meta));
       entryDrafts.push({

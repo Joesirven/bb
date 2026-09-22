@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import type { Writable } from "node:stream";
 import { z } from "zod";
+import { bridgeErrorDataSchema, type ProviderRecoveryHint } from "../errors.js";
 import type { ProviderRequestCommandPlan } from "./contracts.js";
 
 export type JsonRpcObject = Record<string, unknown>;
@@ -19,14 +20,6 @@ export interface ProviderInboundRequest {
 }
 
 export type ProviderRuntimeEvent = JsonRpcObject;
-
-export type JsonValue =
-  | boolean
-  | number
-  | string
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue | undefined };
 
 export const JSON_RPC_INVALID_PARAMS_CODE = -32602;
 
@@ -50,11 +43,17 @@ export class ProviderResponseEncodeError extends Error {
 
 export class JsonRpcResponseError extends Error {
   readonly code: number;
+  readonly recovery: ProviderRecoveryHint | null;
 
-  constructor(code: number, message: string) {
+  constructor(
+    code: number,
+    message: string,
+    recovery: ProviderRecoveryHint | null = null,
+  ) {
     super(message);
     this.name = "JsonRpcResponseError";
     this.code = code;
+    this.recovery = recovery;
   }
 }
 
@@ -121,12 +120,6 @@ interface SendJsonRpcErrorArgs {
   message: string;
 }
 
-interface SendProviderRequestDecodeErrorArgs {
-  child: ChildProcess;
-  error: unknown;
-  id: string | number;
-}
-
 interface SendProviderResponseEncodeErrorArgs {
   child: ChildProcess;
   error: unknown;
@@ -163,9 +156,21 @@ function jsonRpcResponseError(error: unknown): Error {
     typeof error.code === "number" &&
     typeof error.message === "string"
   ) {
-    return new JsonRpcResponseError(error.code, error.message);
+    return new JsonRpcResponseError(
+      error.code,
+      error.message,
+      decodeRecoveryHint(error.data),
+    );
   }
   return new Error(formatJsonRpcErrorMessage(error));
+}
+
+function decodeRecoveryHint(data: unknown): ProviderRecoveryHint | null {
+  if (data === undefined) {
+    return null;
+  }
+  const parsed = bridgeErrorDataSchema.safeParse(data);
+  return parsed.success ? (parsed.data.recovery ?? null) : null;
 }
 
 function isClosedJsonRpcStdinError(error: Error): boolean {
@@ -312,7 +317,14 @@ export function sendJsonRpcRequest<TResult>(
         clearTimeout(timer);
         const parsedResult = args.resultSchema.safeParse(result);
         if (!parsedResult.success) {
-          reject(new Error(`Invalid JSON-RPC result for ${message.method}`));
+          const issues = parsedResult.error.issues
+            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+            .join("; ");
+          reject(
+            new Error(
+              `Invalid JSON-RPC result for ${message.method}: ${issues}`,
+            ),
+          );
           return;
         }
         resolve(parsedResult.data);
@@ -349,22 +361,6 @@ export function sendJsonRpcError(args: SendJsonRpcErrorArgs): void {
       },
     }),
   );
-}
-
-export function sendProviderRequestDecodeErrorIfKnown(
-  args: SendProviderRequestDecodeErrorArgs,
-): boolean {
-  if (!(args.error instanceof ProviderRequestDecodeError)) {
-    return false;
-  }
-
-  sendJsonRpcError({
-    child: args.child,
-    id: args.id,
-    message: args.error.message,
-    code: args.error.code,
-  });
-  return true;
 }
 
 export function sendProviderResponseEncodeErrorIfKnown(

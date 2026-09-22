@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ResourceInfiniteScrollSentinel,
   useResourceInfiniteItems,
-  useResourceViewportPageSize,
+  RESOURCE_GRID_PAGE_SIZE,
 } from "@bb/shared-ui/resource-pagination";
 import {
   ResourceCollectionPage,
@@ -15,14 +15,16 @@ import {
 } from "@bb/shared-ui/resource-list";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { CreateWithTemplatesButton } from "@/components/create-via-prompt-examples";
-import { CREATE_PLUGIN_PROMPT } from "@/lib/create-resource-prompts";
+import { CREATE_PLUGIN_PROMPT } from "@bb/client-core";
 import { TOOLS_PAGE_BAND_CLASSES } from "@/components/tools/tools-navigation";
 import {
   AddPluginDialog,
   type AddPluginInitial,
 } from "@/components/plugin/management/AddPluginDialog";
 import { BrowsePluginsTab } from "@/components/plugin/management/BrowsePluginsTab";
+import { CheckPluginUpdatesButton } from "@/components/plugin/management/CheckPluginUpdatesButton";
 import { InstalledPluginsTab } from "@/components/plugin/management/InstalledPluginsTab";
+import { PluginAuthorPage } from "@/components/plugin/management/PluginAuthorPage";
 import {
   pluginPublisherFilterId,
   pluginPublisherFilterOptions,
@@ -34,20 +36,13 @@ import {
   getRootComposeRoutePath,
 } from "@/lib/route-paths";
 
-type PluginsCollectionMode = "installed" | "browse";
-
-function modeFromSearchParams(value: string | null): PluginsCollectionMode {
-  if (value === "installed") return value;
-  return "browse";
-}
-
-/**
- * The canonical Plugins collection: installed resources, discoverable
- * resources from BB's official catalog.
- * Modes are URL-backed projections of one collection, not separate settings
- * pages; plugin configuration and lifecycle depth remain on the detail route.
- */
-export function PluginsOverview() {
+export function PluginsOverview({
+  onOpenPlugin,
+  mode,
+}: {
+  mode?: "installed" | "browse";
+  onOpenPlugin?: (pluginId: string, trigger: HTMLButtonElement) => void;
+} = {}) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const listQuery = usePluginList({ enabled: true });
@@ -55,20 +50,14 @@ export function PluginsOverview() {
     () => listQuery.data?.plugins ?? [],
     [listQuery.data?.plugins],
   );
-  const activeMode = modeFromSearchParams(searchParams.get("view"));
+  const activeMode =
+    mode ?? (searchParams.get("view") === "installed" ? "installed" : "browse");
+  const authorKey = searchParams.get("author");
   const [installedQuery, setInstalledQuery] = useState("");
-  const [installedViewport, setInstalledViewport] =
-    useState<HTMLDivElement | null>(null);
   const [installedSortDirection, setInstalledSortDirection] = useState<
     "asc" | "desc"
   >("asc");
-  // Empty means unfiltered: the menu has no explicit "All" row.
   const [typeFilters, setTypeFilters] = useState<string[]>([]);
-  // Facets follow the installed plugins, so adding a marketplace adds its
-  // facet. Uninstalling the last plugin of one removes its facet too, and the
-  // selection is intersected with what is on offer rather than kept: a
-  // vanished facet would otherwise filter the list to nothing with no row left
-  // in the menu to switch it back off.
   const typeFilterOptions = useMemo(
     () => pluginPublisherFilterOptions(plugins),
     [plugins],
@@ -78,16 +67,11 @@ export function PluginsOverview() {
     return typeFilters.filter((value) => offered.has(value));
   }, [typeFilterOptions, typeFilters]);
   const normalizedInstalledQuery = installedQuery.trim().toLowerCase();
-  // One projection identity resets both the accumulated rows and their
-  // viewport measurement when search, filters, or sorting changes.
   const installedResetKey = [
     normalizedInstalledQuery,
     installedSortDirection,
     [...activeTypeFilters].sort().join(","),
   ].join("\u0000");
-  const installedPageSize = useResourceViewportPageSize(installedViewport, {
-    resetKey: installedResetKey,
-  });
   const [addDialog, setAddDialog] = useState<{
     open: boolean;
     initial: AddPluginInitial | null;
@@ -119,9 +103,6 @@ export function PluginsOverview() {
           const enabledResult = Number(!left.enabled) - Number(!right.enabled);
           if (enabledResult !== 0) return enabledResult;
           if (left.enabled) {
-            // Published plugins first, then the user's own; publishers
-            // themselves stay in one alphabetical run so the sort direction
-            // still controls the whole list.
             const leftPublisher = left.publisherLabel;
             const rightPublisher = right.publisherLabel;
             const publisherResult =
@@ -143,16 +124,11 @@ export function PluginsOverview() {
       plugins,
     ],
   );
-  // Pages load as the sentinel scrolls into view; the page machinery stays
-  // (viewport-fit chunk size, projection reset keys) but rows accumulate.
   const installedList = useResourceInfiniteItems(visiblePlugins, {
-    pageSize: installedPageSize,
+    pageSize: RESOURCE_GRID_PAGE_SIZE,
     resetKey: installedResetKey,
   });
 
-  // Installed's New plugin goes to the real new-thread page: the inline hero
-  // composer is Browse's own affordance, and bouncing Installed users through
-  // Browse read as a mis-navigation rather than a shortcut.
   const startCreatePlugin = (prompt?: string) => {
     navigate(getRootComposeRoutePath(), {
       state: {
@@ -163,39 +139,54 @@ export function PluginsOverview() {
     });
   };
 
-  // Browse renders no page shell at all — its actions live in the hero's CTA
-  // row. Installed keeps the New plugin button, which starts a thread.
   const installedActions = (
-    <CreateWithTemplatesButton
-      kind="plugin"
-      label="New plugin"
-      menuActions={[
-        {
-          label: "Install from source",
-          icon: "Download",
-          onSelect: () => setAddDialog({ open: true, initial: null }),
-        },
-      ]}
-      onCreate={startCreatePlugin}
-    />
+    <>
+      <CreateWithTemplatesButton
+        kind="plugin"
+        label="New plugin"
+        menuActions={[
+          {
+            label: "Install from source",
+            icon: "Download",
+            onSelect: () => setAddDialog({ open: true, initial: null }),
+          },
+        ]}
+        onCreate={startCreatePlugin}
+      />
+    </>
   );
 
+  const openPlugin =
+    onOpenPlugin ??
+    ((pluginId: string) =>
+      navigate(
+        getPluginDetailRoutePath({
+          pluginId,
+          view: activeMode === "installed" ? "installed" : undefined,
+        }),
+      ));
   let content: ReactNode;
   if (activeMode === "browse") {
-    content = (
-      <BrowsePluginsTab
-        onInstall={(initial) => setAddDialog({ open: true, initial })}
-        onOpenPlugin={(pluginId) =>
-          navigate(getPluginDetailRoutePath({ pluginId }))
-        }
-        onInstallFromSource={() => setAddDialog({ open: true, initial: null })}
-      />
-    );
+    content =
+      authorKey === null ? (
+        <BrowsePluginsTab
+          onInstall={(initial) => setAddDialog({ open: true, initial })}
+          onOpenPlugin={openPlugin}
+          onInstallFromSource={() =>
+            setAddDialog({ open: true, initial: null })
+          }
+        />
+      ) : (
+        <PluginAuthorPage
+          authorKey={authorKey}
+          onInstall={(initial) => setAddDialog({ open: true, initial })}
+          onOpenPlugin={openPlugin}
+        />
+      );
   } else {
     content = (
       <ResourceCollectionViewport
         scrollId="plugins-installed-results"
-        viewportRef={setInstalledViewport}
         bandClassName={TOOLS_PAGE_BAND_CLASSES}
         toolbar={
           <ResourceToolbar
@@ -224,6 +215,7 @@ export function PluginsOverview() {
                     )
                   }
                 />
+                {plugins.length > 0 ? <CheckPluginUpdatesButton /> : null}
               </>
             }
           />
@@ -251,7 +243,10 @@ export function PluginsOverview() {
             />
           ) : (
             <>
-              <InstalledPluginsTab plugins={installedList.items} />
+              <InstalledPluginsTab
+                plugins={installedList.items}
+                onOpenPlugin={openPlugin}
+              />
               <ResourceInfiniteScrollSentinel
                 hasMore={installedList.hasMore}
                 onLoadMore={installedList.loadMore}
@@ -263,10 +258,6 @@ export function PluginsOverview() {
     );
   }
 
-  // Browse and Installed are separate top-nav destinations now, not tabs:
-  // Browse is the full-bleed discovery page (its description lives in the
-  // hero), while Installed keeps the collection shell for its description and
-  // actions row.
   return (
     <>
       {activeMode === "browse" ? (

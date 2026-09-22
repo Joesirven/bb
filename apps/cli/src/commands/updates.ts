@@ -1,16 +1,18 @@
 import { Command } from "commander";
 import type { Host } from "@bb/domain";
+import {
+  UPDATE_STATE_PRESENTATION,
+  type UpdateState,
+} from "@bb/domain/update-state";
 import type { HostProviderCliStatusResponse } from "@bb/server-contract";
 import { action } from "../action.js";
 import { createCliBbSdk } from "../client.js";
-import { renderBorderlessTable } from "../table.js";
+import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
-import { resolveMachineId } from "./machine.js";
+import { resolveMachineId, selectMachines } from "./machine.js";
 
-const MANAGED_PROVIDERS = ["codex", "claudeCode"] as const;
-
-type ProviderCliKey = (typeof MANAGED_PROVIDERS)[number];
-type ProviderCliStatus = HostProviderCliStatusResponse[ProviderCliKey];
+type ProviderCliKey = string;
+type ProviderCliStatus = HostProviderCliStatusResponse[string];
 type ProviderCliStatusResponse = HostProviderCliStatusResponse;
 
 interface UpdatesCommandOptions {
@@ -30,15 +32,18 @@ interface MachineUpdatesEntry {
   statusError: string | null;
 }
 
-function providerStateLabel(status: ProviderCliStatus): string {
-  if (!status.installed) return "not installed";
-  if (status.versionUnsupported) return "update needed";
-  if (status.needsUpdate) {
+function providerState(status: ProviderCliStatus): UpdateState {
+  if (!status.installed) return "not-installed";
+  if (status.needsUpdate || status.versionUnsupported) {
     return status.installAction === null
-      ? "update manually"
-      : "update available";
+      ? "update-manually"
+      : "update-available";
   }
-  return "up to date";
+  return "up-to-date";
+}
+
+function providerStateLabel(status: ProviderCliStatus): string {
+  return UPDATE_STATE_PRESENTATION[providerState(status)].label;
 }
 
 function providerVersionLabel(status: ProviderCliStatus): string {
@@ -55,6 +60,15 @@ function isActionableProviderStatus(status: ProviderCliStatus): boolean {
     status.installAction !== null &&
     (!status.installed || status.needsUpdate || status.versionUnsupported)
   );
+}
+
+function selectUpdateHosts(
+  hosts: readonly Host[],
+  machine: string | undefined,
+): Host[] {
+  return machine === undefined
+    ? selectMachines(hosts, "persistent")
+    : hosts.filter((host) => host.id === resolveMachineId(hosts, machine));
 }
 
 async function collectMachineUpdates(
@@ -91,8 +105,7 @@ function actionableTargets(
   const targets: ProviderUpdateTarget[] = [];
   for (const entry of entries) {
     if (entry.providerStatus === null) continue;
-    for (const provider of MANAGED_PROVIDERS) {
-      const status = entry.providerStatus[provider];
+    for (const [provider, status] of Object.entries(entry.providerStatus)) {
       if (isActionableProviderStatus(status)) {
         targets.push({ host: entry.host, provider, status });
       }
@@ -115,8 +128,7 @@ function printUpdatesTable(args: {
       rows.push([entry.host.name, "-", entry.statusError ?? "status failed"]);
       continue;
     }
-    for (const provider of MANAGED_PROVIDERS) {
-      const status = entry.providerStatus[provider];
+    for (const status of Object.values(entry.providerStatus)) {
       rows.push([
         `${entry.host.name} · ${status.displayName}`,
         providerVersionLabel(status),
@@ -124,23 +136,14 @@ function printUpdatesTable(args: {
       ]);
     }
   }
-  const widths = [
-    Math.max(6, ...rows.map((row) => row[0].length)),
-    Math.max(7, ...rows.map((row) => row[1].length)),
-    Math.max(5, ...rows.map((row) => row[2].length)),
-  ];
-  console.log("");
-  console.log(
-    renderBorderlessTable(
-      {
-        head: ["Target", "Version", "State"],
-        colWidths: widths,
-        trimTrailingWhitespace: true,
-      },
-      rows,
-    ),
+  printBorderlessTable(
+    {
+      head: ["Target", "Version", "State"],
+      colWidths: columnWidths(rows, [6, 7, 5]),
+      trimTrailingWhitespace: true,
+    },
+    rows,
   );
-  console.log("");
 }
 
 export function registerUpdatesCommands(
@@ -163,13 +166,10 @@ export function registerUpdatesCommands(
           sdk.system.version(),
           sdk.hosts.list(),
         ]);
-        const selectedHosts =
-          opts.machine === undefined
-            ? hosts
-            : hosts.filter(
-                (host) => host.id === resolveMachineId(hosts, opts.machine!),
-              );
-        const entries = await collectMachineUpdates(sdk, selectedHosts);
+        const entries = await collectMachineUpdates(
+          sdk,
+          selectUpdateHosts(hosts, opts.machine),
+        );
         if (
           outputJson(opts, {
             app: version,
@@ -186,8 +186,8 @@ export function registerUpdatesCommands(
         const appState = version.isDevelopment
           ? "development mode"
           : version.updateAvailable
-            ? `update available (run: ${version.upgradeCommand})`
-            : "up to date";
+            ? `${UPDATE_STATE_PRESENTATION["update-available"].label} (run: ${version.upgradeCommand})`
+            : UPDATE_STATE_PRESENTATION["up-to-date"].label;
         const appVersionLabel =
           version.latestVersion !== null &&
           version.latestVersion !== version.currentVersion
@@ -209,28 +209,22 @@ export function registerUpdatesCommands(
       action(async (opts: UpdatesCommandOptions) => {
         const sdk = createCliBbSdk(getUrl());
         const hosts = await sdk.hosts.list();
-        const selectedHosts =
-          opts.machine === undefined
-            ? hosts
-            : hosts.filter(
-                (host) => host.id === resolveMachineId(hosts, opts.machine!),
-              );
-        const entries = await collectMachineUpdates(sdk, selectedHosts);
+        const entries = await collectMachineUpdates(
+          sdk,
+          selectUpdateHosts(hosts, opts.machine),
+        );
         const targets = actionableTargets(entries);
         if (targets.length === 0) {
           if (outputJson(opts, { results: [] })) return;
           const hasManualUpdates = entries.some(
             (entry) =>
               entry.providerStatus !== null &&
-              MANAGED_PROVIDERS.some((provider) => {
-                const status = entry.providerStatus?.[provider];
-                return (
-                  status !== undefined &&
+              Object.values(entry.providerStatus).some(
+                (status) =>
                   status.installed &&
                   status.needsUpdate &&
-                  status.installAction === null
-                );
-              }),
+                  status.installAction === null,
+              ),
           );
           console.log(
             hasManualUpdates
@@ -271,8 +265,7 @@ export function registerUpdatesCommands(
               hostName: target.host.name,
               provider: target.provider,
               success,
-              message:
-                errorEvent?.type === "error" ? errorEvent.message : null,
+              message: errorEvent?.type === "error" ? errorEvent.message : null,
             });
             if (!opts.json) {
               console.log(

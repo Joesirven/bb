@@ -1,10 +1,6 @@
+import type { EnvironmentDiffFileQuery } from "@bb/server-contract";
 import { apiClient, toRelativeUrl } from "./api-server";
 
-/**
- * Percent-encode each segment of a path-suffix route param. Hono's `$url()`
- * substitutes params verbatim (slashes must survive, but everything else
- * needs encoding), so `:filePath{.+}` values are encoded here.
- */
 function encodePathSegments(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
 }
@@ -90,4 +86,31 @@ export function buildThreadWorktreeRawContentUrl(
       param: { id: threadId, filePath: encodePathSegments(path) },
     }),
   );
+}
+
+export function buildEnvironmentDiffFileContentUrl(
+  environmentId: string,
+  query: EnvironmentDiffFileQuery,
+): string {
+  return toRelativeUrl(
+    apiClient.environments[":id"].diff.file.$url({
+      param: { id: environmentId },
+      query,
+    }),
+  );
+}
+
+export function getFilePreviewLeaseBaseUrl(url: string): string | null {
+  return (
+    /^((?:https?:\/\/[^/?#]+)?\/api\/v1\/file-previews\/[^/?#]+)(?:\/|$)/u.exec(
+      url,
+    )?.[1] ?? null
+  );
+}
+
+export function buildFilePreviewLeaseContentUrl(
+  baseUrl: string,
+  path: string,
+): string {
+  return `${baseUrl.replace(/\/+$/u, "")}/${encodePathSegments(path)}`;
 }

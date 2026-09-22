@@ -9,14 +9,7 @@ import {
 } from "../../../.ladle/story-fixtures";
 import type { ThreadMetadataContentProps } from "./ThreadMetadataContent";
 
-// Re-export the shared builders so per-row stories in this folder can import
-// from one place.
-export {
-  makeEnvironment,
-  makeThread,
-  makeThreadListEntry,
-  makeWorkspaceStatus,
-};
+export { makeEnvironment, makeThread, makeWorkspaceStatus };
 
 const noop = () => {};
 
@@ -81,6 +74,7 @@ export function makePullRequest(
 export const baseProps: ThreadMetadataContentProps = {
   thread: makeThread(),
   projectId: "proj_bb",
+  parentThreadProjectId: null,
   parentThreadDisplayName: null,
   parentThreads,
   canAssignToParent: true,
@@ -88,6 +82,7 @@ export const baseProps: ThreadMetadataContentProps = {
   isLoadingParentThreads: false,
   isParentThreadsError: false,
   environment: makeEnvironment(),
+  environmentProvisioningFailure: false,
   environmentDisplayHost: localEnvironmentDisplayHost,
   workspaceStatus: makeWorkspaceStatus(),
   workspaceStatusError: null,

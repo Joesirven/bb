@@ -33,6 +33,8 @@ run-name: ${{ github.event_name == 'schedule' && 'Publish bb-app + desktop night
 
 # Only the npm publish job gets id-token: write, for npm trusted publishing.
 # The desktop build jobs must not inherit an OIDC token they never use.
+# The npm publish jobs run on GitHub-hosted runners. npm rejects provenance
+# bundles from self-hosted runners such as Blacksmith (E422).
 permissions:
   contents: read
 
@@ -48,8 +50,14 @@ env:
 jobs:
   publish:
     name: Publish bb-app
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    # Scheduled (nightly) runs are restricted to the canonical repository so
+    # that forks, on which GitHub happily runs cron workflows, do not execute
+    # release jobs that publish to npm, reset the desktop-nightly release and
+    # need signing or notarization secrets they will never have. Manual
+    # workflow_dispatch runs keep working in forks.
+    if: ${{ github.event_name != 'schedule' || github.repository == 'get-bb/bb' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment: npm-release
     permissions:
       contents: read
@@ -73,6 +81,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -201,7 +211,7 @@ jobs:
         env:
           NPM_TAG: ${{ env.RELEASE_NPM_TAG }}
         run: |
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for attempt in $(seq 1 120); do
             package_version="$(npm view "bb-app@$PACKAGE_VERSION" version --json 2>/tmp/bb-app-version.err || true)"
             tag_version="$(npm view "bb-app@$NPM_TAG" version --json 2>/tmp/bb-app-tag.err || true)"
 
@@ -211,7 +221,7 @@ jobs:
               exit 0
             fi
 
-            echo "Registry has not exposed bb-app@$PACKAGE_VERSION on tag $NPM_TAG yet; retrying ($attempt/12)."
+            echo "Registry has not exposed bb-app@$PACKAGE_VERSION on tag $NPM_TAG yet; retrying ($attempt/120)."
             cat /tmp/bb-app-version.err || true
             cat /tmp/bb-app-tag.err || true
             sleep 10
@@ -242,8 +252,8 @@ jobs:
     name: Publish bb-app nightly after the release
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.npm_tag == 'latest' && inputs.dry_run == false }}
     needs: publish
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment: npm-release
     permissions:
       contents: read
@@ -258,6 +268,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -299,10 +311,11 @@ jobs:
           echo "version=${nightly_version}" >> "$GITHUB_OUTPUT"
           echo "Prepared bb-app and desktop version ${nightly_version}."
 
-      # bb-app has no prepack hook and its `files` list ships built output, so
-      # `npm publish` packs whatever is on disk. This job runs on a fresh
-      # runner, so it must build before it packs. smoke:tarball depends on
-      # build and also proves the packed tarball runs at the nightly version.
+      # bb-app's prepack hook prunes stale bb CLI chunks immediately before
+      # `npm publish` packs the built output selected by its `files` list.
+      # This job runs on a fresh runner, so it must build before it packs.
+      # smoke:tarball depends on build and also proves the packed tarball
+      # runs at the nightly version.
       - name: Smoke bb-app tarball
         run: pnpm exec turbo run smoke:tarball --filter=bb-app --force --output-logs=new-only
 
@@ -318,7 +331,7 @@ jobs:
 
       - name: Verify npm release
         run: |
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for attempt in $(seq 1 120); do
             package_version="$(npm view "bb-app@$PACKAGE_VERSION" version --json 2>/tmp/bb-app-version.err || true)"
             tag_version="$(npm view "bb-app@nightly" version --json 2>/tmp/bb-app-tag.err || true)"
 
@@ -328,7 +341,7 @@ jobs:
               exit 0
             fi
 
-            echo "Registry has not exposed bb-app@$PACKAGE_VERSION on tag nightly yet; retrying ($attempt/12)."
+            echo "Registry has not exposed bb-app@$PACKAGE_VERSION on tag nightly yet; retrying ($attempt/120)."
             cat /tmp/bb-app-version.err || true
             cat /tmp/bb-app-tag.err || true
             sleep 10
@@ -365,7 +378,11 @@ jobs:
   # docs/bb-release-process.md#publishing-the-plugin-sdk.
   publish-plugin-sdk:
     name: Publish @get-bb/plugin-sdk
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Same fork guard as the publish job: this job also runs on the schedule
+    # trigger, while the nightly desktop, iOS and release-publish jobs stay
+    # behind `needs` chains rooted at it.
+    if: ${{ github.event_name != 'schedule' || github.repository == 'get-bb/bb' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: npm-release
     permissions:
@@ -500,7 +517,7 @@ jobs:
     needs:
       - publish
       - publish-nightly
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-latest
     timeout-minutes: 45
     outputs:
       version: ${{ steps.nightly_version.outputs.version }}
@@ -511,6 +528,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -558,6 +577,9 @@ jobs:
 
       - name: Build desktop
         run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
+
+      - name: Install Electron before parallel tests
+        run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
 
       - name: Test desktop and launcher
         run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --force --output-logs=new-only
@@ -646,6 +668,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -661,6 +685,10 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Install AppImage FUSE runtime
+        uses: ./.github/actions/install-appimage-fuse
+        timeout-minutes: 5
 
       - name: Apply the nightly version
         id: nightly_version
@@ -687,6 +715,9 @@ jobs:
       - name: Build desktop
         run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
 
+      - name: Install Electron before parallel tests
+        run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
+
       - name: Test desktop and launcher
         run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --force --output-logs=new-only
 
@@ -699,6 +730,11 @@ jobs:
         # The packaged app opens a real BrowserWindow, so the headless runner
         # needs a virtual display.
         run: xvfb-run -a pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
+
+      - name: Smoke test nightly AppImage mount lifecycle
+        # Launches the generated AppImage itself, tears down only its GUI mount,
+        # and verifies the separately mounted owned runtime remains healthy.
+        run: xvfb-run -a pnpm exec turbo run smoke:appimage-lifecycle --filter=@bb/desktop --force --output-logs=new-only
 
       - name: Generate nightly desktop version feed
         run: pnpm --dir apps/desktop run desktop:version-feed
@@ -715,12 +751,52 @@ jobs:
             apps/desktop/release/desktop-version-linux.json
           if-no-files-found: error
 
+  nightly-mobile-ios:
+    name: Build bb Nightly iOS (EAS)
+    # Same gate as the desktop jobs: only after the npm publish succeeded on
+    # the scheduled or manual nightly path. The reusable workflow starts an
+    # EAS production build that auto-submits to TestFlight.
+    if: >-
+      ${{ !cancelled()
+      && needs.publish.result == 'success'
+      && (github.event_name == 'schedule'
+      || (inputs.npm_tag == 'nightly' && inputs.dry_run == false)
+      || needs.publish-nightly.result == 'success') }}
+    needs:
+      - publish
+      - publish-nightly
+    uses: ./.github/workflows/mobile-ios-eas.yml
+    with:
+      profile: production
+      submit: true
+      # An empty version keeps the marketing version committed in
+      # apps/mobile/app.json. TestFlight needs a Beta App Review for the
+      # first build of each new marketing version, so a nightly that tracked
+      # the bb-app version (0.39.0, 0.39.1, ...) blocked external testers
+      # every time the base version moved. With a pinned version, the remote
+      # EAS build number tells nightly builds apart and later builds skip
+      # the review.
+      version: ""
+      external_group: External testers
+    secrets:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+
   nightly-desktop-publish:
     name: Publish bb Nightly desktop
+    # See the macOS job for why this condition uses `!cancelled()`. GitHub
+    # propagates a skip transitively, so the skipped publish-nightly reaches
+    # this job through the build jobs even though they run. Without the
+    # override this job is skipped on exactly the paths that exist to produce
+    # a nightly, and only a stable release run ever moves the release.
+    if: >-
+      ${{ !cancelled()
+      && needs.nightly-desktop-macos.result == 'success'
+      && needs.nightly-desktop-linux.result == 'success' }}
     needs:
       - nightly-desktop-macos
       - nightly-desktop-linux
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write

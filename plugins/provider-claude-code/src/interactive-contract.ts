@@ -7,32 +7,14 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
 
-export const CLAUDE_PERMISSION_REQUEST_APPROVAL_METHOD =
-  "item/permissions/requestApproval";
 export const CLAUDE_USER_QUESTION_TOOL_NAME = "AskUserQuestion";
-export const CLAUDE_USER_QUESTION_REQUEST_METHOD = "item/userQuestion/request";
 export const CLAUDE_EXIT_PLAN_MODE_TOOL_NAME = "ExitPlanMode";
 
-// Claude calls ExitPlanMode with no blockedPath, no decisionReason and no
-// permission suggestions, so the generic approval gate reads it as a request
-// that needs no user decision and allows it. Plan mode then ends and the SDK
-// tells the model the user approved a plan the user never saw. The tool needs
-// its own branch, above every auto-allow, for the same reason AskUserQuestion
-// does: the tool call *is* the prompt, not a guard on one.
 export const claudeExitPlanModeInputSchema = z.object({
   plan: z.string().min(1),
   planFilePath: z.string().min(1).optional(),
 });
-export type ClaudeExitPlanModeInput = z.infer<
-  typeof claudeExitPlanModeInputSchema
->;
 
-/**
- * Sent back to the model when the user rejects a plan. The turn stays open and
- * the session stays in plan mode, so the message has to stop the model from
- * proposing the same plan again in a loop. It points at AskUserQuestion because
- * that is the one channel bb can show the user mid-turn.
- */
 export function buildClaudePlanRejectionMessage(): string {
   return "The user rejected this plan. Do not call ExitPlanMode again with the same plan. Use AskUserQuestion to find out what they want changed, revise the plan, and only then propose it again.";
 }
@@ -43,7 +25,6 @@ export const claudePermissionModeSchema = z.enum([
   "auto",
   "bypassPermissions",
   "plan",
-  "dontAsk",
 ]);
 export type ClaudePermissionMode = z.infer<typeof claudePermissionModeSchema>;
 
@@ -65,8 +46,6 @@ const claudePermissionRuleValueSchema = z.object({
   ruleContent: z.string().optional(),
 });
 
-// Updates bb sends back to Claude. bb never writes a user's settings files, so
-// an outgoing update is always scoped to the session.
 const claudePermissionUpdateSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("addRules"),
@@ -80,16 +59,8 @@ const claudePermissionUpdateSchema = z.discriminatedUnion("type", [
     destination: z.literal("session"),
   }),
 ]);
-export type ClaudePermissionUpdate = z.infer<
-  typeof claudePermissionUpdateSchema
->;
+type ClaudePermissionUpdate = z.infer<typeof claudePermissionUpdateSchema>;
 
-// Suggestions Claude sends to bb. Claude picks the destination it would use for
-// its own prompt, and that is frequently not "session": the sandbox network
-// prompt suggests a "localSettings" rule. The destination describes where Claude
-// would persist the grant, not what the grant covers, so bb accepts every
-// destination here and re-scopes its answer to the session above. Dropping a
-// suggestion costs the prompt its grant and leaves the user unable to allow it.
 const claudePermissionUpdateDestinationSchema = z.enum([
   "userSettings",
   "projectSettings",
@@ -118,26 +89,6 @@ export type ClaudeSuggestedPermissionUpdate = z.infer<
   typeof claudeSuggestedPermissionUpdateSchema
 >;
 
-const claudeNetworkPermissionsInputSchema = z.object({
-  enabled: z.boolean().nullable(),
-});
-
-const claudeFileSystemPermissionsInputSchema = z.object({
-  read: z.array(z.string()),
-  write: z.array(z.string()),
-});
-
-const claudeRequestedPermissionProfileInputSchema = z
-  .object({
-    network: claudeNetworkPermissionsInputSchema.nullable().optional(),
-    fileSystem: claudeFileSystemPermissionsInputSchema.nullable().optional(),
-  })
-  .transform(
-    (value): PendingInteractionGrantablePermissionProfile => ({
-      network: value.network ?? null,
-      fileSystem: value.fileSystem ?? null,
-    }),
-  );
 interface ClaudePermissionRequestProfileArgs {
   blockedPath: string | undefined;
   suggestions: ClaudeSuggestedPermissionUpdate[] | undefined;
@@ -150,7 +101,6 @@ const CLAUDE_FILE_PERMISSION_KIND_BY_TOOL_NAME = new Map<
   string,
   ClaudeFilePermissionKind
 >([
-  // Keep this in sync with Claude's file-touching built-in tool names.
   ["Read", "read"],
   ["Grep", "read"],
   ["Glob", "read"],
@@ -161,10 +111,7 @@ const CLAUDE_FILE_PERMISSION_KIND_BY_TOOL_NAME = new Map<
   ["Bash", "read_write"],
 ]);
 
-// Claude asks with this pseudo tool when a sandboxed command opens an outbound
-// connection. It carries no file path, so the tool name is the only signal that
-// the prompt grants network access.
-export const CLAUDE_SANDBOX_NETWORK_TOOL_NAME = "SandboxNetworkAccess";
+const CLAUDE_SANDBOX_NETWORK_TOOL_NAME = "SandboxNetworkAccess";
 
 const CLAUDE_NETWORK_PERMISSION_TOOL_NAMES = new Set([
   "WebFetch",
@@ -255,19 +202,16 @@ export function shouldRequestClaudePermissionApproval(
   );
 }
 
-export const claudePermissionRequestApprovalParamsSchema = z.object({
-  threadId: z.string(),
-  providerThreadId: z.string(),
-  turnId: z.string().min(1).nullable(),
-  itemId: z.string(),
-  toolName: z.string(),
-  input: z.record(z.string(), z.unknown()),
-  reason: z.string().nullable(),
-  permissions: claudeRequestedPermissionProfileInputSchema,
-});
-export type ClaudePermissionRequestApprovalParams = z.infer<
-  typeof claudePermissionRequestApprovalParamsSchema
->;
+export interface ClaudePermissionRequestApprovalParams {
+  threadId: string;
+  providerThreadId: string;
+  turnId: string | null;
+  itemId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  reason: string | null;
+  permissions: PendingInteractionGrantablePermissionProfile;
+}
 
 const claudeUserQuestionOptionSchema = z.object({
   label: z.string().min(1),
@@ -312,16 +256,13 @@ export type ClaudeUserQuestionInput = z.infer<
   typeof claudeUserQuestionInputSchema
 >;
 
-export const claudeUserQuestionRequestParamsSchema = z.object({
-  threadId: z.string(),
-  providerThreadId: z.string(),
-  turnId: z.string().min(1).nullable(),
-  itemId: z.string(),
-  questions: claudeUserQuestionListSchema,
-});
-export type ClaudeUserQuestionRequestParams = z.infer<
-  typeof claudeUserQuestionRequestParamsSchema
->;
+export interface ClaudeUserQuestionRequestParams {
+  threadId: string;
+  providerThreadId: string;
+  turnId: string | null;
+  itemId: string;
+  questions: ClaudeUserQuestion[];
+}
 
 const claudeUserQuestionAnnotationSchema = z.object({
   preview: z.string().optional(),
@@ -372,7 +313,7 @@ const claudeUserQuestionResponseSchema = z.object({
   updatedInput: claudeUserQuestionOutputSchema,
 });
 
-export const claudeInteractiveResponseSchema = z.union([
+const claudeInteractiveResponseSchema = z.union([
   claudePermissionApprovalResponseSchema,
   claudeUserQuestionResponseSchema,
 ]);

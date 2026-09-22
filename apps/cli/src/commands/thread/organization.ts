@@ -1,13 +1,28 @@
 import { Command } from "commander";
 import { updateThreadTabsRequestSchema } from "@bb/server-contract";
+import {
+  queuedMessageWaitHolderSchema,
+  type PromptInput,
+  type QueuedMessageWaitHolder,
+} from "@bb/domain";
+import type { ThreadQueuedMessagesResult } from "@bb/sdk";
+import {
+  columnWidths,
+  printBorderlessTable,
+  truncateCell,
+} from "../../table.js";
+import { describeQueueWait } from "./actions.js";
+import { formatQueueSendCountdown } from "./send-time.js";
 import { action } from "../../action.js";
 import { createCliBbSdk } from "../../client.js";
+import { requireTextInput, TEXT_FILE_HELP_SUFFIX } from "../../text-input.js";
 import {
+  collectOption,
   confirmDestructiveAction,
   outputJson,
   requireThreadIdOrSelf,
 } from "../helpers.js";
-import { buildPromptInputs, collectOption } from "./helpers.js";
+import { buildPromptInputs, uploadClientAttachmentInputs } from "./helpers.js";
 
 interface JsonOptions {
   json?: boolean;
@@ -29,13 +44,19 @@ interface HistoryOptions extends JsonOptions {
   limit?: string;
 }
 
+interface QueueListOptions extends JsonOptions {
+  waitHolder?: string;
+}
+
 interface QueueCreateOptions extends JsonOptions {
+  messageFile?: string;
   model?: string;
 }
 
 interface QueueUpdateOptions extends JsonOptions {
   file?: string[];
   image?: string[];
+  messageFile?: string;
 }
 
 interface QueueSendOptions extends JsonOptions {
@@ -57,19 +78,78 @@ interface ReorderPinnedOptions extends JsonOptions {
   before?: string;
 }
 
+const THREAD_SEARCH_LIMIT_PER_GROUP_MAX = 50;
+
 function parsePositiveInteger(
   value: string | undefined,
   flag: string,
+  maximum?: number,
 ): string | undefined {
   if (value === undefined) return undefined;
   if (!/^\d+$/u.test(value) || Number(value) < 1) {
     throw new Error(`${flag} must be a positive integer.`);
+  }
+  if (maximum !== undefined && Number(value) > maximum) {
+    throw new Error(`${flag} must be at most ${maximum}.`);
   }
   return value;
 }
 
 function printHumanJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+const MAX_QUEUE_TEXT_WIDTH = 40;
+
+/**
+ * The queue as a table rather than raw JSON.
+ *
+ * `Waiting on` and `Send at` are the two columns that make a queued row
+ * legible: without them a queued message and one blocked behind a rate-limit
+ * window look identical, which is exactly the confusion the typed waits exist
+ * to remove.
+ */
+function printQueueTable(rows: ThreadQueuedMessagesResult): void {
+  const now = Date.now();
+  const table = rows.map((row) => [
+    row.id,
+    row.threadId,
+    row.initiator === "user"
+      ? ""
+      : row.initiator === "system"
+        ? "System"
+        : (row.senderThreadId ?? "Agent"),
+    truncateCell(queuedMessagePreview(row.content), MAX_QUEUE_TEXT_WIDTH),
+    truncateCell(describeQueueWait(row), MAX_QUEUE_TEXT_WIDTH),
+    formatQueueSendCountdown(row.sendAt, now),
+  ]);
+  printBorderlessTable(
+    {
+      head: ["ID", "Thread", "Sender", "Message", "Waiting on", "Send at"],
+      colWidths: columnWidths(table, [2, 6, 6, 7, 10, 7]),
+    },
+    table,
+  );
+}
+
+function queuedMessagePreview(content: PromptInput[]): string {
+  const text = content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join(" ");
+  return text.trim() === "" ? "(no text)" : text;
+}
+
+/**
+ * Wait holders are a prefixed set, so a typo fails here with the shape spelled
+ * out rather than as an opaque 400 from the list route.
+ */
+function parseWaitHolder(value: string): QueuedMessageWaitHolder {
+  const parsed = queuedMessageWaitHolderSchema.safeParse(value.trim());
+  if (parsed.success) return parsed.data;
+  throw new Error(
+    `Invalid --wait-holder value '${value}'. Expected 'plugin:<plugin-id>'.`,
+  );
 }
 
 export function registerOrganizationCommands(
@@ -150,13 +230,20 @@ export function registerOrganizationCommands(
   parent
     .command("search <query>")
     .description("Search threads and messages")
-    .option("--limit <count>", "Maximum results per group")
+    .option(
+      "--limit <count>",
+      `Maximum results per group (1-${THREAD_SEARCH_LIMIT_PER_GROUP_MAX})`,
+    )
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (query: string, opts: SearchOptions) => {
         const result = await createCliBbSdk(getUrl()).threads.search({
           query,
-          limitPerGroup: parsePositiveInteger(opts.limit, "--limit"),
+          limitPerGroup: parsePositiveInteger(
+            opts.limit,
+            "--limit",
+            THREAD_SEARCH_LIMIT_PER_GROUP_MAX,
+          ),
         });
         if (outputJson(opts, result)) return;
         printHumanJson(result);
@@ -223,26 +310,57 @@ export function registerOrganizationCommands(
     .command("queue")
     .description("Manage queued thread messages");
   queue
-    .command("list <threadId>")
-    .description("List queued messages")
+    .command("list [threadId]")
+    .description("List queued messages; omit the thread to list every one")
+    .option(
+      "--wait-holder <holder>",
+      "Filter to rows one plugin is holding: plugin:<plugin-id>",
+    )
     .option("--json", "Print machine-readable JSON output")
     .action(
-      action(async (threadId: string, opts: JsonOptions) => {
-        const result = await createCliBbSdk(
-          getUrl(),
-        ).threads.queuedMessages.list({ threadId });
+      action(async (threadId: string | undefined, opts: QueueListOptions) => {
+        const sdk = createCliBbSdk(getUrl());
+        // A thread argument keeps the thread-scoped route, which is the one
+        // that returns queue ORDER; the cross-thread route answers "what is
+        // queued anywhere" and is ordered by age instead.
+        const result =
+          threadId === undefined
+            ? await sdk.threads.queue.list({
+                ...(opts.waitHolder
+                  ? { waitHolder: parseWaitHolder(opts.waitHolder) }
+                  : {}),
+              })
+            : await sdk.threads.queuedMessages.list({ threadId });
         if (outputJson(opts, result)) return;
-        printHumanJson(result);
+        if (result.length === 0) {
+          console.log("No queued messages found");
+          return;
+        }
+        printQueueTable(result);
       }),
     );
   queue
-    .command("create <threadId> <message>")
+    .command("create <threadId> [message]")
     .description("Create a queued text message")
     .option("--model <model>", "Model override for the queued message")
+    .option(
+      "--message-file <path>",
+      `Read the message from a file instead of [message]; ${TEXT_FILE_HELP_SUFFIX}`,
+    )
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(
-        async (threadId: string, message: string, opts: QueueCreateOptions) => {
+        async (
+          threadId: string,
+          inlineMessage: string | undefined,
+          opts: QueueCreateOptions,
+        ) => {
+          const message = await requireTextInput({
+            file: opts.messageFile,
+            fileLabel: "--message-file",
+            inline: inlineMessage,
+            inlineLabel: "<message>",
+          });
           const result = await createCliBbSdk(
             getUrl(),
           ).threads.queuedMessages.create({
@@ -258,17 +376,21 @@ export function registerOrganizationCommands(
       ),
     );
   queue
-    .command("update <threadId> <messageId> <message>")
+    .command("update <threadId> <messageId> [message]")
     .description("Update a queued message in place")
     .option(
+      "--message-file <path>",
+      `Read the message from a file instead of [message]; ${TEXT_FILE_HELP_SUFFIX}`,
+    )
+    .option(
       "--file <path>",
-      "Pass a host-readable absolute or uploaded attachment file path (repeatable)",
+      "Upload an absolute path or file: URL from this CLI machine or pass an uploaded attachment path (repeatable)",
       collectOption,
       [],
     )
     .option(
       "--image <path>",
-      "Pass a host-readable absolute or uploaded attachment image path (repeatable)",
+      "Upload an absolute path or file: URL from this CLI machine or pass an uploaded attachment path (repeatable)",
       collectOption,
       [],
     )
@@ -278,11 +400,17 @@ export function registerOrganizationCommands(
         async (
           threadId: string,
           messageId: string,
-          message: string,
+          inlineMessage: string | undefined,
           opts: QueueUpdateOptions,
         ) => {
-          const queuedMessages =
-            createCliBbSdk(getUrl()).threads.queuedMessages;
+          const message = await requireTextInput({
+            file: opts.messageFile,
+            fileLabel: "--message-file",
+            inline: inlineMessage,
+            inlineLabel: "<message>",
+          });
+          const sdk = createCliBbSdk(getUrl());
+          const queuedMessages = sdk.threads.queuedMessages;
           const existing = (await queuedMessages.list({ threadId })).find(
             (queuedMessage) => queuedMessage.id === messageId,
           );
@@ -291,15 +419,21 @@ export function registerOrganizationCommands(
               `Queued message ${messageId} not found on thread ${threadId}.`,
             );
           }
-          const result = await queuedMessages.update({
-            threadId,
-            queuedMessageId: messageId,
-            expectedUpdatedAt: existing.updatedAt,
+          const input = await uploadClientAttachmentInputs({
             input: buildPromptInputs({
               message,
               files: opts.file,
               images: opts.image,
             }),
+            resolveProjectId: async () =>
+              (await sdk.threads.get({ threadId })).projectId,
+            sdk,
+          });
+          const result = await queuedMessages.update({
+            threadId,
+            queuedMessageId: messageId,
+            expectedUpdatedAt: existing.updatedAt,
+            input,
           });
           if (outputJson(opts, result)) return;
           console.log(`Queued message ${messageId} updated`);
@@ -324,6 +458,12 @@ export function registerOrganizationCommands(
             mode: opts.mode,
           });
           if (outputJson(opts, result)) return;
+          if (result.delivery === "queued") {
+            console.log(
+              `Queued message ${messageId} is still queued (${describeQueueWait(result.queuedMessage)})`,
+            );
+            return;
+          }
           console.log(`Queued message ${messageId} sent`);
         },
       ),

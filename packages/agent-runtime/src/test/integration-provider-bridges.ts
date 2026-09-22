@@ -1,39 +1,30 @@
-/**
- * The live-CLI integration suite's view of the first-party provider bridges.
- *
- * Every first-party bridge except Pi's now ships as a plugin artifact, and the
- * runtime has no bridge at all for such a provider unless the caller hands it
- * a `bridgeLaunch` — in production the server attaches one built from the
- * plugin's recorded artifact. `integration-global-setup.ts` builds those same
- * artifacts once per run and writes this manifest; the harness reads it
- * synchronously so `createTestRuntime` stays a plain constructor. Nothing is
- * stubbed: the tests launch the real built artifact.
- */
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { permissionModeSchema, providerForkSchema } from "@bb/domain";
-import { isAcpProviderId } from "../provider-catalog.js";
+import {
+  jsonObjectSchema,
+  permissionModeSchema,
+  providerForkSchema,
+} from "@bb/domain";
 import type { AgentRuntimeBridgeLaunch } from "../types.js";
 
-export const INTEGRATION_PROVIDER_BRIDGE_MANIFEST_PATH = join(
-  tmpdir(),
-  "bb-agent-runtime-integration-provider-bridges.json",
-);
+export function integrationProviderBridgeManifestPath(): string {
+  return join(tmpdir(), "bb-agent-runtime-integration-provider-bridges.json");
+}
 
 const bridgeLaunchSchema = z.object({
   pluginId: z.string(),
   dataDir: z.string(),
-  source: z.discriminatedUnion("kind", [
-    z.object({
-      kind: z.literal("artifact"),
-      digest: z.string(),
-      artifactPath: z.string(),
-    }),
-    z.object({ kind: z.literal("daemon-bundled"), id: z.string() }),
-  ]),
+  source: z.object({
+    kind: z.literal("artifact"),
+    digest: z.string(),
+    artifactPath: z.string(),
+  }),
+  providerOptions: jsonObjectSchema.default({}),
+  envPassthrough: z.array(z.string()).default([]),
   capabilities: z.object({
+    providerInstallation: z.boolean().default(false),
     supportsServiceTier: z.boolean(),
     permissionModes: z.array(permissionModeSchema),
     supportsThreadArchive: z.boolean(),
@@ -54,10 +45,10 @@ function readManifest(): IntegrationProviderBridgeManifest {
   }
   let raw: string;
   try {
-    raw = readFileSync(INTEGRATION_PROVIDER_BRIDGE_MANIFEST_PATH, "utf8");
+    raw = readFileSync(integrationProviderBridgeManifestPath(), "utf8");
   } catch {
     throw new Error(
-      `No provider bridge manifest at ${INTEGRATION_PROVIDER_BRIDGE_MANIFEST_PATH}. ` +
+      `No provider bridge manifest at ${integrationProviderBridgeManifestPath()}. ` +
         `Integration tests must run through vitest.integration.config.ts, whose ` +
         `global setup builds the first-party bridge artifacts.`,
     );
@@ -66,15 +57,6 @@ function readManifest(): IntegrationProviderBridgeManifest {
   return cachedManifest;
 }
 
-/**
- * The `bridgeLaunch` a live test must pass for this provider — an artifact for
- * a graduated plugin, or the daemon-bundled bridge id for Pi. Every provider
- * has one, exactly as on the wire.
- *
- * The ACP fallback mirrors the server's: `acp-*` ids other than the one the
- * plugin declares are resolved at request time and never registered, so they
- * borrow the ACP plugin's artifact.
- */
 export function resolveIntegrationBridgeLaunch(
   providerId: string,
 ): AgentRuntimeBridgeLaunch {
@@ -83,9 +65,9 @@ export function resolveIntegrationBridgeLaunch(
   if (direct !== undefined) {
     return direct;
   }
-  if (isAcpProviderId(providerId)) {
+  if (providerId.startsWith("acp-")) {
     const acpEntry = Object.entries(manifest).find(([id]) =>
-      isAcpProviderId(id),
+      id.startsWith("acp-"),
     );
     if (acpEntry) {
       return acpEntry[1];

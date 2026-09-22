@@ -11,6 +11,8 @@ import {
 import { Profiler, startTransition, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EMPTY_ORDERED_MENTION_SUGGESTIONS } from "@bb/client-core";
+import { AppCommandProvider } from "@/components/commands/AppCommandProvider";
 import {
   resetPluginSlotStoreForTest,
   setPluginSlotRegistrations,
@@ -19,6 +21,7 @@ import {
   FollowUpPromptBox,
   type FollowUpSubmitMode,
 } from "@/components/promptbox/FollowUpPromptBox";
+import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 
 const mocks = vi.hoisted(() => {
   const values = {
@@ -51,26 +54,56 @@ vi.mock("@bb/shared-ui/hooks/use-pointer-coarse", () => ({
   usePointerCoarse: () => mocks.isPointerCoarse,
 }));
 
+vi.mock("@/hooks/queries/system-queries", () => ({
+  useSystemConfig: () => ({
+    data: {
+      keybindings: [
+        {
+          command: "composer.focus",
+          desktopOnly: false,
+          shortcut: {
+            key: "c",
+            mod: false,
+            meta: true,
+            control: false,
+            alt: false,
+            shift: true,
+          },
+          when: {
+            all: ["mainSurface", "promptAvailable"],
+            none: [],
+          },
+        },
+      ],
+    },
+  }),
+}));
+
 vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
+  DEFAULT_COMPOSER_SCOPE: { kind: "new-thread", projectId: null },
   PromptBoxInternal: ({
     footerStart,
+    modeHeader,
     compact,
     onSubmit,
+    onEscape,
     blurOnPointerSubmit,
     promptBoxRef,
     submission,
     suppressPluginComposerCustomizations,
-    zenMode,
+    onCollapse,
     heightAnimationKey,
     minHeight,
     voice,
   }: {
     footerStart?: ReactNode;
+    modeHeader?: ReactNode;
     compact?: {
       isCompact: boolean;
       placeholder?: string;
     };
     onSubmit: () => void;
+    onEscape?: () => void;
     blurOnPointerSubmit?: boolean;
     promptBoxRef?: {
       current: {
@@ -78,9 +111,9 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
         focusEnd: () => void;
       } | null;
     };
-    submission?: { onModifierSubmit?: () => void };
+    submission?: { onModifierSubmit?: () => void; title?: string };
     suppressPluginComposerCustomizations?: boolean;
-    zenMode?: { resetKey: string | number };
+    onCollapse?: () => void;
     heightAnimationKey?: string | number;
     minHeight?: number;
     voice?: { state: "idle" | "recording" | "transcribing" | "error" };
@@ -88,7 +121,6 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
     <div
       data-testid="prompt-box"
       data-compact={compact?.isCompact}
-      data-zen-reset-key={zenMode?.resetKey}
       data-height-animation-key={heightAnimationKey}
       data-min-height={minHeight}
       data-voice-state={voice?.state}
@@ -96,6 +128,7 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
         suppressPluginComposerCustomizations ? "true" : "false"
       }
     >
+      {modeHeader}
       {footerStart}
       <input
         aria-label="Follow-up prompt"
@@ -128,9 +161,23 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
       >
         Submit
       </button>
-      <button type="button" onClick={submission?.onModifierSubmit}>
+      <button
+        type="button"
+        title={submission?.title}
+        onClick={submission?.onModifierSubmit}
+      >
         Modifier submit
       </button>
+      {onCollapse ? (
+        <button type="button" onClick={onCollapse}>
+          Collapse prompt box
+        </button>
+      ) : null}
+      {onEscape ? (
+        <button type="button" onClick={onEscape}>
+          Escape
+        </button>
+      ) : null}
     </div>
   ),
 }));
@@ -209,7 +256,6 @@ function createFollowUpPromptBoxProps(
     execution: {
       provider: {
         selectedId: "codex",
-        displayName: "Codex",
       },
       model: {
         selected: "gpt-5",
@@ -233,13 +279,13 @@ function createFollowUpPromptBoxProps(
     },
     typeahead: {
       mention: {
-        suggestions: [],
+        results: EMPTY_ORDERED_MENTION_SUGGESTIONS,
         isLoading: false,
         isError: false,
         onQueryChange: vi.fn(),
       },
       command: {
-        trigger: null,
+        triggers: [],
         suggestions: [],
         isLoading: false,
         isError: false,
@@ -249,7 +295,7 @@ function createFollowUpPromptBoxProps(
         onQueryChange: vi.fn(),
       },
     },
-    zenModeResetKey: "thr_test",
+    collapseResetKey: "thr_test",
   };
 }
 
@@ -322,27 +368,25 @@ describe("FollowUpPromptBox", () => {
   });
 
   it("includes expanding plugin banners in measured stack compensation", () => {
-    setPluginSlotRegistrations("measured-banner", {
-      homepageSections: [],
-      settingsSections: [],
-      navPanels: [],
-      threadPanelActions: [],
-      composerCustomizations: [
-        {
-          id: "measured",
-          banners: [
-            {
-              id: "banner",
-              component: () => <div>Expandable plugin banner</div>,
-            },
-          ],
-        },
-      ],
-      pendingInteractions: [],
-      sidebarFooterActions: [],
-      fileOpeners: [],
-      messageDirectives: [],
-    });
+    setPluginSlotRegistrations(
+      "measured-banner",
+      makePluginRegistrationSet({
+        composerCustomizations: [
+          {
+            id: "measured",
+            banners: [
+              {
+                id: "banner",
+                component: () => <div>Expandable plugin banner</div>,
+              },
+            ],
+          },
+        ],
+        pendingInteractions: [],
+        sidebarFooterActions: [],
+        fileOpeners: [],
+      }),
+    );
     const draft = { text: "Follow up", mentions: [], attachments: [] };
     const props = createFollowUpPromptBoxProps({ kind: "ready" });
     render(
@@ -351,9 +395,9 @@ describe("FollowUpPromptBox", () => {
         stack={<></>}
         pluginComposerHost={{
           scope: { kind: "thread", threadId: "thr_test" },
-          draft,
           textEffectKey: "thread:thr_test",
           getCurrent: () => draft,
+          subscribeDraft: () => () => {},
           setDraft: vi.fn(),
           focus: vi.fn(),
         }}
@@ -391,27 +435,25 @@ describe("FollowUpPromptBox", () => {
   });
 
   it("renders plugin banners above native stack content", () => {
-    setPluginSlotRegistrations("ordered-banner", {
-      homepageSections: [],
-      settingsSections: [],
-      navPanels: [],
-      threadPanelActions: [],
-      composerCustomizations: [
-        {
-          id: "ordered",
-          banners: [
-            {
-              id: "header",
-              component: () => <div data-testid="plugin-header">Header</div>,
-            },
-          ],
-        },
-      ],
-      pendingInteractions: [],
-      sidebarFooterActions: [],
-      fileOpeners: [],
-      messageDirectives: [],
-    });
+    setPluginSlotRegistrations(
+      "ordered-banner",
+      makePluginRegistrationSet({
+        composerCustomizations: [
+          {
+            id: "ordered",
+            banners: [
+              {
+                id: "header",
+                component: () => <div data-testid="plugin-header">Header</div>,
+              },
+            ],
+          },
+        ],
+        pendingInteractions: [],
+        sidebarFooterActions: [],
+        fileOpeners: [],
+      }),
+    );
     const draft = { text: "Follow up", mentions: [], attachments: [] };
     const props = createFollowUpPromptBoxProps({ kind: "ready" });
     render(
@@ -420,9 +462,9 @@ describe("FollowUpPromptBox", () => {
         stack={<div data-testid="queued-messages">Queued messages</div>}
         pluginComposerHost={{
           scope: { kind: "thread", threadId: "thr_test" },
-          draft,
           textEffectKey: "thread:thr_test",
           getCurrent: () => draft,
+          subscribeDraft: () => () => {},
           setDraft: vi.fn(),
           focus: vi.fn(),
         }}
@@ -435,6 +477,56 @@ describe("FollowUpPromptBox", () => {
       .closest("[data-bb-plugin-root]");
     const queuedMessages = screen.getByTestId("queued-messages");
     expect(queuedMessages.previousElementSibling).toBe(pluginHeaderRoot);
+  });
+
+  it("lays the banner stack on an explicit single-column track", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    render(
+      <FollowUpPromptBox
+        {...props}
+        stack={<div data-testid="queued-messages">Queued messages</div>}
+      />,
+    );
+
+    const stack = screen.getByTestId("queued-messages").parentElement;
+    expect(stack?.className).toContain("grid-cols-[minmax(0,1fr)]");
+  });
+
+  it("does not mount plugin banners for a retained inactive composer without a real scope", () => {
+    setPluginSlotRegistrations(
+      "inactive-banner",
+      makePluginRegistrationSet({
+        composerCustomizations: [
+          {
+            id: "inactive",
+            banners: [
+              {
+                id: "banner",
+                component: () => (
+                  <div data-testid="inactive-plugin-banner">Plugin banner</div>
+                ),
+              },
+            ],
+          },
+        ],
+        pendingInteractions: [],
+        sidebarFooterActions: [],
+        fileOpeners: [],
+      }),
+    );
+
+    render(
+      <FollowUpPromptBox
+        {...createFollowUpPromptBoxProps({ kind: "ready" })}
+        stack={<div data-testid="retained-native-stack">Queued messages</div>}
+        pluginComposerHost={null}
+        pluginComposerScope={null}
+        suppressPluginComposerCustomizations
+      />,
+    );
+
+    expect(screen.getByTestId("retained-native-stack")).toBeTruthy();
+    expect(screen.queryByTestId("inactive-plugin-banner")).toBeNull();
   });
 
   it("keeps the bottom composer mounted when its stack changes", () => {
@@ -468,37 +560,83 @@ describe("FollowUpPromptBox", () => {
     expect(props.composer?.onSubmit).toHaveBeenCalledOnce();
   });
 
+  it("keeps the editor mounted and hidden while a pending interaction takes its place", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    const { container, rerender } = render(<FollowUpPromptBox {...props} />);
+    const promptBox = screen.getByTestId("prompt-box");
+    const input = screen.getByLabelText<HTMLInputElement>("Follow-up prompt");
+    input.value = "Draft typed before the approval";
+    const composerShell = container.querySelector<HTMLElement>(
+      "[data-follow-up-composer]",
+    );
+    expect(composerShell?.hidden).toBe(false);
+
+    rerender(
+      <FollowUpPromptBox
+        {...props}
+        composer={{
+          ...props.composer!,
+          submitMode: { kind: "blocked", reason: "pending-interaction" },
+        }}
+        stack={<div data-testid="pending-stack">Plan mode</div>}
+        pendingInteraction={
+          <div data-testid="pending-interaction">Allow file write?</div>
+        }
+      />,
+    );
+
+    expect(screen.getByTestId("prompt-box")).toBe(promptBox);
+    expect(screen.getByLabelText("Follow-up prompt")).toBe(input);
+    expect(input.value).toBe("Draft typed before the approval");
+    expect(composerShell?.hidden).toBe(true);
+    const interaction = screen.getByTestId("pending-interaction");
+    const stackItem = screen.getByTestId("pending-stack");
+    expect(
+      stackItem.compareDocumentPosition(interaction) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(
+      interaction.compareDocumentPosition(promptBox) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+
+    rerender(<FollowUpPromptBox {...props} />);
+
+    expect(screen.getByTestId("prompt-box")).toBe(promptBox);
+    expect(screen.getByLabelText("Follow-up prompt")).toBe(input);
+    expect(composerShell?.hidden).toBe(false);
+    expect(screen.queryByTestId("pending-interaction")).toBeNull();
+  });
+
   it.each([
     ["main-thread", true],
     ["side-chat", false],
   ] as const)(
     "renders queued-message banners before the %s inline composer",
     (_kind, isPrimaryComposer) => {
-      setPluginSlotRegistrations("queued-tools", {
-        homepageSections: [],
-        settingsSections: [],
-        navPanels: [],
-        threadPanelActions: [],
-        composerCustomizations: [
-          {
-            id: "queued-banner",
-            scopes: ["queued-message"],
-            banners: [
-              {
-                id: "status",
-                chrome: "bare",
-                component: () => (
-                  <div data-testid="queued-plugin-banner">Queued status</div>
-                ),
-              },
-            ],
-          },
-        ],
-        pendingInteractions: [],
-        sidebarFooterActions: [],
-        fileOpeners: [],
-        messageDirectives: [],
-      });
+      setPluginSlotRegistrations(
+        "queued-tools",
+        makePluginRegistrationSet({
+          composerCustomizations: [
+            {
+              id: "queued-banner",
+              scopes: ["queued-message"],
+              banners: [
+                {
+                  id: "status",
+                  chrome: "bare",
+                  component: () => (
+                    <div data-testid="queued-plugin-banner">Queued status</div>
+                  ),
+                },
+              ],
+            },
+          ],
+          pendingInteractions: [],
+          sidebarFooterActions: [],
+          fileOpeners: [],
+        }),
+      );
       const draft = { text: "Queued draft", mentions: [], attachments: [] };
       const scope = {
         kind: "queued-message" as const,
@@ -512,9 +650,9 @@ describe("FollowUpPromptBox", () => {
           isPrimaryComposer={isPrimaryComposer}
           pluginComposerHost={{
             scope,
-            draft,
             textEffectKey: "queued:queued_1",
             getCurrent: () => draft,
+            subscribeDraft: () => () => {},
             setDraft: vi.fn(),
             focus: vi.fn(),
           }}
@@ -564,6 +702,57 @@ describe("FollowUpPromptBox", () => {
     expect(mocks.scrollToBottom).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])(
+    "keeps exit handoff available without replacing the editor (compact viewport: %s)",
+    (isCompactViewport) => {
+      mocks.isCompactViewport = isCompactViewport;
+      const props = createFollowUpPromptBoxProps({ kind: "ready" });
+      const handoff = {
+        sourceProviderId: "codex",
+        active: false,
+        onStart: vi.fn(),
+        onExit: vi.fn(),
+        onSelect: vi.fn(),
+      };
+      props.execution.handoff = handoff;
+      const { rerender } = render(<FollowUpPromptBox {...props} />);
+      const editor = screen.getByLabelText("Follow-up prompt");
+      expect(screen.queryByRole("button", { name: "Exit handoff" })).toBeNull();
+
+      rerender(
+        <FollowUpPromptBox
+          {...props}
+          execution={{
+            ...props.execution,
+            handoff: { ...handoff, active: true },
+          }}
+        />,
+      );
+      expect(screen.getByLabelText("Follow-up prompt")).toBe(editor);
+      expect(screen.getByText("Handoff to new thread")).not.toBeNull();
+      const exit = screen.getByRole("button", { name: "Exit handoff" });
+      expect(exit.textContent).toBe("");
+      fireEvent.click(exit);
+      expect(handoff.onExit).toHaveBeenCalledOnce();
+
+      rerender(<FollowUpPromptBox {...props} />);
+      expect(screen.queryByRole("button", { name: "Exit handoff" })).toBeNull();
+      expect(screen.getByLabelText("Follow-up prompt")).toBe(editor);
+    },
+  );
+
+  it("forwards the composer's host Escape action", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    const onEscape = vi.fn();
+    if (!props.composer) throw new Error("Expected follow-up composer props");
+    props.composer.onEscape = onEscape;
+
+    render(<FollowUpPromptBox {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Escape" }));
+
+    expect(onEscape).toHaveBeenCalledOnce();
+  });
+
   it.each([
     {
       setting: false,
@@ -606,6 +795,38 @@ describe("FollowUpPromptBox", () => {
       fireEvent.click(screen.getByText("Modifier submit"));
       expect(expectedModifier).toHaveBeenCalledOnce();
       expect(mocks.scrollToBottom).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    { setting: false, title: "Queue follow-up (Enter), Ctrl + Enter to steer" },
+    {
+      setting: true,
+      title: "Steer current run (Enter), Ctrl + Enter to queue",
+    },
+  ])(
+    "shows the platform modifier shortcut in the submit title when steer-on-Enter is $setting",
+    ({ setting, title }) => {
+      const platformMock = vi
+        .spyOn(navigator, "platform", "get")
+        .mockReturnValue("Win32");
+      try {
+        const props = createFollowUpPromptBoxProps({
+          kind: "queue",
+          onStop: vi.fn(),
+        });
+        if (!props.composer) {
+          throw new Error("Expected follow-up composer props");
+        }
+        props.composer.steerActiveThreadOnEnter = setting;
+        render(<FollowUpPromptBox {...props} />);
+
+        expect(screen.getByText("Modifier submit").getAttribute("title")).toBe(
+          title,
+        );
+      } finally {
+        platformMock.mockRestore();
+      }
     },
   );
 
@@ -665,6 +886,81 @@ describe("FollowUpPromptBox", () => {
     expect(
       screen.queryByRole("button", { name: /Make prompt box/u }),
     ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Collapse prompt box" }),
+    ).toBeNull();
+  });
+
+  it("collapses a wide composer until the user focuses it again", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    props.environmentSummary = <span>Local environment</span>;
+    render(<FollowUpPromptBox {...props} />);
+
+    expect(screen.getByText("Local environment")).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse prompt box" }),
+    );
+
+    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
+      "true",
+    );
+    expect(screen.queryByText("Local environment")).toBeNull();
+
+    act(() =>
+      screen.getByRole("textbox", { name: "Follow-up prompt" }).focus(),
+    );
+
+    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
+      null,
+    );
+    expect(screen.getByText("Local environment")).toBeTruthy();
+  });
+
+  it("keeps a collapsed composer steady while a pointer focuses an action", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    render(<FollowUpPromptBox {...props} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse prompt box" }),
+    );
+    const submit = screen.getByRole("button", { name: "Submit" });
+
+    fireEvent.pointerDown(submit, { button: 0, pointerType: "mouse" });
+    act(() => submit.focus());
+
+    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
+      "true",
+    );
+    fireEvent.pointerUp(submit, { button: 0, pointerType: "mouse" });
+    fireEvent.click(submit);
+    expect(props.composer?.onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("toggles between focused and collapsed with the composer shortcut", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    props.environmentSummary = <span>Local environment</span>;
+    render(
+      <AppCommandProvider>
+        <FollowUpPromptBox {...props} />
+      </AppCommandProvider>,
+    );
+    const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
+
+    act(() => input.focus());
+    fireEvent.keyDown(input, { key: "c", metaKey: true, shiftKey: true });
+
+    expect(document.activeElement).not.toBe(input);
+    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
+      "true",
+    );
+    expect(screen.queryByText("Local environment")).toBeNull();
+
+    fireEvent.keyDown(window, { key: "c", metaKey: true, shiftKey: true });
+
+    expect(document.activeElement).toBe(input);
+    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
+      null,
+    );
+    expect(screen.getByText("Local environment")).toBeTruthy();
   });
 
   it("collapses after a pointer submission when the keyboard viewport settles", async () => {
@@ -892,6 +1188,133 @@ describe("FollowUpPromptBox", () => {
     );
   });
 
+  it("stays expanded while a composer overlay trigger is held", () => {
+    mocks.isCompactViewport = true;
+    vi.useFakeTimers();
+
+    try {
+      render(
+        <FollowUpPromptBox
+          {...createFollowUpPromptBoxProps({ kind: "ready" })}
+        />,
+      );
+      const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
+      const trigger = screen.getByRole("button", { name: "Submit" });
+      trigger.setAttribute("aria-haspopup", "menu");
+      trigger.setAttribute("aria-expanded", "false");
+      act(() => input.focus());
+
+      act(() => {
+        fireEvent.pointerDown(trigger);
+        input.blur();
+        vi.advanceTimersByTime(20);
+      });
+
+      expect(
+        screen.getByTestId("prompt-box").getAttribute("data-compact"),
+      ).toBe("false");
+
+      act(() => {
+        fireEvent.pointerUp(trigger);
+        trigger.setAttribute("aria-expanded", "true");
+        vi.runOnlyPendingTimers();
+        trigger.setAttribute("aria-expanded", "false");
+        trigger.focus();
+        trigger.blur();
+        vi.advanceTimersByTime(20);
+      });
+
+      expect(
+        screen.getByTestId("prompt-box").getAttribute("data-compact"),
+      ).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])(
+    "cancels a pending keyboard collapse when pressing a control (overlay: %s)",
+    (isOverlay) => {
+      mocks.isCompactViewport = true;
+      mocks.isPointerCoarse = true;
+      vi.useFakeTimers();
+      const originalDescriptor = Object.getOwnPropertyDescriptor(
+        window,
+        "visualViewport",
+      );
+      const visualViewport = Object.assign(new EventTarget(), { height: 500 });
+      Object.defineProperty(window, "visualViewport", {
+        configurable: true,
+        value: visualViewport,
+      });
+
+      try {
+        const props = createFollowUpPromptBoxProps({ kind: "ready" });
+        render(<FollowUpPromptBox {...props} />);
+        const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
+        const control = screen.getByRole("button", { name: "Submit" });
+        if (isOverlay) control.setAttribute("aria-haspopup", "menu");
+        act(() => input.focus());
+        act(() => {
+          visualViewport.height = 300;
+          visualViewport.dispatchEvent(new Event("resize"));
+          vi.advanceTimersByTime(20);
+        });
+        act(() => input.blur());
+        act(() => vi.advanceTimersByTime(550));
+
+        fireEvent.pointerDown(control, { button: 0, pointerType: "touch" });
+        act(() => vi.advanceTimersByTime(300));
+
+        expect(
+          screen.getByTestId("prompt-box").getAttribute("data-compact"),
+        ).toBe("false");
+        fireEvent.pointerUp(control, { button: 0, pointerType: "touch" });
+        fireEvent.click(control);
+        expect(props.composer?.onSubmit).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+        if (originalDescriptor) {
+          Object.defineProperty(window, "visualViewport", originalDescriptor);
+        } else {
+          Reflect.deleteProperty(window, "visualViewport");
+        }
+      }
+    },
+  );
+
+  it.each(["pointerUp", "pointerCancel"] as const)(
+    "resumes deferred focus loss after a control gesture ends with %s",
+    (releaseEvent) => {
+      mocks.isCompactViewport = true;
+      vi.useFakeTimers();
+      try {
+        render(
+          <FollowUpPromptBox
+            {...createFollowUpPromptBoxProps({ kind: "ready" })}
+          />,
+        );
+        const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
+        const control = screen.getByRole("button", { name: "Submit" });
+        act(() => input.focus());
+        fireEvent.pointerDown(control);
+        act(() => input.blur());
+        act(() => vi.advanceTimersByTime(20));
+        expect(
+          screen.getByTestId("prompt-box").getAttribute("data-compact"),
+        ).toBe("false");
+
+        fireEvent[releaseEvent](control);
+        act(() => vi.advanceTimersByTime(20));
+        expect(
+          screen.getByTestId("prompt-box").getAttribute("data-compact"),
+        ).toBe("true");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("stays expanded after pressing a non-focusable composer control", () => {
     mocks.isCompactViewport = true;
     const props = createFollowUpPromptBoxProps({ kind: "ready" });
@@ -969,6 +1392,18 @@ describe("FollowUpPromptBox", () => {
         Reflect.deleteProperty(window, "visualViewport");
       }
     }
+  });
+
+  it("keeps the status footer out of text selection", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    props.environmentSummary = <span>Local environment</span>;
+    render(<FollowUpPromptBox {...props} />);
+
+    const footer = document.querySelector("[data-follow-up-composer-footer]");
+    expect(footer?.classList.contains("select-none")).toBe(true);
+    expect(screen.getByText("Local environment").closest(".select-none")).toBe(
+      footer,
+    );
   });
 
   it("keeps the full composer visible on desktop", () => {
@@ -1049,16 +1484,12 @@ describe("FollowUpPromptBox", () => {
     rerender(<FollowUpPromptBox {...props} focusEndKey="mobile" />);
 
     expect(screen.getByTestId("prompt-box")).toBe(initialPromptBox);
-    expect(initialPromptBox.getAttribute("data-zen-reset-key")).toBe(
-      "thr_test:mobile",
-    );
   });
 
   it("uses the caller-specific compact placeholder", () => {
     mocks.isCompactViewport = true;
     const props = createFollowUpPromptBoxProps({
-      kind: "blocked",
-      reason: "stopping",
+      kind: "queue-while-stopping",
     });
     if (props.composer === null) throw new Error("Missing composer");
     props.composer.compactPromptPlaceholder = "Stopping side chat...";

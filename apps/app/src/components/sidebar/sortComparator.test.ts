@@ -1,59 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@bb/domain";
-import {
-  getSelectedThreadSidebarExpansion,
-  getSidebarThreadComparator,
-} from "./ProjectList";
+import { getSidebarThreadComparator } from "./ProjectList";
+import { getThreadSidebarExpansion } from "./useSidebarThreadReveal";
 import {
   CHRONOLOGICAL_CONTAINER_ID,
   type ProjectThreadNode,
   type ProjectThreadItem,
   type ThreadComparator,
-} from "./projectThreadGroups";
-import { NO_COLLAPSED_CHILD_ACTIVITY } from "@/lib/thread-activity";
+} from "@bb/client-core";
+import { NO_COLLAPSED_CHILD_ACTIVITY } from "@bb/client-core";
 import type { ThreadTitleMentionResources } from "@/components/thread/ThreadTitleMentions";
+import { makeThreadListEntry } from "@bb/test-helpers/domain-fixtures";
 
 function thread(overrides: Partial<ThreadListEntry>): ThreadListEntry {
-  return {
+  return makeThreadListEntry({
     id: "thr_1",
     projectId: "proj_1",
-    environmentId: null,
-    providerId: "codex",
     title: "Thread",
     titleFallback: "Thread",
-    sectionId: null,
-    status: "idle",
-    parentThreadId: null,
-    sourceThreadId: null,
-    originKind: null,
-    originPluginId: null,
-    visibility: "visible",
-    archivedAt: null,
-    pinnedAt: null,
-    pinSortKey: null,
-    deletedAt: null,
     lastReadAt: 0,
     latestAttentionAt: 2,
     createdAt: 1,
     updatedAt: 2,
-    activity: {
-      activeWorkflowCount: 0,
-      activeBackgroundAgentCount: 0,
-      activeBackgroundCommandCount: 0,
-      activePlanModeCount: 0,
-      activeGoalCount: 0,
-    },
-    hasPendingInteraction: false,
-    environmentHostId: null,
-    environmentName: null,
-    environmentBranchName: null,
-    environmentWorkspaceDisplayKind: "other",
-    runtime: {
-      displayStatus: "idle",
-      hostReconnectGraceExpiresAt: null,
-    },
     ...overrides,
-  };
+  });
 }
 
 function threadNode(entry: ThreadListEntry): ProjectThreadNode {
@@ -80,6 +50,7 @@ function environmentItem(
     kind: "environment",
     group: {
       environmentId: representative.environmentId ?? "env_test",
+      environmentProviderId: "git-worktree",
       nodes: [threadNode(representative), threadNode(sibling)],
       stats: {
         childCount: 0,
@@ -138,6 +109,79 @@ function order(comparator: ThreadComparator, entries: ThreadListEntry[]) {
 }
 
 describe("getSidebarThreadComparator", () => {
+  it.each(["updated", "none"] as const)(
+    "keeps active threads first in both directions for %s",
+    (sort) => {
+      const entries = [
+        thread({
+          id: "idle_new",
+          status: "idle",
+          createdAt: 30,
+          latestAttentionAt: 200,
+        }),
+        thread({
+          id: "active_old",
+          status: "active",
+          createdAt: 10,
+          latestAttentionAt: 2000,
+        }),
+        thread({
+          id: "idle_old",
+          status: "idle",
+          createdAt: 40,
+          latestAttentionAt: 100,
+        }),
+        thread({
+          id: "active_new",
+          status: "active",
+          createdAt: 20,
+          latestAttentionAt: 1500,
+        }),
+      ];
+
+      expect(
+        order(
+          getSidebarThreadComparator(sort, undefined, "ascending"),
+          entries,
+        ),
+      ).toEqual(["active_old", "active_new", "idle_old", "idle_new"]);
+      for (const direction of ["default", "descending"] as const) {
+        expect(
+          order(
+            getSidebarThreadComparator(sort, undefined, direction),
+            entries,
+          ),
+        ).toEqual(["active_new", "active_old", "idle_new", "idle_old"]);
+      }
+    },
+  );
+
+  it("reverses created dates", () => {
+    expect(
+      order(getSidebarThreadComparator("created", undefined, "ascending"), [
+        cherry,
+        apple,
+        banana,
+      ]),
+    ).toEqual(["thr_a", "thr_b", "thr_c"]);
+  });
+
+  it("reverses both thread and group alphabetical comparison", () => {
+    const comparator = getSidebarThreadComparator(
+      "alpha",
+      undefined,
+      "descending",
+    );
+    expect(order(comparator, [apple, banana, cherry])).toEqual([
+      "thr_c",
+      "thr_b",
+      "thr_a",
+    ]);
+    expect(
+      comparator.compareItems?.(sectionItem("Apple"), sectionItem("Zebra")),
+    ).toBeGreaterThan(0);
+  });
+
   it("created lists newest first", () => {
     expect(
       order(getSidebarThreadComparator("created"), [apple, banana, cherry]),
@@ -281,7 +325,6 @@ describe("getSidebarThreadComparator", () => {
     ).toEqual(["thr_a", "thr_z"]);
   });
 
-  // Regression: leaf threads and mixed section/thread items must both sort A→Z.
   it("alphabetical leaf and item comparators agree", () => {
     const comparator = getSidebarThreadComparator("alpha");
     expect(comparator.compareItems).toBeDefined();
@@ -293,43 +336,61 @@ describe("getSidebarThreadComparator", () => {
   });
 });
 
-describe("getSelectedThreadSidebarExpansion", () => {
+describe("getThreadSidebarExpansion", () => {
   it("expands the personal threads section in project mode", () => {
     expect(
-      getSelectedThreadSidebarExpansion({
+      getThreadSidebarExpansion({
         organizationMode: "project",
         isPinned: false,
-        selectedThread: thread({ projectId: PERSONAL_PROJECT_ID }),
+        sidebarProjectId: PERSONAL_PROJECT_ID,
+        thread: thread({ projectId: PERSONAL_PROJECT_ID }),
       }),
     ).toEqual({ sidebarSectionId: "threads" });
   });
 
   it("expands the owning project in project mode", () => {
     expect(
-      getSelectedThreadSidebarExpansion({
+      getThreadSidebarExpansion({
         organizationMode: "project",
         isPinned: false,
-        selectedThread: thread({ projectId: "proj_app" }),
+        sidebarProjectId: "proj_app",
+        thread: thread({ projectId: "proj_app" }),
+      }),
+    ).toEqual({ projectId: "proj_app" });
+  });
+
+  it("expands the root ancestor's project for a cross-project child in project mode", () => {
+    expect(
+      getThreadSidebarExpansion({
+        organizationMode: "project",
+        isPinned: false,
+        sidebarProjectId: "proj_app",
+        thread: thread({
+          projectId: "proj_web",
+          parentThreadId: "thr_parent",
+        }),
       }),
     ).toEqual({ projectId: "proj_app" });
   });
 
   it("expands the threads section for unsectioned project threads in sections mode", () => {
     expect(
-      getSelectedThreadSidebarExpansion({
+      getThreadSidebarExpansion({
         organizationMode: "chronological",
         isPinned: false,
-        selectedThread: thread({ sectionId: null, projectId: "proj_app" }),
+        sidebarProjectId: "proj_app",
+        thread: thread({ sectionId: null, projectId: "proj_app" }),
       }),
     ).toEqual({ sidebarSectionId: "threads" });
   });
 
   it("expands the containing section for sectioned threads in sections mode", () => {
     expect(
-      getSelectedThreadSidebarExpansion({
+      getThreadSidebarExpansion({
         organizationMode: "chronological",
         isPinned: false,
-        selectedThread: thread({
+        sidebarProjectId: "proj_app",
+        thread: thread({
           sectionId: "sec_work",
           projectId: "proj_app",
         }),
@@ -341,30 +402,33 @@ describe("getSelectedThreadSidebarExpansion", () => {
 
   it("expands the owning machine group in machine mode", () => {
     expect(
-      getSelectedThreadSidebarExpansion({
+      getThreadSidebarExpansion({
         organizationMode: "machine",
         isPinned: false,
-        selectedThread: thread({
+        sidebarProjectId: "proj_app",
+        thread: thread({
           projectId: "proj_app",
           environmentHostId: "host_a",
         }),
       }),
     ).toEqual({ machineKey: "host_a" });
     expect(
-      getSelectedThreadSidebarExpansion({
+      getThreadSidebarExpansion({
         organizationMode: "machine",
         isPinned: false,
-        selectedThread: thread({ projectId: "proj_app" }),
+        sidebarProjectId: "proj_app",
+        thread: thread({ projectId: "proj_app" }),
       }),
     ).toEqual({ machineKey: "no-machine" });
   });
 
   it("expands the pinned section for pinned threads", () => {
     expect(
-      getSelectedThreadSidebarExpansion({
+      getThreadSidebarExpansion({
         organizationMode: "chronological",
         isPinned: true,
-        selectedThread: thread({ sectionId: null, projectId: "proj_app" }),
+        sidebarProjectId: "proj_app",
+        thread: thread({ sectionId: null, projectId: "proj_app" }),
       }),
     ).toEqual({ sidebarSectionId: "pinned" });
   });

@@ -7,16 +7,10 @@ import {
 } from "@bb/connect-client";
 import { ConnectPairError } from "./redeem.js";
 import type { ConnectTunnel } from "./tunnel.js";
-import type { ConnectStatus } from "./types.js";
+import type { ConnectStatus, ShareListing } from "./types.js";
 import { MachineCodeError, type MachineCode } from "./machine-code.js";
 import type { ShareHostResolver } from "./hosts.js";
-import type { ShareListing } from "./shares.js";
 
-// Panel-facing rpc surface. `server` is optional: the dashboard command
-// carries both --code and --server, but the panel's paste-a-code field only
-// has the code — the server URL is then derived from the redeemed handle
-// (https://<handle>.getbb.app). `baseUrl` overrides the connect cloud apex
-// (tests and self-hosted gates).
 const pairInputSchema = z.object({
   code: z.string().min(1),
   server: z.string().url().optional(),
@@ -31,7 +25,7 @@ const portInputSchema = z
   .strict();
 const revokeMachineInputSchema = z.object({ machineId: z.string().min(1) });
 
-const connectShareStatusSchema = z
+const shareListingSchema: z.ZodType<ShareListing> = z
   .object({
     hostId: z.string(),
     hostName: z.string(),
@@ -54,18 +48,7 @@ const connectStatusSchema: z.ZodType<ConnectStatus> = z
     since: z.number(),
     remoteClients: z.number().int(),
     lastRemoteActivityAt: z.number().nullable(),
-    shares: z.array(connectShareStatusSchema),
-  })
-  .strict();
-
-const shareListingSchema: z.ZodType<ShareListing> = z
-  .object({
-    hostId: z.string(),
-    hostName: z.string(),
-    port: z.number().int(),
-    createdAt: z.number(),
-    url: z.string(),
-    unavailableReason: z.string().optional(),
+    shares: z.array(shareListingSchema),
   })
   .strict();
 
@@ -95,6 +78,12 @@ const desktopSessionSchema: z.ZodType<DesktopSession> = z
         value: z.string(),
       })
       .strict(),
+  })
+  .strict();
+
+const mobilePairingSchema = z
+  .object({
+    enabled: z.boolean(),
   })
   .strict();
 
@@ -128,6 +117,7 @@ export const connectRpcContract = defineRpcContract({
     output: listAccountServersResultSchema,
   },
   createDesktopSession: { input: z.null(), output: desktopSessionSchema },
+  mobilePairing: { input: z.null(), output: mobilePairingSchema },
   createMachineCode: { input: z.null(), output: machineCodeSchema },
   revokeMachine: {
     input: revokeMachineInputSchema,
@@ -135,28 +125,40 @@ export const connectRpcContract = defineRpcContract({
   },
 });
 
-export type ConnectRpcHandlers = PluginRpcHandlers<typeof connectRpcContract>;
+type ConnectRpcHandlers = PluginRpcHandlers<typeof connectRpcContract>;
+
+async function rethrowErrorCode<T>(
+  operation: () => Promise<T>,
+  isCoded: (error: unknown) => error is { code: string },
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (isCoded(error)) throw new Error(error.code);
+    throw error;
+  }
+}
+
+export interface MobilePairingGate {
+  enabled(): Promise<boolean>;
+}
 
 export function createRpcHandlers(
   tunnel: ConnectTunnel,
   hostResolver: ShareHostResolver,
+  mobilePairing: MobilePairingGate,
 ): ConnectRpcHandlers {
   return {
     async pair(args) {
-      try {
-        return await tunnel.pair({
-          code: args.code,
-          ...(args.server !== undefined ? { serverUrl: args.server } : {}),
-          ...(args.baseUrl !== undefined ? { baseUrl: args.baseUrl } : {}),
-        });
-      } catch (error) {
-        // The panel maps stable codes to human copy; raw detail stays in the
-        // plugin log (see ConnectTunnel.pair). Never surface wire text.
-        if (error instanceof ConnectPairError) {
-          throw new Error(error.code);
-        }
-        throw error;
-      }
+      return rethrowErrorCode(
+        () =>
+          tunnel.pair({
+            code: args.code,
+            ...(args.server !== undefined ? { serverUrl: args.server } : {}),
+            ...(args.baseUrl !== undefined ? { baseUrl: args.baseUrl } : {}),
+          }),
+        (error) => error instanceof ConnectPairError,
+      );
     },
     async status() {
       return tunnel.refreshStatus();
@@ -181,36 +183,25 @@ export function createRpcHandlers(
       return tunnel.listShares();
     },
     async listAccountServers() {
-      try {
-        return await tunnel.listAccountServers();
-      } catch (error) {
-        // Stable codes for callers (CLI / panel); raw detail stays on the error
-        // message for plugin logs when surfaced elsewhere.
-        if (error instanceof ConnectListError) {
-          throw new Error(error.code);
-        }
-        throw error;
-      }
+      return rethrowErrorCode(
+        () => tunnel.listAccountServers(),
+        (error) => error instanceof ConnectListError,
+      );
     },
     async createDesktopSession() {
-      try {
-        return await tunnel.createDesktopSession();
-      } catch (error) {
-        if (error instanceof ConnectListError) {
-          throw new Error(error.code);
-        }
-        throw error;
-      }
+      return rethrowErrorCode(
+        () => tunnel.createDesktopSession(),
+        (error) => error instanceof ConnectListError,
+      );
+    },
+    async mobilePairing() {
+      return { enabled: await mobilePairing.enabled() };
     },
     async createMachineCode() {
-      try {
-        return await tunnel.createMachineCode();
-      } catch (error) {
-        if (error instanceof MachineCodeError) {
-          throw new Error(error.code);
-        }
-        throw error;
-      }
+      return rethrowErrorCode(
+        () => tunnel.createMachineCode(),
+        (error) => error instanceof MachineCodeError,
+      );
     },
     async revokeMachine(args) {
       await tunnel.revokeMachine(args.machineId);

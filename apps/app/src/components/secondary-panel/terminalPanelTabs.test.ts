@@ -1,4 +1,4 @@
-import type { TerminalSession } from "@bb/server-contract";
+import { openSecondaryPanelTabInState } from "@bb/client-core";
 import { describe, expect, it } from "vitest";
 import {
   createEmptyFixedPanelTabsState,
@@ -7,38 +7,14 @@ import {
 } from "@/lib/fixed-panel-tabs-state";
 import {
   buildTerminalSyncedSecondaryFileTabs,
-  findActiveTerminalIdInSecondaryFileTabs,
   getRetainedTerminalTabId,
   pruneTerminalTabsForSessions,
   syncTerminalTabsInFixedPanelState,
 } from "./terminalPanelTabs";
-
-type TerminalSessionOverrides = Partial<TerminalSession>;
+import { makeTerminalSession as terminalSession } from "@/test/fixtures/terminal-sessions";
 
 interface TabIdentity {
   id: string;
-}
-
-function terminalSession(
-  overrides: TerminalSessionOverrides,
-): TerminalSession {
-  return {
-    id: "term_1",
-    threadId: "thr_1",
-    environmentId: "env_1",
-    hostId: "host_1",
-    title: "Terminal",
-    initialCwd: "/workspace",
-    cols: 100,
-    rows: 30,
-    status: "running",
-    exitCode: null,
-    closeReason: null,
-    createdAt: 1,
-    updatedAt: 1,
-    lastUserInputAt: null,
-    ...overrides,
-  };
 }
 
 function tabIds(tabs: readonly TabIdentity[]): string[] {
@@ -216,37 +192,6 @@ describe("terminalPanelTabs", () => {
     ]);
   });
 
-  it("finds the active terminal id only for displayed terminal tabs", () => {
-    const terminalTab = createTerminalFixedPanelTab({ terminalId: "term_1" });
-    const fileTab = createHostFilePreviewFixedPanelTab({
-      environmentId: "env_1",
-      tab: {
-        lineRange: null,
-        path: "/workspace/file.ts",
-      },
-      threadId: "thr_1",
-    });
-
-    expect(
-      findActiveTerminalIdInSecondaryFileTabs({
-        activeTabId: terminalTab.id,
-        tabs: [fileTab, terminalTab],
-      }),
-    ).toBe("term_1");
-    expect(
-      findActiveTerminalIdInSecondaryFileTabs({
-        activeTabId: fileTab.id,
-        tabs: [fileTab, terminalTab],
-      }),
-    ).toBeNull();
-    expect(
-      findActiveTerminalIdInSecondaryFileTabs({
-        activeTabId: "terminal:term_stale",
-        tabs: [fileTab, terminalTab],
-      }),
-    ).toBeNull();
-  });
-
   it("syncs missing server terminal sessions into fixed panel state", () => {
     const fileTab = createHostFilePreviewFixedPanelTab({
       environmentId: "env_1",
@@ -280,7 +225,7 @@ describe("terminalPanelTabs", () => {
     expect(nextState.secondary.activeTabId).toBe(fileTab.id);
   });
 
-  it("removes stale fixed terminal tabs and clears stale active state", () => {
+  it("removes stale fixed terminal tabs and selects the remaining neighbor", () => {
     const staleTerminalTab = createTerminalFixedPanelTab({
       terminalId: "term_stale",
     });
@@ -300,10 +245,8 @@ describe("terminalPanelTabs", () => {
       terminalSessions: [terminalSession({ id: "term_1" })],
     });
 
-    expect(tabIds(nextState.secondary.tabs)).toEqual([
-      "terminal:term_1:none",
-    ]);
-    expect(nextState.secondary.activeTabId).toBeNull();
+    expect(tabIds(nextState.secondary.tabs)).toEqual(["terminal:term_1:none"]);
+    expect(nextState.secondary.activeTabId).toBe(currentTerminalTab.id);
   });
 
   it("removes a disconnected terminal without disturbing the active file tab", () => {
@@ -395,4 +338,34 @@ describe("terminalPanelTabs", () => {
     ]);
     expect(nextState.secondary.activeTabId).toBe(disconnectedTerminal.id);
   });
+});
+
+it("returns to the source if session synchronization removes an active terminal before its close callback", () => {
+  const source = createHostFilePreviewFixedPanelTab({
+    environmentId: "env_1",
+    threadId: "thr_1",
+    tab: { path: "/source.txt", lineRange: null },
+  });
+  const neighbor = createHostFilePreviewFixedPanelTab({
+    environmentId: "env_1",
+    threadId: "thr_1",
+    tab: { path: "/neighbor.txt", lineRange: null },
+  });
+  const terminal = createTerminalFixedPanelTab({ terminalId: "closing" });
+  const state = openSecondaryPanelTabInState({
+    state: createEmptyFixedPanelTabsState({
+      secondary: {
+        tabs: [source, neighbor],
+        activeTabId: source.id,
+        isOpen: true,
+      },
+    }),
+    tab: terminal,
+  });
+  const next = syncTerminalTabsInFixedPanelState({
+    state,
+    retainedTerminalId: null,
+    terminalSessions: [],
+  });
+  expect(next.secondary.activeTabId).toBe(source.id);
 });

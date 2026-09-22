@@ -1,4 +1,3 @@
-// Backend tests: reply-anchor seed policy, archive cascade, empty-fork sweep.
 import { describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
@@ -8,7 +7,6 @@ import plugin, {
   EMPTY_FORK_MAX_AGE_MS,
   EMPTY_FORK_SWEEP_PAGE_SIZE,
   REPLY_SEED_PREFIX,
-  lastConversationMessageText,
   resolveReplySeedText,
   timelineRowsContainUserMessage,
   type SideChatTimelineRowLike,
@@ -37,61 +35,41 @@ async function loadPlugin(sdkThreads: Record<string, unknown>) {
   return host;
 }
 
-describe("lastConversationMessageText", () => {
-  it("returns the last non-empty conversation text, recursing into turns", () => {
-    expect(
-      lastConversationMessageText([
-        conversationRow("first"),
-        turnRow([{ kind: "work" }, conversationRow("nested last")]),
-        { kind: "system" },
-      ]),
-    ).toBe("nested last");
-  });
-
-  it("ignores empty conversation rows and returns null with none", () => {
-    expect(lastConversationMessageText([conversationRow("   ")])).toBeNull();
-    expect(lastConversationMessageText([turnRow(null)])).toBeNull();
-  });
-});
-
 describe("resolveReplySeedText", () => {
-  const rows = [
-    conversationRow("earlier answer"),
-    conversationRow("latest answer"),
-  ];
-
-  it("returns null when the anchor IS the source's last conversation message", () => {
-    expect(
-      resolveReplySeedText({
-        anchorText: "  latest answer  ",
-        sourceTimelineRows: rows,
-      }),
-    ).toBeNull();
+  it("returns the trimmed anchor even when it is the latest source message", () => {
+    expect(resolveReplySeedText("  latest answer  ")).toBe("latest answer");
   });
 
   it("returns the trimmed anchor for an earlier message", () => {
-    expect(
-      resolveReplySeedText({
-        anchorText: " earlier answer ",
-        sourceTimelineRows: rows,
-      }),
-    ).toBe("earlier answer");
+    expect(resolveReplySeedText(" earlier answer ")).toBe("earlier answer");
   });
 
   it("returns null for an empty anchor (tip forks carry no seed)", () => {
-    expect(
-      resolveReplySeedText({ anchorText: "  ", sourceTimelineRows: rows }),
-    ).toBeNull();
-  });
-
-  it("returns the anchor when the source has no conversation messages", () => {
-    expect(
-      resolveReplySeedText({ anchorText: "anchor", sourceTimelineRows: [] }),
-    ).toBe("anchor");
+    expect(resolveReplySeedText("  ")).toBeNull();
   });
 });
 
 describe("createSideChat rpc", () => {
+  it("does not read the source timeline to decide whether to include the anchor", async () => {
+    const timeline = vi.fn();
+    const fork = vi.fn(
+      async (_args: { agentContextSeed?: Array<{ text: string }> }) =>
+        makeThreadResponse({ id: "thr_fork" }),
+    );
+    const { harness } = await loadPlugin({ timeline, fork });
+
+    await harness.callRpc("createSideChat", {
+      sourceThreadId: "thr_src",
+      sourceSeqEnd: 7,
+      anchorText: "latest answer",
+    });
+
+    expect(timeline).not.toHaveBeenCalled();
+    expect(fork.mock.calls[0]?.[0].agentContextSeed?.[0]?.text).toBe(
+      `${REPLY_SEED_PREFIX}latest answer`,
+    );
+  });
+
   it("forks hidden+isolated with a seed when the anchor is an earlier message", async () => {
     const fork = vi.fn(async () => makeThreadResponse({ id: "thr_fork" }));
     const { harness } = await loadPlugin({
@@ -111,10 +89,10 @@ describe("createSideChat rpc", () => {
 
     expect(result).toEqual({ threadId: "thr_fork" });
     expect(fork).toHaveBeenCalledWith({
+      lifecycleOwnerThreadId: "thr_src",
       sourceThreadId: "thr_src",
       sourceSeqEnd: 42,
       visibility: "hidden",
-      workspace: "reuse",
       agentContextSeed: [
         {
           type: "text",
@@ -123,6 +101,8 @@ describe("createSideChat rpc", () => {
           visibility: "agent-only",
         },
       ],
+      origin: "plugin",
+      originPluginId: PLUGIN_ID,
     });
   });
 
@@ -195,27 +175,6 @@ describe("createSideChat rpc", () => {
     expect(fork).toHaveBeenCalledTimes(1);
   });
 
-  it("forks without a seed when the anchor is the last conversation message", async () => {
-    const fork = vi.fn(async () => makeThreadResponse({ id: "thr_fork" }));
-    const { harness } = await loadPlugin({
-      timeline: async () => timelineResult([conversationRow("latest answer")]),
-      fork,
-    });
-
-    await harness.callRpc("createSideChat", {
-      sourceThreadId: "thr_src",
-      sourceSeqEnd: 7,
-      anchorText: "latest answer",
-    });
-
-    expect(fork).toHaveBeenCalledWith({
-      sourceThreadId: "thr_src",
-      sourceSeqEnd: 7,
-      visibility: "hidden",
-      workspace: "reuse",
-    });
-  });
-
   it("forks from the tip without a seed or sourceSeqEnd for empty anchors", async () => {
     const fork = vi.fn(async () => makeThreadResponse({ id: "thr_fork" }));
     const { harness } = await loadPlugin({
@@ -229,9 +188,11 @@ describe("createSideChat rpc", () => {
     });
 
     expect(fork).toHaveBeenCalledWith({
+      lifecycleOwnerThreadId: "thr_src",
       sourceThreadId: "thr_src",
       visibility: "hidden",
-      workspace: "reuse",
+      origin: "plugin",
+      originPluginId: PLUGIN_ID,
     });
   });
 });
@@ -333,19 +294,15 @@ describe("empty-fork sweep", () => {
     expect(archive.mock.calls.map(([args]) => args)).toEqual([
       { threadId: "thr_empty_old" },
     ]);
-    // Only candidates past the age cutoff pay for a timeline read.
     expect(timeline.mock.calls.map(([args]) => args.threadId)).toEqual([
       "thr_empty_old",
       "thr_replied_old",
     ]);
   });
 
-  // Archiving removes rows from the `archived: false` set the sweep pages
-  // through, so a full-page offset step would skip that many unswept forks.
   it("advances the page offset by the forks it left behind", async () => {
     const now = Date.now();
     const old = now - EMPTY_FORK_MAX_AGE_MS - 60_000;
-    // One full page: every fork is archived except the one that has a reply.
     const firstPage = Array.from(
       { length: EMPTY_FORK_SWEEP_PAGE_SIZE },
       (_unused, index) =>
@@ -372,8 +329,6 @@ describe("empty-fork sweep", () => {
 
     await harness.runSchedule("empty-fork-cleanup");
 
-    // The single retained fork is the only row still in the set, so the next
-    // page starts at 1 — not at a full page past it.
     expect(list.mock.calls.map(([args]) => args.offset)).toEqual([0, 1]);
   });
 
@@ -403,8 +358,6 @@ describe("empty-fork sweep", () => {
     expect(archive).not.toHaveBeenCalled();
   });
 
-  // A fork with user work can never become empty, so re-reading its whole
-  // timeline every hour is pure waste that grows with the thread history.
   it("remembers a kept fork and stops re-reading its timeline", async () => {
     const now = Date.now();
     const fork = makeThreadResponse({
@@ -434,8 +387,6 @@ describe("empty-fork sweep", () => {
     expect(archive).not.toHaveBeenCalled();
   });
 
-  // A read failure must not be remembered, or one bad hour retires the fork
-  // from the sweep forever.
   it("retries a fork whose timeline read failed", async () => {
     const now = Date.now();
     const fork = makeThreadResponse({

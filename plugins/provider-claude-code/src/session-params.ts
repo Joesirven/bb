@@ -1,21 +1,12 @@
-/**
- * Claude Code session parameter mapping: canonical Provider Bridge Protocol
- * session and turn params in, the bridge's internal session-construction and
- * turn params out.
- */
-
 import {
-  claudeCodeMockCliTrafficConfigSchema,
-  DEFAULT_CLAUDE_CODE_MOCK_CLI_TRAFFIC_CONFIG,
   jsonValueSchema,
   removeCommandMentionsFromPromptInput,
-  type ClaudeCodeMockCliTrafficConfig,
   type DynamicTool,
   type InstructionMode,
   type PromptInput,
   type ReasoningLevel,
   type RuntimePermissionPolicy,
-  buildShellEnvironmentPolicyConfig,
+  buildShellEnvOverrides,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
 import {
@@ -36,18 +27,9 @@ interface ClaudeSkillConfigParams {
   plugins: ClaudeLocalPluginConfig[];
 }
 
-/**
- * A staged skill root in Claude's native form. The canonical
- * `skills/configure` payload is mapped onto this by the bridge; Claude loads
- * each one as a local plugin.
- */
 export interface ClaudeCodeSkillRoot {
   id: string;
   localPluginPath: string;
-}
-
-interface ClaudeSkillConfigEntryArgs {
-  skillRoot: ClaudeCodeSkillRoot;
 }
 
 function buildAdditionalWorkspaceWriteRootsParams(
@@ -58,21 +40,6 @@ function buildAdditionalWorkspaceWriteRootsParams(
     : undefined;
 }
 
-function buildClaudeSkillConfigEntry(
-  args: ClaudeSkillConfigEntryArgs,
-): ClaudeLocalPluginConfig {
-  return {
-    type: "local",
-    path: args.skillRoot.localPluginPath,
-  };
-}
-
-/**
- * Injected skill roots load as local plugins only. Never pass the SDK `skills`
- * option here: it is a session-wide allowlist, so listing the injected skills
- * would hide and reject every other skill the user has installed (~/.claude,
- * plugins, built-ins). Plugin skills are enabled by CLI defaults.
- */
 function buildClaudeSkillConfigParams(
   skillRoots: readonly ClaudeCodeSkillRoot[] | undefined,
 ): ClaudeSkillConfigParams | undefined {
@@ -81,8 +48,11 @@ function buildClaudeSkillConfigParams(
   }
 
   return {
-    plugins: skillRoots.map((skillRoot) =>
-      buildClaudeSkillConfigEntry({ skillRoot }),
+    plugins: skillRoots.map(
+      (skillRoot): ClaudeLocalPluginConfig => ({
+        type: "local",
+        path: skillRoot.localPluginPath,
+      }),
     ),
   };
 }
@@ -90,24 +60,21 @@ function buildClaudeSkillConfigParams(
 function buildClaudeCodeConfig(
   envVars?: Record<string, string>,
 ): Record<string, unknown> | undefined {
-  const config = buildShellEnvironmentPolicyConfig(envVars);
-  return config ? { ...config } : undefined;
+  if (!envVars) {
+    return undefined;
+  }
+  const overrides = buildShellEnvOverrides(envVars);
+  return Object.keys(overrides).length > 0 ? { envVars: overrides } : undefined;
 }
 
-/**
- * The execution-option subset the Claude session mapping reads. Structurally
- * satisfied by the adapter's `ProviderExecutionContext`; the bridge's
- * canonical handlers assemble it from the canonical wire options plus the
- * decoded `providerOptions` bag.
- */
 export type ClaudeSessionExecutionOptions = RuntimePermissionPolicy & {
   model?: string | undefined;
   reasoningLevel?: ReasoningLevel | undefined;
   instructions?: string | undefined;
   envVars?: Record<string, string> | undefined;
   claudeCodePermissionMode?: "plan" | undefined;
-  claudeCodeMockCliTraffic: ClaudeCodeMockCliTrafficConfig;
   workflowsEnabled: boolean;
+  chromeEnabled: boolean;
   memoryEnabled?: boolean | undefined;
   providerSubagentsEnabled?: boolean | undefined;
   skillRoots?: readonly ClaudeCodeSkillRoot[] | undefined;
@@ -129,10 +96,6 @@ interface BuildInternalSessionParamsArgs {
   threadId: string;
 }
 
-/**
- * The bridge's session-construction params, minus the resume/fork identity
- * fields the callers spread in.
- */
 function buildInternalSessionParams(
   args: BuildInternalSessionParamsArgs,
 ): Record<string, unknown> {
@@ -156,7 +119,6 @@ function buildInternalSessionParams(
     threadId: args.threadId,
     cwd: args.cwd,
     instructionMode: args.instructionMode,
-    claudeCodeMockCliTraffic: args.options.claudeCodeMockCliTraffic,
     permissionMode: resolveClaudeSessionPermissionMode(args.options),
     approvedPlanPermissionMode: toClaudePermissionMode(permissionPolicy),
     permissionScope: permissionPolicy.permissionScope,
@@ -171,6 +133,7 @@ function buildInternalSessionParams(
       ? { reasoningLevel: args.options.reasoningLevel }
       : {}),
     workflowsEnabled: args.options.workflowsEnabled,
+    chromeEnabled: args.options.chromeEnabled,
     memoryEnabled: args.options.memoryEnabled,
     providerSubagentsEnabled: args.options.providerSubagentsEnabled,
     ...(dynamicTools && dynamicTools.length > 0 ? { dynamicTools } : {}),
@@ -180,37 +143,18 @@ function buildInternalSessionParams(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Wire options → internal session params
-// ---------------------------------------------------------------------------
-
-/**
- * Claude-flavored knobs riding `options.providerOptions` on the canonical
- * wire. The generic bridge-protocol adapter packs every provider-flavored
- * execution-context field there; only this bridge interprets the bag.
- */
 const claudeProviderOptionsSchema = z
   .object({
     claudeCodePermissionMode: z.literal("plan").optional(),
-    claudeCodeMockCliTraffic: claudeCodeMockCliTrafficConfigSchema.optional(),
     workflowsEnabled: z.boolean().optional(),
+    chromeEnabled: z.boolean().optional(),
     memoryEnabled: z.boolean().optional(),
     providerSubagentsEnabled: z.boolean().optional(),
-    /**
-     * Environment-level extra write roots. Rides the opaque provider-options
-     * bag (packed by the registry) because the canonical wire has no core
-     * field for it — same delivery as the ACP launch spec.
-     */
     additionalWorkspaceWriteRoots: z.array(z.string()).optional(),
   })
   .passthrough();
 
-/**
- * The canonical execution-option subset the mapping reads. Structurally
- * satisfied by the canonical wire options (`bridgeExecutionOptionsSchema`
- * output).
- */
-export type ClaudeCanonicalExecutionOptions = RuntimePermissionPolicy & {
+type ClaudeCanonicalExecutionOptions = RuntimePermissionPolicy & {
   model?: string | undefined;
   reasoningLevel?: ReasoningLevel | undefined;
   instructions?: string | undefined;
@@ -218,35 +162,23 @@ export type ClaudeCanonicalExecutionOptions = RuntimePermissionPolicy & {
   providerOptions?: Record<string, unknown> | undefined;
 };
 
-export interface BuildClaudeSessionParamsArgs {
+interface BuildClaudeSessionParamsArgs {
   threadId: string;
   cwd: string;
   options: ClaudeCanonicalExecutionOptions;
   instructionMode: InstructionMode;
   dynamicTools?: readonly DynamicTool[] | undefined;
   disallowedTools?: readonly string[] | undefined;
-  /**
-   * Skill roots latched by the canonical `skills/configure` request. Session
-   * params never carry them: the process-scoped catalog is configured once and
-   * applies to every session the bridge builds afterwards.
-   */
   skillRoots?: readonly ClaudeCodeSkillRoot[] | undefined;
 }
 
-/**
- * The bridge's session-construction params, built from the canonical Provider
- * Bridge Protocol session params. Skill roots come from the process-scoped
- * `skills/configure` latch rather than the session options; the daemon's extra
- * workspace write roots ride the providerOptions bag. A missing providerOptions
- * bag falls back to the provider defaults (workflows off, mock CLI traffic
- * disabled).
- */
 export function buildClaudeSessionParams(
   args: BuildClaudeSessionParamsArgs,
 ): Record<string, unknown> {
   const providerOptions = claudeProviderOptionsSchema.parse(
     args.options.providerOptions ?? {},
   );
+  const config = buildClaudeCodeConfig(args.options.envVars);
   return buildInternalSessionParams({
     additionalWorkspaceWriteRoots:
       providerOptions.additionalWorkspaceWriteRoots ?? [],
@@ -255,28 +187,18 @@ export function buildClaudeSessionParams(
     dynamicTools: args.dynamicTools,
     instructionMode: args.instructionMode,
     threadId: args.threadId,
-    // Spread preserves the correlated permission-policy union; the decoded
-    // provider-flavored knobs override their canonical-wire placement.
     options: {
       ...args.options,
       skillRoots: args.skillRoots,
       claudeCodePermissionMode: providerOptions.claudeCodePermissionMode,
-      claudeCodeMockCliTraffic:
-        providerOptions.claudeCodeMockCliTraffic ??
-        DEFAULT_CLAUDE_CODE_MOCK_CLI_TRAFFIC_CONFIG,
       workflowsEnabled: providerOptions.workflowsEnabled ?? false,
+      chromeEnabled: providerOptions.chromeEnabled ?? false,
       memoryEnabled: providerOptions.memoryEnabled,
       providerSubagentsEnabled: providerOptions.providerSubagentsEnabled,
     },
   });
 }
 
-/**
- * Plan mode is delivered as a session option, not as prompt text: the Claude
- * CLI would treat a literal `/plan` in the prompt as a second, redundant
- * command, so the mention that opened plan mode is stripped before the input
- * reaches the SDK.
- */
 function stripClaudePlanCommandMentions(args: {
   input: readonly PromptInput[];
   claudeCodePermissionMode: "plan" | undefined;
@@ -290,7 +212,7 @@ function stripClaudePlanCommandMentions(args: {
   });
 }
 
-export interface BuildClaudeTurnParamsArgs {
+interface BuildClaudeTurnParamsArgs {
   threadId: string;
   providerThreadId: string | null;
   expectedTurnId?: string | undefined;
@@ -298,18 +220,13 @@ export interface BuildClaudeTurnParamsArgs {
   options: ClaudeCanonicalExecutionOptions;
 }
 
-/**
- * The bridge's internal turn params, built from the canonical turn params.
- * Live-setting knobs stay undefined when the providerOptions bag omits them,
- * which the bridge's per-turn settings reconciliation reads as "keep the
- * session's current value".
- */
 export function buildClaudeTurnParams(
   args: BuildClaudeTurnParamsArgs,
 ): Record<string, unknown> {
   const providerOptions = claudeProviderOptionsSchema.parse(
     args.options.providerOptions ?? {},
   );
+  const config = buildClaudeCodeConfig(args.options.envVars);
   return {
     threadId: args.threadId,
     providerThreadId: args.providerThreadId,
@@ -325,8 +242,13 @@ export function buildClaudeTurnParams(
       ? { reasoningLevel: args.options.reasoningLevel }
       : {}),
     workflowsEnabled: providerOptions.workflowsEnabled,
+    chromeEnabled: providerOptions.chromeEnabled,
     memoryEnabled: providerOptions.memoryEnabled,
     providerSubagentsEnabled: providerOptions.providerSubagentsEnabled,
+    ...(config ? { config } : {}),
     permissionEscalation: args.options.permissionEscalation,
+    ...(providerOptions.claudeCodePermissionMode !== undefined
+      ? { claudeCodePermissionMode: providerOptions.claudeCodePermissionMode }
+      : {}),
   };
 }

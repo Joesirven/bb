@@ -3,7 +3,7 @@ import {
   getLatestSessionForHost,
   getSessionById,
   listActiveBackgroundTaskCountsByThreadIds,
-  listLatestGoalEventRowsByThreadIds,
+  listLatestThreadStateEventRowsByThreadIds,
   listLatestSessionsForHosts,
   listOpenTurnInputAcceptedRowsByThreadIds,
   listStoredClientTurnRequestRowsByKeys,
@@ -13,10 +13,13 @@ import {
   type ThreadClientTurnRequestKey,
   type ThreadWithPendingInteractionState,
 } from "@bb/db";
+import { LEGACY_CODEX_GOAL_EXTENSION_KIND } from "@bb/domain";
 import type {
   Thread,
   ThreadActivityState,
+  ThreadChangeMetadata,
   ThreadListEntry,
+  ThreadQueuedWork,
   ThreadRuntimeState,
   ThreadStatus,
   ThreadWithRuntime,
@@ -31,8 +34,10 @@ import { DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS } from "../../constants.js";
 import type { NotificationHub } from "../../ws/hub.js";
 import { resolveProviderPlanCommand } from "../providers/provider-plan-command.js";
 import type { ProviderRegistryService } from "../providers/provider-registry.js";
-import { parseStoredEvent } from "./thread-data.js";
+import { listQueuedThreadMessageCountsByThreadIds } from "@bb/db";
+import { resolveEnvironmentWorkspaceDisplayKind } from "../environments/environment-response.js";
 import { canThreadSpawnChild } from "./thread-parent.js";
+import { toThreadEventWithMeta } from "./timeline.js";
 
 type ThreadRuntimeDisplayHub = Pick<
   NotificationHub,
@@ -44,12 +49,6 @@ interface ThreadRuntimeDisplayDeps {
   hub: ThreadRuntimeDisplayHub;
 }
 
-/**
- * The prompt-banner path additionally needs the registry, because plan-mode
- * eligibility is the provider's declared plan composer command. Kept separate
- * so the plain runtime-state callers (plugin DTOs, thread-send) are not forced
- * to carry a registry they never read.
- */
 interface ThreadPromptBannerDeps extends ThreadRuntimeDisplayDeps {
   providerRegistry: ProviderRegistryService;
 }
@@ -87,7 +86,19 @@ interface ToThreadListEntryResponseFromLatestSessionArgs {
   hostConnected: boolean;
   latestSession: HostDaemonSessionRow | null;
   now?: number;
+  queuedWork: ThreadQueuedWork;
   thread: ThreadWithPendingInteractionState;
+}
+
+interface BuildThreadStatusChangeMetadataByThreadIdArgs {
+  environmentHostId: string;
+  threads: readonly Thread[];
+}
+
+interface ToThreadStatusChangeMetadataArgs {
+  activity: ThreadActivityState;
+  runtime: ThreadRuntimeState;
+  thread: Thread;
 }
 
 interface PromptBannerActivityState extends Pick<
@@ -107,6 +118,7 @@ const EMPTY_THREAD_ACTIVITY: ThreadActivityState = {
 
 function threadStatusRuntimeState(status: ThreadStatus): ThreadRuntimeState {
   switch (status) {
+    case "pending":
     case "starting":
     case "idle":
     case "active":
@@ -119,12 +131,6 @@ function threadStatusRuntimeState(status: ThreadStatus): ThreadRuntimeState {
   }
 }
 
-/**
- * Only computed for `active` threads: an active turn survives a daemon
- * disconnect until the active-work grace elapses, so that is the reconnect
- * window the DTO advertises. The shorter DAEMON_DISCONNECT_GRACE_MS window
- * only settles pending interactions and background tasks.
- */
 function getDaemonDisconnectGraceExpiresAt(
   session: HostDaemonSessionRow,
 ): number | null {
@@ -164,6 +170,7 @@ function toPublicThread(thread: Thread): Thread {
     status: thread.status,
     parentThreadId: thread.parentThreadId,
     sourceThreadId: thread.sourceThreadId,
+    lifecycleOwnerThreadId: thread.lifecycleOwnerThreadId,
     originKind: thread.originKind,
     originPluginId: thread.originPluginId,
     visibility: thread.visibility,
@@ -182,7 +189,13 @@ export function resolveThreadRuntimeState(
   args: ResolveThreadRuntimeStateArgs,
 ): ThreadRuntimeState {
   if (args.status !== "active" || args.environmentHostId === null) {
-    return threadStatusRuntimeState(args.status);
+    return resolveThreadRuntimeStateFromLatestSession({
+      environmentHostId: args.environmentHostId,
+      hostConnected: false,
+      latestSession: null,
+      now: args.now,
+      status: args.status,
+    });
   }
 
   const hostConnected = hasOpenDaemonSessionForHost(
@@ -206,6 +219,11 @@ export function resolveThreadRuntimeState(
 function resolveThreadRuntimeStateFromLatestSession(
   args: ResolveThreadRuntimeStateFromLatestSessionArgs,
 ): ThreadRuntimeState {
+  // A `pending` thread needs no special case: it is never `active`, so it
+  // falls straight through to `threadStatusRuntimeState`, which reports it as
+  // itself. This used to short-circuit to a separate `held` display status
+  // derived from live dispatch holds — the holds are gone and `pending` is the
+  // status, so the derivation and its second vocabulary went with them.
   if (args.status !== "active" || args.environmentHostId === null) {
     return threadStatusRuntimeState(args.status);
   }
@@ -242,7 +260,73 @@ function resolveThreadEnvironmentHostId(
   return getEnvironment(deps.db, thread.environmentId)?.hostId ?? null;
 }
 
-export function toThreadResponseWithHost(
+export function buildThreadStatusChangeMetadata(
+  deps: ThreadPromptBannerDeps,
+  thread: Thread,
+): ThreadChangeMetadata {
+  return toThreadStatusChangeMetadata({
+    activity:
+      buildThreadActivityStateByThreadId(deps, [thread]).get(thread.id) ??
+      EMPTY_THREAD_ACTIVITY,
+    runtime: resolveThreadRuntimeState(deps, {
+      environmentHostId: resolveThreadEnvironmentHostId(deps, thread),
+      status: thread.status,
+    }),
+    thread,
+  });
+}
+
+export function buildThreadStatusChangeMetadataByThreadId(
+  deps: ThreadPromptBannerDeps,
+  args: BuildThreadStatusChangeMetadataByThreadIdArgs,
+): Map<string, ThreadChangeMetadata> {
+  if (args.threads.length === 0) {
+    return new Map();
+  }
+  const activityByThreadId = buildThreadActivityStateByThreadId(
+    deps,
+    args.threads,
+  );
+  const hostConnected = hasOpenDaemonSessionForHost(
+    deps,
+    args.environmentHostId,
+  );
+  const latestSession = hostConnected
+    ? null
+    : getLatestSessionForHost(deps.db, { hostId: args.environmentHostId });
+  return new Map(
+    args.threads.map((thread) => [
+      thread.id,
+      toThreadStatusChangeMetadata({
+        activity: activityByThreadId.get(thread.id) ?? EMPTY_THREAD_ACTIVITY,
+        runtime: resolveThreadRuntimeStateFromLatestSession({
+          environmentHostId: args.environmentHostId,
+          hostConnected,
+          latestSession,
+          status: thread.status,
+        }),
+        thread,
+      }),
+    ]),
+  );
+}
+
+function toThreadStatusChangeMetadata(
+  args: ToThreadStatusChangeMetadataArgs,
+): ThreadChangeMetadata {
+  return {
+    projectId: args.thread.projectId,
+    statusChange: {
+      status: args.thread.status,
+      runtime: args.runtime,
+      activity: args.activity,
+      latestAttentionAt: args.thread.latestAttentionAt,
+      updatedAt: args.thread.updatedAt,
+    },
+  };
+}
+
+function toThreadResponseWithHost(
   deps: ThreadRuntimeDisplayDeps,
   args: ToThreadResponseWithHostArgs,
 ): ThreadWithRuntime {
@@ -272,17 +356,10 @@ export function toThreadResponseFromThread(
         threadIds: [args.thread.id],
       })[0]?.activeBackgroundAgentCount ?? 0,
     canSpawnChild: canThreadSpawnChild(deps, { thread: args.thread }),
-  };
-}
-
-function toThreadEventWithMeta(row: StoredEventRow): ThreadEventWithMeta {
-  return {
-    event: parseStoredEvent(row),
-    meta: {
-      id: row.id,
-      seq: row.sequence,
-      createdAt: row.createdAt,
-    },
+    queuedMessageCount:
+      listQueuedThreadMessageCountsByThreadIds(deps.db, {
+        threadIds: [args.thread.id],
+      })[0]?.queuedMessageCount ?? 0,
   };
 }
 
@@ -309,8 +386,6 @@ function getThreadPromptBannerActivityState(
   };
 }
 
-// Pre-filter for the banner query: only threads whose provider declares a
-// plan command can have an active plan turn, so the rest are not event-loaded.
 function canThreadShowActivePlanMode(
   deps: ThreadPromptBannerDeps,
   thread: Thread,
@@ -326,8 +401,9 @@ function listPromptBannerActivityCandidateRows(
   deps: ThreadPromptBannerDeps,
   threads: readonly Thread[],
 ): StoredEventRow[] {
-  const latestGoalRows = listLatestGoalEventRowsByThreadIds(deps.db, {
+  const latestGoalRows = listLatestThreadStateEventRowsByThreadIds(deps.db, {
     threadIds: threads.map((thread) => thread.id),
+    kind: LEGACY_CODEX_GOAL_EXTENSION_KIND,
   });
   const openAcceptedRows = listOpenTurnInputAcceptedRowsByThreadIds(deps.db, {
     threadIds: threads
@@ -397,17 +473,77 @@ export function getThreadPromptBannerActivity(
   );
 }
 
+function buildThreadActivityStateByThreadId(
+  deps: ThreadPromptBannerDeps,
+  threads: readonly Thread[],
+): Map<string, ThreadActivityState> {
+  const backgroundTaskActivityByThreadId = new Map(
+    listActiveBackgroundTaskCountsByThreadIds(deps.db, {
+      threadIds: threads.map((thread) => thread.id),
+    }).map((activity) => [activity.threadId, activity]),
+  );
+  const promptBannerActivityByThreadId =
+    buildThreadPromptBannerActivityByThreadId(deps, threads);
+  const result = new Map<string, ThreadActivityState>();
+  for (const thread of threads) {
+    const backgroundActivity = backgroundTaskActivityByThreadId.get(thread.id);
+    const promptBannerActivity = promptBannerActivityByThreadId.get(thread.id);
+    if (!backgroundActivity && !promptBannerActivity) {
+      continue;
+    }
+    result.set(thread.id, {
+      activeBackgroundAgentCount:
+        backgroundActivity?.activeBackgroundAgentCount ??
+        EMPTY_THREAD_ACTIVITY.activeBackgroundAgentCount,
+      activeBackgroundCommandCount:
+        backgroundActivity?.activeBackgroundCommandCount ??
+        EMPTY_THREAD_ACTIVITY.activeBackgroundCommandCount,
+      activeGoalCount:
+        promptBannerActivity?.activeGoalCount ??
+        EMPTY_THREAD_ACTIVITY.activeGoalCount,
+      activePlanModeCount:
+        promptBannerActivity?.activePlanModeCount ??
+        EMPTY_THREAD_ACTIVITY.activePlanModeCount,
+      activeWorkflowCount:
+        backgroundActivity?.activeWorkflowCount ??
+        EMPTY_THREAD_ACTIVITY.activeWorkflowCount,
+    });
+  }
+  return result;
+}
+
+/**
+ * Whether each thread has queued work, from one grouped count over live queued
+ * rows. Threads with an empty queue are absent, so the caller fills "none".
+ *
+ * A failure outranks a plain wait: a row that failed to go out is the one the
+ * reader has to do something about, and a thread can easily hold both.
+ */
+function buildThreadQueuedWorkByThreadId(
+  deps: ThreadRuntimeDisplayDeps,
+  threads: readonly Thread[],
+): Map<string, ThreadQueuedWork> {
+  const result = new Map<string, ThreadQueuedWork>();
+  for (const counts of listQueuedThreadMessageCountsByThreadIds(deps.db, {
+    threadIds: threads.map((thread) => thread.id),
+  })) {
+    if (counts.queuedMessageCount === 0) continue;
+    result.set(
+      counts.threadId,
+      counts.failedQueuedMessageCount > 0 ? "failed" : "waiting",
+    );
+  }
+  return result;
+}
+
 export function toThreadListEntryResponses(
   deps: ThreadPromptBannerDeps,
   args: ToThreadListEntryResponsesArgs,
 ): ThreadListEntry[] {
-  const backgroundTaskActivityByThreadId = new Map(
-    listActiveBackgroundTaskCountsByThreadIds(deps.db, {
-      threadIds: args.threads.map((thread) => thread.id),
-    }).map((activity) => [activity.threadId, activity]),
+  const activityByThreadId = buildThreadActivityStateByThreadId(
+    deps,
+    args.threads,
   );
-  const promptBannerActivityByThreadId =
-    buildThreadPromptBannerActivityByThreadId(deps, args.threads);
   const activeHostIds = [
     ...new Set(
       args.threads.flatMap((thread) =>
@@ -427,28 +563,14 @@ export function toThreadListEntryResponses(
       ),
     }).map((session) => [session.hostId, session]),
   );
-
+  const queuedWorkByThreadId = buildThreadQueuedWorkByThreadId(
+    deps,
+    args.threads,
+  );
   return args.threads.map((thread) => {
-    const backgroundActivity = backgroundTaskActivityByThreadId.get(thread.id);
-    const promptBannerActivity = promptBannerActivityByThreadId.get(thread.id);
     return toThreadListEntryResponseFromLatestSession({
-      activity: {
-        activeBackgroundAgentCount:
-          backgroundActivity?.activeBackgroundAgentCount ??
-          EMPTY_THREAD_ACTIVITY.activeBackgroundAgentCount,
-        activeBackgroundCommandCount:
-          backgroundActivity?.activeBackgroundCommandCount ??
-          EMPTY_THREAD_ACTIVITY.activeBackgroundCommandCount,
-        activeGoalCount:
-          promptBannerActivity?.activeGoalCount ??
-          EMPTY_THREAD_ACTIVITY.activeGoalCount,
-        activePlanModeCount:
-          promptBannerActivity?.activePlanModeCount ??
-          EMPTY_THREAD_ACTIVITY.activePlanModeCount,
-        activeWorkflowCount:
-          backgroundActivity?.activeWorkflowCount ??
-          EMPTY_THREAD_ACTIVITY.activeWorkflowCount,
-      },
+      activity: activityByThreadId.get(thread.id) ?? EMPTY_THREAD_ACTIVITY,
+      queuedWork: queuedWorkByThreadId.get(thread.id) ?? "none",
       hostConnected:
         thread.environmentHostId !== null &&
         connectedActiveHostIds.has(thread.environmentHostId),
@@ -469,12 +591,18 @@ function toThreadListEntryResponseFromLatestSession(
   return {
     ...thread,
     activity: args.activity,
+    queuedWork: args.queuedWork,
     pinSortKey: args.thread.pinSortKey,
     environmentBranchName: args.thread.environmentBranchName,
     environmentHostId: args.thread.environmentHostId,
     environmentName: args.thread.environmentName,
-    environmentWorkspaceDisplayKind:
-      args.thread.environmentWorkspaceDisplayKind,
+    environmentPath: args.thread.environmentPath,
+    environmentProviderId: args.thread.environmentProviderId,
+    environmentIsWorktree: args.thread.environmentIsWorktree,
+    environmentWorkspaceDisplayKind: resolveEnvironmentWorkspaceDisplayKind({
+      environmentProviderId: args.thread.environmentProviderId,
+      isWorktree: args.thread.environmentIsWorktree,
+    }),
     hasPendingInteraction: args.thread.hasPendingInteraction,
     runtime: resolveThreadRuntimeStateFromLatestSession({
       environmentHostId: args.thread.environmentHostId,

@@ -1,12 +1,17 @@
 import type {
+  MachineEnvironmentReplace,
+  MachineEnvironmentSet,
+  MachineEnvironmentList,
+} from "@bb/server-contract";
+import type {
   AppKeybindingOverrides,
   AppSettings,
+  AppSettingsUpdate,
   Experiments,
+  UiPreferenceKey,
+  UiPreferenceValue,
 } from "@bb/domain";
-import type {
-  DiscoverReposResult,
-  ProviderUsageResponse,
-} from "@bb/host-daemon-contract";
+import type { ProviderUsageResponse } from "@bb/host-daemon-contract";
 import type {
   SystemAttentionResponse,
   SystemConfigReloadResponse,
@@ -16,17 +21,21 @@ import type {
   SystemCliSkillsStatusResponse,
   SystemInstallCliSkillsRequest,
   SystemInstallCliSkillsResponse,
-  OnboardingAgentOverview,
-  OnboardingTelemetryEvent,
+  SystemProviderStatesResponse,
   SystemProvidersQuery,
-  SystemOnboardingReposQuery,
   SystemUsageLimitsQuery,
   SystemVersionQuery,
   SystemVersionResponse,
   SystemVoiceTranscriptionResponse,
+  UiPreferenceResponse,
+  UiPreferencesResponse,
 } from "@bb/server-contract";
 import { systemVoiceTranscriptionResponseSchema } from "@bb/server-contract";
-import { signalRequestArgs, type CreateSdkAreaArgs } from "./common.js";
+import {
+  readExecutionOptions,
+  signalRequestArgs,
+  type CreateSdkAreaArgs,
+} from "./common.js";
 
 export interface SystemAttentionArgs {
   signal?: AbortSignal;
@@ -61,7 +70,6 @@ export type SystemExecutionOptionsResult = SystemExecutionOptionsResponse;
 export type SystemReloadConfigResult = SystemConfigReloadResponse;
 export type SystemInstallCliSkillsArgs = SystemInstallCliSkillsRequest;
 export interface SystemCliSkillsStatusArgs {
-  /** Omit for every enrolled machine. */
   hostIds?: readonly string[];
   signal?: AbortSignal;
 }
@@ -69,31 +77,58 @@ export type SystemCliSkillsStatusResult = SystemCliSkillsStatusResponse;
 export type SystemInstallCliSkillsResult = SystemInstallCliSkillsResponse;
 export type SystemVoiceTranscriptionResult = SystemVoiceTranscriptionResponse;
 export type SystemUpdateExperimentsResult = Experiments;
-export type SystemUpdateGeneralSettingsResult = AppSettings;
+export type SystemUpdateGeneralSettingsResult = AppSettings & {
+  showUnhandledProviderEvents?: boolean;
+};
 export type SystemUpdateKeyboardSettingsResult = AppKeybindingOverrides;
 export type SystemUsageLimitsResult = ProviderUsageResponse;
-export interface SystemOnboardingArgs extends SystemProvidersQuery {
+export interface SystemProviderStatesArgs extends SystemProvidersQuery {
   signal?: AbortSignal;
 }
-export interface SystemOnboardingReposArgs extends SystemOnboardingReposQuery {
-  signal?: AbortSignal;
-}
-export type SystemOnboardingAgentsResult = OnboardingAgentOverview;
-export type SystemOnboardingReposResult = DiscoverReposResult;
+export type SystemProviderStatesResult = SystemProviderStatesResponse;
 export type SystemVersionResult = SystemVersionResponse;
 
+export interface SystemUiPreferencesArgs {
+  signal?: AbortSignal;
+}
+export type SystemUiPreferencesResult = UiPreferencesResponse;
+export interface SystemUpdateUiPreferenceArgs<Key extends UiPreferenceKey> {
+  expectedRevision: number;
+  key: Key;
+  value: UiPreferenceValue<Key>;
+}
+export interface SystemResetUiPreferenceArgs<Key extends UiPreferenceKey> {
+  key: Key;
+}
+export type SystemUiPreferenceResult<Key extends UiPreferenceKey> =
+  UiPreferenceResponse<Key>;
+
+export interface SystemUiPreferencesArea {
+  list(args?: SystemUiPreferencesArgs): Promise<SystemUiPreferencesResult>;
+  set<Key extends UiPreferenceKey>(
+    args: SystemUpdateUiPreferenceArgs<Key>,
+  ): Promise<SystemUiPreferenceResult<Key>>;
+  reset<Key extends UiPreferenceKey>(
+    args: SystemResetUiPreferenceArgs<Key>,
+  ): Promise<SystemUiPreferenceResult<Key>>;
+}
+
 export interface SystemArea {
+  setMachineEnvironmentVariable(
+    input: MachineEnvironmentSet,
+  ): Promise<MachineEnvironmentList>;
+  deleteMachineEnvironmentVariable(input: {
+    name: string;
+  }): Promise<MachineEnvironmentList>;
+  machineEnvironment(): Promise<MachineEnvironmentList>;
+  replaceMachineEnvironment(
+    input: MachineEnvironmentReplace,
+  ): Promise<MachineEnvironmentList>;
   attention(args?: SystemAttentionArgs): Promise<SystemAttentionResult>;
   config(args?: SystemConfigArgs): Promise<SystemConfigResult>;
   executionOptions(
     args?: SystemExecutionOptionsArgs,
   ): Promise<SystemExecutionOptionsResult>;
-  /**
-   * Copy bb's built-in CLI skills into each named machine's global agent skill
-   * roots (`~/.agents/skills` and `~/.claude/skills`). Machines install
-   * independently; the result reports each machine's outcome.
-   */
-  /** Per-machine install state of bb's built-in CLI skills. */
   cliSkillsStatus(
     args?: SystemCliSkillsStatusArgs,
   ): Promise<SystemCliSkillsStatusResult>;
@@ -104,23 +139,17 @@ export interface SystemArea {
   transcribeVoice(
     args: SystemVoiceTranscriptionArgs,
   ): Promise<SystemVoiceTranscriptionResult>;
+  uiPreferences: SystemUiPreferencesArea;
   updateExperiments(args: Experiments): Promise<SystemUpdateExperimentsResult>;
   updateGeneralSettings(
-    args: AppSettings,
+    args: AppSettingsUpdate,
   ): Promise<SystemUpdateGeneralSettingsResult>;
   updateKeyboardSettings(
     args: AppKeybindingOverrides,
   ): Promise<SystemUpdateKeyboardSettingsResult>;
-  /** Report one onboarding funnel event to anonymous telemetry. */
-  onboardingEvent(args: OnboardingTelemetryEvent): Promise<{ ok: true }>;
-  /** Live agent state for onboarding: install, auth, and plan per provider. */
-  onboardingAgents(
-    args?: SystemOnboardingArgs,
-  ): Promise<SystemOnboardingAgentsResult>;
-  /** Candidate projects discovered on the host, ranked for onboarding. */
-  onboardingRepos(
-    args?: SystemOnboardingReposArgs,
-  ): Promise<SystemOnboardingReposResult>;
+  providerStates(
+    args?: SystemProviderStatesArgs,
+  ): Promise<SystemProviderStatesResult>;
   usageLimits(args?: SystemUsageLimitsArgs): Promise<SystemUsageLimitsResult>;
   version(args?: SystemVersionArgs): Promise<SystemVersionResult>;
 }
@@ -133,7 +162,60 @@ function versionQuery(args: SystemVersionArgs | undefined): SystemVersionQuery {
 
 export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
   const { transport } = args;
+  const uiPreferences: SystemUiPreferencesArea = {
+    async list(input) {
+      return transport.readJson(
+        transport.api.v1.preferences.ui.$get(
+          {},
+          ...signalRequestArgs(input?.signal),
+        ),
+      );
+    },
+    async set(input) {
+      const body = await transport.readJson(
+        transport.api.v1.preferences.ui[":key"].$put({
+          json: {
+            expectedRevision: input.expectedRevision,
+            value: input.value,
+          },
+          param: { key: input.key },
+        }),
+      );
+      return body as UiPreferenceResponse<typeof input.key>;
+    },
+    async reset(input) {
+      const body = await transport.readJson(
+        transport.api.v1.preferences.ui[":key"].$delete({
+          param: { key: input.key },
+        }),
+      );
+      return body as UiPreferenceResponse<typeof input.key>;
+    },
+  };
   return {
+    uiPreferences,
+    async setMachineEnvironmentVariable(input) {
+      return transport.readJson(
+        transport.api.v1.settings["machine-environment"].$post({ json: input }),
+      );
+    },
+    async deleteMachineEnvironmentVariable(input) {
+      return transport.readJson(
+        transport.api.v1.settings["machine-environment"].$delete({
+          json: input,
+        }),
+      );
+    },
+    async machineEnvironment() {
+      return transport.readJson(
+        transport.api.v1.settings["machine-environment"].$get(),
+      );
+    },
+    async replaceMachineEnvironment(input) {
+      return transport.readJson(
+        transport.api.v1.settings["machine-environment"].$put({ json: input }),
+      );
+    },
     async attention(input) {
       return transport.readJson(
         transport.api.v1.system.attention.$get(
@@ -151,18 +233,7 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
       );
     },
     async executionOptions(input = {}) {
-      return transport.readJson(
-        transport.api.v1.system["execution-options"].$get(
-          {
-            query: {
-              environmentId: input.environmentId,
-              hostId: input.hostId,
-              providerId: input.providerId,
-            },
-          },
-          ...signalRequestArgs(input.signal),
-        ),
-      );
+      return readExecutionOptions(transport, input);
     },
     async cliSkillsStatus(input = {}) {
       return transport.readJson(
@@ -219,14 +290,9 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
         transport.api.v1.settings.keyboard.$put({ json: input }),
       );
     },
-    async onboardingEvent(input) {
+    async providerStates(input = {}) {
       return transport.readJson(
-        transport.api.v1.system.onboarding.event.$post({ json: input }),
-      );
-    },
-    async onboardingAgents(input = {}) {
-      return transport.readJson(
-        transport.api.v1.system.onboarding.agents.$get(
+        transport.api.v1.system.providers.state.$get(
           {
             query: {
               environmentId: input.environmentId,
@@ -237,18 +303,15 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
         ),
       );
     },
-    async onboardingRepos(input = {}) {
-      return transport.readJson(
-        transport.api.v1.system.onboarding.repos.$get(
-          { query: { hostId: input.hostId } },
-          ...signalRequestArgs(input.signal),
-        ),
-      );
-    },
     async usageLimits(input = {}) {
       return transport.readJson(
         transport.api.v1.system["usage-limits"].$get(
-          { query: { hostId: input.hostId } },
+          {
+            query: {
+              hostId: input.hostId,
+              providerId: input.providerId,
+            },
+          },
           ...signalRequestArgs(input.signal),
         ),
       );

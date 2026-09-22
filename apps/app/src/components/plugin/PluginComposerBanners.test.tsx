@@ -12,6 +12,7 @@ import {
 import { ComposerBannersSlot } from "./PluginComposerBanners";
 import { resetAllCrashedPluginSlotsForTest } from "./PluginSlotMount";
 import { useComposerView } from "@/lib/plugin-sdk-hooks";
+import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 
 function composerView(threadId: string, text = "") {
   return {
@@ -25,16 +26,9 @@ function composerView(threadId: string, text = "") {
 function registrations(
   composerCustomizations: PluginRegistrationSet["composerCustomizations"],
 ): PluginRegistrationSet {
-  return {
-    homepageSections: [],
-    settingsSections: [],
-    navPanels: [],
-    threadPanelActions: [],
+  return makePluginRegistrationSet({
     composerCustomizations,
-    sidebarFooterActions: [],
-    fileOpeners: [],
-    messageDirectives: [],
-  };
+  });
 }
 
 beforeEach(() => {
@@ -76,24 +70,6 @@ describe("ComposerBannersSlot", () => {
         .contains(screen.getByText("card body")),
     ).toBe(true);
     expect(screen.getByText("bare body").closest("section")).toBeNull();
-  });
-
-  it("collapses an empty card row when its component renders null", () => {
-    setPluginSlotRegistrations(
-      "empty-plugin",
-      registrations([
-        {
-          id: "empty",
-          banners: [{ id: "nothing", component: () => null }],
-        },
-      ]),
-    );
-
-    render(<ComposerBannersSlot view={composerView("t1")} />);
-
-    expect(
-      screen.getByRole("region", { name: "empty-plugin" }).className,
-    ).toContain("empty:hidden");
   });
 
   it("collapses only the crashing banner", () => {

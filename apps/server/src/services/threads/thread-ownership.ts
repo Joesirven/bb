@@ -5,11 +5,7 @@ import {
   type DbTransaction,
   updateThread,
 } from "@bb/db";
-import type {
-  PromptInput,
-  SystemMessageSubject,
-  Thread,
-} from "@bb/domain";
+import type { PromptInput, SystemMessageSubject, Thread } from "@bb/domain";
 import { renderTemplate } from "@bb/templates";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
@@ -46,12 +42,12 @@ interface QueueParentSystemMessageBestEffortArgs {
 
 interface HandleThreadOwnershipChangeArgs {
   previousThread: Thread;
-  queueParentMessages: boolean;
   updatedThread: Thread;
 }
 
 interface ReleaseUnarchivedChildrenFromArchivedThreadArgs {
   parentThreadId: string;
+  sectionId: string | null;
 }
 
 interface ArchiveThreadAndReleaseChildrenArgs {
@@ -126,10 +122,6 @@ export async function handleThreadOwnershipChange(
     nextParentThreadId: args.updatedThread.parentThreadId,
   });
 
-  if (!args.queueParentMessages) {
-    return;
-  }
-
   if (args.updatedThread.parentThreadId) {
     await queueParentSystemMessageBestEffort(deps, {
       childThreadId: args.updatedThread.id,
@@ -169,6 +161,7 @@ function releaseUnarchivedChildrenFromArchivedThreadInTransaction(
   for (const childThread of childThreads) {
     const updatedThread = updateThread(deps.db, deps.hub, childThread.id, {
       parentThreadId: null,
+      sectionId: args.sectionId,
     });
     if (!updatedThread) {
       continue;
@@ -205,6 +198,7 @@ export function archiveThreadAndReleaseChildren(
         },
         {
           parentThreadId: archivedThread.id,
+          sectionId: archivedThread.sectionId,
         },
       );
 

@@ -1,22 +1,34 @@
 import {
+  installFakeGitWorktreeProvider,
+  installFakePersonalWorkspaceProvider,
+} from "../helpers/environment-provider.js";
+import {
   PERSONAL_PROJECT_ID,
+  type GitSourceInspection,
   type ProjectExecutionDefaults,
   type Thread,
 } from "@bb/domain";
+import { createEnvironment } from "@bb/db";
 import { describe, expect, it } from "vitest";
 import {
   resolveCreateThreadEnvironment,
   resolveCreateThreadExecutionDefaults,
+  resolveProjectDefaultThreadEnvironment,
   resolveThreadDefaultPermissionMode,
   resolveThreadExecutionPermissionMode,
-  resolveWorkflowsEnabledPolicy,
-  PRODUCT_DEFAULT_PROVIDER_ID,
 } from "../../src/services/threads/thread-default-policy.js";
 import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
 import {
   createTestProviderRegistry,
   registerFirstPartyProviders,
 } from "../helpers/provider-registry.js";
+import { registerHostRpcResponder } from "../helpers/host-rpc.js";
+import {
+  seedHostSession,
+  seedPrimaryHost,
+  seedProjectWithSource,
+} from "../helpers/seed.js";
+import { withTestHarness } from "../helpers/test-app.js";
 
 const registry = await createTestProviderRegistry();
 
@@ -73,29 +85,109 @@ function makeParentThread(
   };
 }
 
-describe("resolveWorkflowsEnabledPolicy", () => {
-  it("enables workflows for claude-code sessions only", () => {
-    expect(resolveWorkflowsEnabledPolicy(registry, "claude-code")).toBe(true);
-    expect(resolveWorkflowsEnabledPolicy(registry, "codex")).toBe(false);
-    expect(resolveWorkflowsEnabledPolicy(registry, "pi")).toBe(false);
-    expect(resolveWorkflowsEnabledPolicy(registry, "acp-my-agent")).toBe(false);
-  });
-});
-
 describe("resolveCreateThreadExecutionDefaults", () => {
   it("uses the picker's first provider without pinning a model", () => {
-    // The product default and the picker's first entry are the same fact.
-    const productProviderId = registry.list()[0]?.info.id;
-    expect(productProviderId).toBe(PRODUCT_DEFAULT_PROVIDER_ID);
+    expect(registry.list()[0]?.info.id).toBe("codex");
 
     expect(
       resolveCreateThreadExecutionDefaults(registry, {
         storedDefaults: null,
       }),
     ).toEqual({
-      providerId: productProviderId,
+      providerId: "codex",
       executionDefaults: null,
+      providerFallbackCandidates: [
+        "claude-code",
+        "pi",
+        "acp-cursor",
+        "acp-opencode",
+        "acp-omp",
+        "acp-grok",
+        "acp-hermes-agent",
+      ],
     });
+  });
+
+  it("honors the user's default provider and picker order", async () => {
+    const preferences = {
+      providerOrder: ["pi", "claude-code"],
+      defaultProviderId: null as string | null,
+    };
+    const userRegistry = createProviderRegistryService({
+      readUserProviderPreferences: () => preferences,
+    });
+    await registerFirstPartyProviders(userRegistry);
+
+    expect(userRegistry.list().map((entry) => entry.info.id)).toEqual([
+      "pi",
+      "claude-code",
+      "codex",
+      "acp-cursor",
+      "acp-opencode",
+      "acp-omp",
+      "acp-grok",
+      "acp-hermes-agent",
+    ]);
+    expect(
+      resolveCreateThreadExecutionDefaults(userRegistry, {
+        storedDefaults: null,
+      }).providerId,
+    ).toBe("pi");
+
+    preferences.defaultProviderId = "codex";
+    expect(
+      resolveCreateThreadExecutionDefaults(userRegistry, {
+        storedDefaults: null,
+      }).providerId,
+    ).toBe("codex");
+    preferences.defaultProviderId = "not-installed";
+    expect(
+      resolveCreateThreadExecutionDefaults(userRegistry, {
+        storedDefaults: null,
+      }).providerId,
+    ).toBe("pi");
+  });
+
+  it("orders fallback candidates behind the chosen default, preferred provider first", async () => {
+    const preferences = {
+      providerOrder: ["pi", "claude-code"],
+      defaultProviderId: "codex" as string | null,
+    };
+    const userRegistry = createProviderRegistryService({
+      readUserProviderPreferences: () => preferences,
+    });
+    await registerFirstPartyProviders(userRegistry);
+
+    expect(
+      resolveCreateThreadExecutionDefaults(userRegistry, {
+        storedDefaults: null,
+      }).providerFallbackCandidates,
+    ).toEqual([
+      "pi",
+      "claude-code",
+      "acp-cursor",
+      "acp-opencode",
+      "acp-omp",
+      "acp-grok",
+      "acp-hermes-agent",
+    ]);
+  });
+
+  it("has no fallback candidates when a provider was explicitly requested", () => {
+    expect(
+      resolveCreateThreadExecutionDefaults(registry, {
+        requestedProviderId: "codex",
+        storedDefaults: null,
+      }).providerFallbackCandidates,
+    ).toEqual([]);
+  });
+
+  it("has no fallback candidates when a stored default provider is used", () => {
+    expect(
+      resolveCreateThreadExecutionDefaults(registry, {
+        storedDefaults: makeDefaults({ providerId: "codex" }),
+      }).providerFallbackCandidates,
+    ).toEqual([]);
   });
 
   it("discards stored defaults when the resolved provider changes", () => {
@@ -110,6 +202,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
     ).toEqual({
       providerId: "pi",
       executionDefaults: null,
+      providerFallbackCandidates: [],
     });
   });
 
@@ -126,6 +219,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
     ).toEqual({
       providerId: "codex",
       executionDefaults: storedDefaults,
+      providerFallbackCandidates: [],
     });
   });
 
@@ -139,7 +233,18 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       resolveCreateThreadExecutionDefaults(degradedRegistry, {
         storedDefaults: null,
       }),
-    ).toEqual({ providerId: "claude-code", executionDefaults: null });
+    ).toEqual({
+      providerId: "claude-code",
+      executionDefaults: null,
+      providerFallbackCandidates: [
+        "pi",
+        "acp-cursor",
+        "acp-opencode",
+        "acp-omp",
+        "acp-grok",
+        "acp-hermes-agent",
+      ],
+    });
   });
 
   it("rejects an explicitly selected unavailable provider", async () => {
@@ -158,9 +263,18 @@ describe("resolveCreateThreadExecutionDefaults", () => {
 });
 
 describe("resolveCreateThreadEnvironment", () => {
-  it("defaults implicit child host environments to managed worktrees", () => {
-    expect(
-      resolveCreateThreadEnvironment({
+  async function resolveEnvironment(
+    args: Parameters<typeof resolveCreateThreadEnvironment>[1],
+  ) {
+    return withTestHarness((harness) => {
+      installFakeGitWorktreeProvider();
+      return resolveCreateThreadEnvironment(harness.deps, args);
+    });
+  }
+
+  it("defaults implicit child host environments to the worktree provider", async () => {
+    await expect(
+      resolveEnvironment({
         parentThread: makeParentThread(),
         projectId: "proj-1",
         requestedEnvironment: {
@@ -169,16 +283,36 @@ describe("resolveCreateThreadEnvironment", () => {
           workspace: { type: "unmanaged", path: null },
         },
       }),
-    ).toEqual({
-      type: "host",
-      hostId: "host-1",
-      workspace: { type: "managed-worktree", baseBranch: { kind: "default" } },
+    ).resolves.toEqual({
+      type: "provider",
+      environmentProviderId: "git-worktree",
+      machine: { type: "existing" as const, hostId: "host-1" },
+      inputs: { branch: { kind: "default" } },
     });
   });
 
-  it("keeps explicit same-environment reuse for child threads", () => {
-    expect(
-      resolveCreateThreadEnvironment({
+  it("defaults a child under a parent from another project to the worktree provider", async () => {
+    await expect(
+      resolveEnvironment({
+        parentThread: makeParentThread({ projectId: "proj-2" }),
+        projectId: "proj-1",
+        requestedEnvironment: {
+          type: "host",
+          hostId: "host-1",
+          workspace: { type: "unmanaged", path: null },
+        },
+      }),
+    ).resolves.toEqual({
+      type: "provider",
+      environmentProviderId: "git-worktree",
+      machine: { type: "existing" as const, hostId: "host-1" },
+      inputs: { branch: { kind: "default" } },
+    });
+  });
+
+  it("keeps explicit same-environment reuse for child threads", async () => {
+    await expect(
+      resolveEnvironment({
         parentThread: makeParentThread(),
         projectId: "proj-1",
         requestedEnvironment: {
@@ -186,26 +320,124 @@ describe("resolveCreateThreadEnvironment", () => {
           environmentId: "env-1",
         },
       }),
-    ).toEqual({
+    ).resolves.toEqual({
       type: "reuse",
       environmentId: "env-1",
     });
   });
 
-  it("defaults personal child threads to the parent environment", () => {
-    expect(
-      resolveCreateThreadEnvironment({
+  it("uses a fresh worktree on the parent's machine for a project child", async () => {
+    await withTestHarness(async (harness) => {
+      installFakeGitWorktreeProvider();
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-project-child",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/project-child-source",
+      });
+      const parentEnvironment = createEnvironment(harness.db, harness.hub, {
+        projectId: project.id,
+        hostId: host.id,
+        path: "/tmp/project-child-parent",
+        providerOwnsPath: true,
+        status: "ready",
+        environmentProvider: null,
+      });
+      await expect(
+        resolveCreateThreadEnvironment(harness.deps, {
+          parentThread: makeParentThread({
+            projectId: project.id,
+            environmentId: parentEnvironment.id,
+          }),
+          projectId: project.id,
+          requestedEnvironment: { type: "project-default" },
+        }),
+      ).resolves.toEqual({
+        type: "provider",
+        environmentProviderId: "git-worktree",
+        machine: { type: "existing", hostId: host.id },
+        inputs: { branch: { kind: "default" } },
+      });
+    });
+  });
+
+  it("does not reuse a personal parent environment from another project", async () => {
+    const requestedEnvironment = {
+      type: "host",
+      workspace: { type: "personal" },
+    } as const;
+    await expect(
+      resolveEnvironment({
+        parentThread: makeParentThread({
+          environmentId: "env-other-project-parent",
+          projectId: "proj-other",
+        }),
+        projectId: PERSONAL_PROJECT_ID,
+        requestedEnvironment,
+      }),
+    ).resolves.toEqual(requestedEnvironment);
+  });
+
+  it.each([
+    {
+      name: "the personal workspace sugar",
+      requestedEnvironment: {
+        type: "host" as const,
+        workspace: { type: "personal" as const },
+      },
+    },
+    {
+      name: "a selection of the personal provider",
+      requestedEnvironment: {
+        type: "provider" as const,
+        environmentProviderId: "personal-workspace",
+        machine: { type: "existing" as const, hostId: "host-1" },
+        inputs: null,
+      },
+    },
+    {
+      name: "no environment at all",
+      requestedEnvironment: { type: "project-default" as const },
+    },
+  ])(
+    "shares personal child threads from $name",
+    async ({ requestedEnvironment }) => {
+      await withTestHarness(async (harness) => {
+        installFakeGitWorktreeProvider();
+        await expect(
+          resolveCreateThreadEnvironment(harness.deps, {
+            parentThread: makeParentThread({
+              environmentId: "env-personal-parent",
+              projectId: PERSONAL_PROJECT_ID,
+            }),
+            projectId: PERSONAL_PROJECT_ID,
+            requestedEnvironment,
+          }),
+        ).resolves.toEqual({
+          type: "reuse",
+          environmentId: "env-personal-parent",
+        });
+      });
+    },
+  );
+
+  it("shares a personal provider selection with its parent", async () => {
+    await expect(
+      resolveEnvironment({
         parentThread: makeParentThread({
           environmentId: "env-personal-parent",
           projectId: PERSONAL_PROJECT_ID,
         }),
         projectId: PERSONAL_PROJECT_ID,
         requestedEnvironment: {
-          type: "host",
-          workspace: { type: "personal" },
+          type: "provider",
+          environmentProviderId: "personal-workspace",
+          machine: { type: "existing" as const, hostId: "host-1" },
+          inputs: null,
         },
       }),
-    ).toEqual({
+    ).resolves.toEqual({
       type: "reuse",
       environmentId: "env-personal-parent",
     });
@@ -240,20 +472,6 @@ describe("resolveCreateThreadEnvironment", () => {
     },
     {
       args: {
-        parentThread: makeParentThread({
-          projectId: "proj-2",
-        }),
-        projectId: "proj-1",
-        requestedEnvironment: {
-          type: "host" as const,
-          hostId: "host-1",
-          workspace: { type: "unmanaged" as const, path: null },
-        },
-      },
-      name: "parents from another project",
-    },
-    {
-      args: {
         parentThread: makeParentThread(),
         projectId: "proj-1",
         requestedEnvironment: {
@@ -264,10 +482,172 @@ describe("resolveCreateThreadEnvironment", () => {
       },
       name: "explicit unmanaged paths",
     },
-  ])("passes through $name", ({ args }) => {
-    expect(resolveCreateThreadEnvironment(args)).toEqual(
+  ])("passes through $name", async ({ args }) => {
+    await expect(resolveEnvironment(args)).resolves.toEqual(
       args.requestedEnvironment,
     );
+  });
+
+  it("gives a sub-thread of a project with no commits a worktree of the source", async () => {
+    await withTestHarness(async (harness) => {
+      installFakeGitWorktreeProvider();
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-default-order",
+      });
+      seedPrimaryHost(harness.deps, host.id);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/default-order-source",
+      });
+      const parentEnvironment = createEnvironment(harness.db, harness.hub, {
+        projectId: project.id,
+        hostId: host.id,
+        path: "/tmp/parent-environment",
+        providerOwnsPath: true,
+        status: "ready",
+        environmentProvider: null,
+      });
+      registerHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        handle: () => ({
+          ok: true,
+          result: {
+            checkout: { kind: "unborn" as const, branchName: "main" },
+            defaultBranch: null,
+            defaultBranchRelation: null,
+            isWorktree: false,
+            hasUncommittedChanges: false,
+            operation: { kind: "none" as const },
+            originDefaultBranch: null,
+          } satisfies GitSourceInspection,
+        }),
+      });
+
+      await expect(
+        resolveCreateThreadEnvironment(harness.deps, {
+          parentThread: makeParentThread({
+            projectId: project.id,
+            environmentId: parentEnvironment.id,
+          }),
+          projectId: project.id,
+          requestedEnvironment: { type: "project-default" },
+        }),
+      ).resolves.toEqual({
+        type: "provider",
+        environmentProviderId: "git-worktree",
+        machine: { type: "existing", hostId: host.id },
+        inputs: { branch: { kind: "default" } },
+      });
+    });
+  });
+});
+
+describe("resolveProjectDefaultThreadEnvironment", () => {
+  it("uses a worktree for a Git project", async () => {
+    await withTestHarness(async (harness) => {
+      installFakeGitWorktreeProvider();
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-git-default",
+      });
+      seedPrimaryHost(harness.deps, host.id);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/git-default-source",
+      });
+      registerHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        handle: () => ({
+          ok: true,
+          result: {
+            checkout: {
+              kind: "branch" as const,
+              branchName: "feature",
+              headSha: "abc123",
+            },
+            defaultBranch: "main",
+            defaultBranchRelation: null,
+            isWorktree: false,
+            hasUncommittedChanges: false,
+            operation: { kind: "none" as const },
+            originDefaultBranch: null,
+          } satisfies GitSourceInspection,
+        }),
+      });
+
+      await expect(
+        resolveProjectDefaultThreadEnvironment(harness.deps, {
+          projectId: project.id,
+        }),
+      ).resolves.toEqual({
+        type: "provider",
+        environmentProviderId: "git-worktree",
+        machine: { type: "existing", hostId: host.id },
+        inputs: { branch: { kind: "named", name: "main" } },
+      });
+    });
+  });
+
+  it("uses the project checkout for a non-Git project", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-non-git-default",
+      });
+      seedPrimaryHost(harness.deps, host.id);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/non-git-default-source",
+      });
+      registerHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        handle: () => ({
+          ok: true,
+          result: {
+            checkout: { kind: "unborn" as const, branchName: "main" },
+            defaultBranch: null,
+            defaultBranchRelation: null,
+            isWorktree: false,
+            hasUncommittedChanges: false,
+            operation: { kind: "none" as const },
+            originDefaultBranch: null,
+          } satisfies GitSourceInspection,
+        }),
+      });
+
+      await expect(
+        resolveProjectDefaultThreadEnvironment(harness.deps, {
+          projectId: project.id,
+        }),
+      ).resolves.toEqual({
+        type: "provider",
+        environmentProviderId: "project-checkout",
+        machine: { type: "existing", hostId: host.id },
+        inputs: { path: "/tmp/non-git-default-source" },
+      });
+    });
+  });
+
+  it("uses the personal workspace with no project", async () => {
+    await withTestHarness(async (harness) => {
+      installFakePersonalWorkspaceProvider();
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-personal-default",
+      });
+      seedPrimaryHost(harness.deps, host.id);
+
+      await expect(
+        resolveProjectDefaultThreadEnvironment(harness.deps, {
+          projectId: PERSONAL_PROJECT_ID,
+        }),
+      ).resolves.toEqual({
+        type: "provider",
+        environmentProviderId: "personal-workspace",
+        machine: { type: "existing", hostId: host.id },
+        inputs: null,
+      });
+    });
   });
 });
 
@@ -299,7 +679,7 @@ describe("resolveThreadDefaultPermissionMode", () => {
       resolveThreadDefaultPermissionMode(registry, {
         thread: makeThread({
           parentThreadId: "thr-parent-1",
-          providerId: "acp-my-agent",
+          providerId: "acp-cursor",
         }),
       }),
     ).toBe("full");
@@ -378,8 +758,6 @@ describe("resolveThreadExecutionPermissionMode", () => {
   });
 
   it("never upgrades an inherited mode past the parent for provider support", () => {
-    // Pi only supports full; the parent's mode stays the ceiling so provider
-    // validation rejects the pairing instead of silently granting full.
     expect(
       resolveThreadExecutionPermissionMode(registry, {
         parentThread: makeParentThread(),
@@ -415,6 +793,21 @@ describe("resolveThreadExecutionPermissionMode", () => {
         parentThreadExecutionPermissionMode: "auto",
         thread: makeThread({
           parentThreadId: "thr-parent-1",
+          providerId: "codex",
+        }),
+      }),
+    ).toBe("auto");
+  });
+
+  it("clamps a child in another project to its parent's mode", () => {
+    expect(
+      resolveThreadExecutionPermissionMode(registry, {
+        requestedPermissionMode: "full",
+        parentThread: makeParentThread({ projectId: "proj-other" }),
+        parentThreadExecutionPermissionMode: "auto",
+        thread: makeThread({
+          parentThreadId: "thr-parent-1",
+          projectId: "proj-1",
           providerId: "codex",
         }),
       }),

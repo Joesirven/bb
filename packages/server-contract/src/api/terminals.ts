@@ -170,15 +170,15 @@ export const terminalWebSocketQuerySchema = z
     sinceSeq: z.coerce.number().int().nonnegative().default(0),
   })
   .strict();
-export type TerminalWebSocketQuery = z.infer<
-  typeof terminalWebSocketQuerySchema
->;
 
 export const terminalOutputResponseSchema = z
   .object({
     chunks: z.array(terminalOutputChunkSchema),
     nextSeq: z.number().int().nonnegative(),
     truncated: z.boolean(),
+    status: terminalSessionStatusSchema,
+    exitCode: z.number().int().nullable(),
+    closeReason: terminalSessionCloseReasonSchema.nullable(),
   })
   .strict();
 export type TerminalOutputResponse = z.infer<

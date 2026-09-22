@@ -1,32 +1,34 @@
+import type { DesktopBrowserBroker } from "./desktop-browser-broker.js";
 import {
-  createAgentRuntime,
-  fingerprintAcpLaunchSpec,
-  bridgeLaunchProcessKey,
-  type AgentRuntime,
+  CompetingTurnError,
   type AgentRuntimeBridgeLaunch,
-  type AgentRuntimeOptions,
 } from "@bb/agent-runtime";
 import type { AvailableModel } from "@bb/domain";
-import type { EventSinkInput } from "./event-sink.js";
-import type {
-  HostDaemonCommand,
-  HostDaemonAcpLaunchSpec,
-  HostDaemonBridgeLaunch,
-  HostDaemonInjectedSkillSource,
-  HostDaemonOnlineRpcCommand,
-  HostDaemonConnectTunnelIdentity,
-  ProviderCliInstallRequest,
-  ProviderCliStatus,
-  WorkspaceContext,
+import type { EventSink } from "./event-sink.js";
+import {
+  COMPETING_TURN_ERROR_CODE,
+  type EnvironmentHookProgressMessage,
+  type HostDaemonCommand,
+  type ProviderHealthResult,
+  type ProviderUsageResult,
+  type HostDaemonBridgeLaunch,
+  type HostDaemonInjectedSkillSource,
+  type HostDaemonOnlineRpcCommand,
+  type HostDaemonConnectTunnelIdentity,
+  type WorkspaceContext,
 } from "@bb/host-daemon-contract";
-import { getPersonalWorkspaceRoot } from "@bb/host-workspace";
+import type {
+  ProviderInstallationCommand,
+  ProviderInstallationRunResult,
+  ProviderInstallationStatus,
+} from "@bb/provider-bridge-protocol";
 import { ensurePluginProcessDataDir } from "@bb/process-utils";
 import type { InteractiveResolveCommandInput } from "./interactive-request-registry.js";
 import { RuntimeManager, type RuntimeEntry } from "./runtime-manager.js";
-import type { TerminalManager } from "./terminals/terminal-manager.js";
 import type { FetchProjectAttachment } from "./project-attachments.js";
 import type { FetchSkillTree } from "./skill-trees.js";
 import type { HostDaemonLogger } from "./logger.js";
+import type { ServerMoveService } from "./server-move/service.js";
 import {
   ensureCachedPluginHostArtifact,
   type FetchPluginHostArtifact,
@@ -39,44 +41,64 @@ export type CommandOf<TType extends DispatchCommand["type"]> = Extract<
   { type: TType }
 >;
 
-export interface EventSink {
-  emit: (event: EventSinkInput) => void;
-  flush: () => Promise<void>;
-}
-
-export const noopEventSink: EventSink = {
+export const noopEventSink: Pick<EventSink, "emit" | "flush"> = {
   emit: () => undefined,
   flush: async () => undefined,
 };
 
 export interface CommandDispatchOptions {
+  emitEnvironmentHookProgress?: (
+    message: EnvironmentHookProgressMessage,
+  ) => void;
+  desktopBrowserBroker?: DesktopBrowserBroker;
   dataDir: string;
   logger: Pick<HostDaemonLogger, "debug" | "warn">;
   fetchProjectAttachment: FetchProjectAttachment;
   fetchSkillTree?: FetchSkillTree;
   fetchPluginHostArtifact?: FetchPluginHostArtifact;
   runtimeManager: RuntimeManager;
-  terminalManager?: Pick<TerminalManager, "closeEnvironmentTerminals">;
-  eventSink: EventSink;
-  listModels?: (args: {
+  eventSink: Pick<EventSink, "emit" | "flush">;
+  listModels: (args: {
     providerId: string;
-    acpLaunchSpec?: HostDaemonAcpLaunchSpec;
     bridgeLaunch: AgentRuntimeBridgeLaunch;
     cwd?: string;
   }) => Promise<{
     models: AvailableModel[];
     selectedOnlyModels: AvailableModel[];
   }>;
-  getProviderCliStatusForProvider?: (
-    providerId: string,
-  ) => Promise<ProviderCliStatus | null>;
-  streamProviderCliInstall?: (
-    args: ProviderCliInstallRequest & { env?: NodeJS.ProcessEnv },
-  ) => ReadableStream<Uint8Array>;
+  providerHealth: (args: {
+    providerId: string;
+    bridgeLaunch: AgentRuntimeBridgeLaunch;
+    cwd?: string;
+  }) => Promise<ProviderHealthResult>;
+  providerUsage: (args: {
+    providerId: string;
+    bridgeLaunch: AgentRuntimeBridgeLaunch;
+    cwd?: string;
+  }) => Promise<ProviderUsageResult>;
+  providerInstallationStatus: (args: {
+    providerId: string;
+    bridgeLaunch: AgentRuntimeBridgeLaunch;
+    cwd?: string;
+    requirement?: "thread_rewind";
+  }) => Promise<ProviderInstallationStatus>;
+  providerInstallationRun: (args: {
+    providerId: string;
+    action: "install" | "update";
+    bridgeLaunch: AgentRuntimeBridgeLaunch;
+    cwd?: string;
+  }) => Promise<ProviderInstallationRunResult>;
+  streamProviderInstallation?: (args: {
+    providerId: string;
+    plan: ProviderInstallationCommand;
+    env?: NodeJS.ProcessEnv;
+  }) => ReadableStream<Uint8Array>;
+  refreshShellEnv: () => Promise<void>;
   resolveInteractiveRequest?: (
     request: InteractiveResolveCommandInput,
   ) => Promise<void>;
   ensureConnectTunnelIdentity?: () => Promise<HostDaemonConnectTunnelIdentity>;
+  serverMove?: ServerMoveService;
   threadStorageRootPath: string;
 }
 
@@ -117,16 +139,7 @@ export function isExpectedOnlineRpcFailureError(error: unknown): boolean {
 
 const MISSING_EXECUTABLE_PATTERN = /\bENOENT\b/;
 const SPAWN_PATTERN = /\bspawn\b/;
-const ACP_AUTH_REQUIRED_PATTERN =
-  /ACP agent is (?:installed but )?not authenticated|Authentication required.*(?:agent login|CURSOR_API_KEY|CURSOR_AUTH_TOKEN|api key|auth token|login)/is;
 
-/**
- * Turn a wire `bridgeLaunch` into the runtime shape. An `artifact` source is
- * resolved to a verified local path (downloading + hash-verifying if needed);
- * a `daemon-bundled` source names a bridge inside this daemon's own bundle and
- * needs no fetch. The source travels through, so the runtime routes on the
- * server's explicit answer rather than re-deriving it from the provider id.
- */
 export async function resolveRuntimeBridgeLaunch(
   bridgeLaunch: HostDaemonBridgeLaunch,
   options: Pick<
@@ -134,28 +147,17 @@ export async function resolveRuntimeBridgeLaunch(
     "dataDir" | "fetchPluginHostArtifact" | "logger"
   >,
 ): Promise<AgentRuntimeBridgeLaunch> {
-  // Wire and runtime shapes share one noun set, so the block carries over
-  // whole; only the mutable permission-mode array is copied.
   const capabilities = {
     ...bridgeLaunch.capabilities,
     permissionModes: [...bridgeLaunch.capabilities.permissionModes],
   };
-  // Every bridge, artifact or bundled, is scoped to the plugin that ships it:
-  // it gets that plugin's own persistent directory, the same one the plugin's
-  // host worker would get, under its own `bridge-data` kind.
+  const providerOptions = { ...bridgeLaunch.providerOptions };
+  const envPassthrough = [...bridgeLaunch.envPassthrough];
   const dataDir = await ensurePluginProcessDataDir({
     daemonDataDir: options.dataDir,
     pluginId: bridgeLaunch.pluginId,
     kind: "bridge-data",
   });
-  if (bridgeLaunch.source.kind === "daemon-bundled") {
-    return {
-      pluginId: bridgeLaunch.pluginId,
-      dataDir,
-      source: { ...bridgeLaunch.source },
-      capabilities,
-    };
-  }
   if (options.fetchPluginHostArtifact === undefined) {
     throw new CommandDispatchError(
       "provider_bridge_unavailable",
@@ -179,63 +181,17 @@ export async function resolveRuntimeBridgeLaunch(
       artifactPath,
     },
     capabilities,
+    providerOptions,
+    envPassthrough,
   };
-}
-
-const defaultModelListRuntimes = new Map<string, AgentRuntime>();
-
-export async function shutdownDefaultListModelsRuntimes(): Promise<void> {
-  const runtimes = [...defaultModelListRuntimes.values()];
-  defaultModelListRuntimes.clear();
-  await Promise.all(runtimes.map((runtime) => runtime.shutdown()));
-}
-
-export async function defaultListModels(
-  args: {
-    providerId: string;
-    acpLaunchSpec?: HostDaemonAcpLaunchSpec;
-    bridgeLaunch: AgentRuntimeBridgeLaunch;
-  },
-  options: { bridgeBundleDir?: AgentRuntimeOptions["bridgeBundleDir"] } = {},
-): Promise<{
-  models: AvailableModel[];
-  selectedOnlyModels: AvailableModel[];
-}> {
-  const runtimeKey =
-    `${options.bridgeBundleDir ?? ""}` +
-    `#bridge:${bridgeLaunchProcessKey(args.bridgeLaunch)}` +
-    (args.acpLaunchSpec !== undefined
-      ? `#acp:${fingerprintAcpLaunchSpec(args.acpLaunchSpec)}`
-      : "");
-  let runtime = defaultModelListRuntimes.get(runtimeKey);
-  if (!runtime) {
-    runtime = createAgentRuntime({
-      bridgeBundleDir: options.bridgeBundleDir,
-      workspacePath: process.cwd(),
-      onEvent: () => {},
-      onToolCall: async () => ({
-        contentItems: [],
-        success: true,
-      }),
-    });
-    defaultModelListRuntimes.set(runtimeKey, runtime);
-  }
-  try {
-    return await runtime.listModels(args);
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.startsWith("Unsupported provider")
-    ) {
-      throw new CommandDispatchError("unknown_provider", error.message);
-    }
-    throw error;
-  }
 }
 
 export function getErrorCode(error: unknown): string {
   if (error instanceof CommandDispatchError) {
     return error.code;
+  }
+  if (error instanceof CompetingTurnError) {
+    return COMPETING_TURN_ERROR_CODE;
   }
   if (isStructuredSpawnMissingExecutableError(error)) {
     return "missing_executable";
@@ -249,9 +205,6 @@ export function getErrorCode(error: unknown): string {
   }
   if (isMessageOnlySpawnMissingExecutableError(error)) {
     return "missing_executable";
-  }
-  if (isMessageOnlyAcpAuthRequiredError(error)) {
-    return "auth_required";
   }
   return "command_failed";
 }
@@ -281,21 +234,10 @@ function isMessageOnlySpawnMissingExecutableError(error: unknown): boolean {
   );
 }
 
-function isMessageOnlyAcpAuthRequiredError(error: unknown): boolean {
-  return (
-    error instanceof Error && ACP_AUTH_REQUIRED_PATTERN.test(error.message)
-  );
-}
-
 export async function requireWorkspaceEnvironment(
   args: {
-    dataDir?: string;
     environmentId: string;
     injectedSkillSources?: readonly HostDaemonInjectedSkillSource[];
-    /**
-     * Set by thread commands that resolve with injectedSkillSources, so a
-     * busy runtime is reused instead of conflicting; see EnsureEnvironmentArgs.
-     */
     targetThreadId?: string;
     workspaceContext: WorkspaceContext;
   },
@@ -320,10 +262,6 @@ export async function requireWorkspaceEnvironment(
     ...(args.targetThreadId !== undefined
       ? { targetThreadId: args.targetThreadId }
       : {}),
-    ...(args.dataDir
-      ? { personalWorkspaceRoot: getPersonalWorkspaceRoot(args.dataDir) }
-      : {}),
     workspacePath: args.workspaceContext.workspacePath,
-    workspaceProvisionType: args.workspaceContext.workspaceProvisionType,
   });
 }

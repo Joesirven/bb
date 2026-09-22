@@ -1,7 +1,6 @@
 import { access } from "node:fs/promises";
 import { createServer } from "node:net";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import {
   resolveCurrentDevInstanceConfig,
   toDevProcessEnv,
@@ -9,24 +8,23 @@ import {
 } from "@bb/config/runtime";
 import { migrateLegacyDevData } from "../lib/legacy-dev-data-migration.js";
 import { runScriptProcess } from "../lib/process-helpers.js";
+import { repoRoot, runMainIfEntrypoint } from "../lib/script-entry.js";
 
 interface PortAvailabilityCheck {
   label: string;
   port: number;
 }
 
-interface DevTurboCommand {
+interface DevCommand {
   args: string[];
   command: string;
 }
 
+export type DevLaunchMode = "vite" | "worktree";
+
 const LOOPBACK_HOST = "127.0.0.1";
 
-const commandDir = dirname(fileURLToPath(import.meta.url));
-const packageRoot = resolve(commandDir, "..", "..");
-const repoRoot = resolve(packageRoot, "..", "..");
-
-export function createDevTurboCommand(): DevTurboCommand {
+export function createDevTurboCommand(): DevCommand {
   return {
     args: [
       "exec",
@@ -46,13 +44,63 @@ export function createDevTurboCommand(): DevTurboCommand {
   };
 }
 
-function formatConfig(config: DevInstanceConfig): string {
+export function createStartWorktreeCommand(dryRun = false): DevCommand {
+  return {
+    args: [
+      "--conditions=source",
+      "--import",
+      "tsx",
+      resolve(repoRoot, "scripts", "start-bb.mjs"),
+      "--worktree-runtime-policy",
+      ...(dryRun ? ["--dryrun"] : []),
+    ],
+    command: process.execPath,
+  };
+}
+
+export function resolveDevLaunchMode(args: string[]): DevLaunchMode {
+  if (args.length === 0) {
+    return "vite";
+  }
+  if (args.length === 1 && args[0] === "--worktree") {
+    return "worktree";
+  }
+  throw new Error(
+    `[dev] Unknown arguments: ${args.join(" ")}. Expected no arguments or --worktree.`,
+  );
+}
+
+export function toDevLaunchProcessEnv(args: {
+  baseEnv: NodeJS.ProcessEnv;
+  config: DevInstanceConfig;
+  mode: DevLaunchMode;
+}): NodeJS.ProcessEnv {
+  const env = toDevProcessEnv({
+    baseEnv: args.baseEnv,
+    config: args.config,
+  });
+  if (args.mode === "vite") {
+    return env;
+  }
+
+  delete env.BB_DEV_APP_PORT;
+  env.BB_TELEMETRY = "false";
+  env.NODE_ENV = "production";
+  return env;
+}
+
+function formatConfig(config: DevInstanceConfig, mode: DevLaunchMode): string {
+  const prefix = mode === "worktree" ? "[start:worktree]" : "[dev]";
+  const appUrl =
+    mode === "worktree"
+      ? config.serverUrl
+      : `http://localhost:${config.ports.appPort}`;
   return [
-    `[dev] Instance ${config.instanceId}`,
-    `[dev] Data dir ${config.dataDir}`,
-    `[dev] App http://localhost:${config.ports.appPort}`,
-    `[dev] Server ${config.serverUrl}`,
-    `[dev] Host daemon http://127.0.0.1:${config.ports.hostDaemonPort}`,
+    `${prefix} Instance ${config.instanceId}`,
+    `${prefix} Data dir ${config.dataDir}`,
+    `${prefix} App ${appUrl}`,
+    `${prefix} Server ${config.serverUrl}`,
+    `${prefix} Host daemon http://127.0.0.1:${config.ports.hostDaemonPort}`,
   ].join("\n");
 }
 
@@ -80,12 +128,17 @@ function checkPortAvailable(check: PortAvailabilityCheck): Promise<void> {
   });
 }
 
-async function assertPortsAvailable(config: DevInstanceConfig): Promise<void> {
+async function assertPortsAvailable(
+  config: DevInstanceConfig,
+  mode: DevLaunchMode,
+): Promise<void> {
   const checks: PortAvailabilityCheck[] = [
-    { label: "app", port: config.ports.appPort },
     { label: "server", port: config.ports.serverPort },
     { label: "host-daemon", port: config.ports.hostDaemonPort },
   ];
+  if (mode === "vite") {
+    checks.unshift({ label: "app", port: config.ports.appPort });
+  }
   await Promise.all(checks.map(checkPortAvailable));
 }
 
@@ -94,42 +147,46 @@ async function resolveExistingRepoRoot(): Promise<string> {
   return repoRoot;
 }
 
-export async function main(): Promise<void> {
-  const resolvedRepoRoot = await resolveExistingRepoRoot();
-  const config = resolveCurrentDevInstanceConfig(resolvedRepoRoot);
-  const migration = await migrateLegacyDevData({
-    config,
-    output: process.stdout,
-  });
-  if (migration.skippedReason === "legacy-dev-process-running") {
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const dryRun = args.includes("--dryrun");
+  const mode = resolveDevLaunchMode(args.filter((arg) => arg !== "--dryrun"));
+  if (dryRun && mode !== "worktree") {
     throw new Error(
-      "[dev] Legacy ~/.bb-dev data was found, but an old dev server or host-daemon is still running. Stop the old dev process and rerun pnpm dev to migrate it.",
+      "--dryrun is supported by pnpm start and pnpm start:worktree.",
     );
   }
-  await assertPortsAvailable(config);
-  process.stdout.write(`${formatConfig(config)}\n`);
+  const resolvedRepoRoot = await resolveExistingRepoRoot();
+  const config = resolveCurrentDevInstanceConfig(resolvedRepoRoot);
+  if (!dryRun) {
+    const migration = await migrateLegacyDevData({
+      config,
+      output: process.stdout,
+    });
+    if (migration.skippedReason === "legacy-dev-process-running") {
+      throw new Error(
+        "[dev] Legacy ~/.bb-dev data was found, but an old dev server or host-daemon is still running. Stop the old dev process and rerun pnpm dev to migrate it.",
+      );
+    }
+    await assertPortsAvailable(config, mode);
+    process.stdout.write(`${formatConfig(config, mode)}\n`);
+  }
 
-  const turboCommand = createDevTurboCommand();
+  const command =
+    mode === "worktree"
+      ? createStartWorktreeCommand(dryRun)
+      : createDevTurboCommand();
   process.exitCode = await runScriptProcess({
-    args: turboCommand.args,
-    command: turboCommand.command,
+    args: command.args,
+    command: command.command,
     cwd: config.repoRoot,
-    env: toDevProcessEnv({
+    env: toDevLaunchProcessEnv({
       baseEnv: process.env,
       config,
+      mode,
     }),
     stdio: "inherit",
   });
 }
 
-if (
-  process.argv[1] != null &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
-  void main().catch((error) => {
-    const message =
-      error instanceof Error ? (error.stack ?? error.message) : String(error);
-    process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
-  });
-}
+runMainIfEntrypoint(import.meta.url, main);
