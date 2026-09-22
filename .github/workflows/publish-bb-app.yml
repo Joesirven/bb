@@ -517,7 +517,7 @@ jobs:
     needs:
       - publish
       - publish-nightly
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-latest
     timeout-minutes: 45
     outputs:
       version: ${{ steps.nightly_version.outputs.version }}
@@ -796,7 +796,7 @@ jobs:
     needs:
       - nightly-desktop-macos
       - nightly-desktop-linux
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write

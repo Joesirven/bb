@@ -32,7 +32,7 @@ concurrency:
 jobs:
   macos:
     name: macOS arm64 desktop artifacts
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-latest
     timeout-minutes: 45
     outputs:
       has_signing_secrets: ${{ steps.signing.outputs.has_signing_secrets }}
@@ -222,7 +222,7 @@ jobs:
     needs:
       - macos
       - linux
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
