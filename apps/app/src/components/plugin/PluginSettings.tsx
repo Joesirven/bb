@@ -2,6 +2,10 @@ import { useSetPluginEnabled } from "@/components/plugin/useSetPluginEnabled";
 import { useEffect, useId, useState, type FocusEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { appToast } from "@/components/ui/app-toast.js";
+import {
+  PluginMenuBarSetting,
+  usePluginHasMenuBarSetting,
+} from "@/components/plugin/PluginMenuBarSetting";
 import { PluginSettingsSections } from "@/components/plugin/PluginSettingsSections";
 import { Button } from "@bb/shared-ui/button";
 import {
@@ -562,6 +566,7 @@ function PluginSettingsContent({ plugin }: { plugin: PluginListItem }) {
     },
   });
   const enabled = toggle.isPending ? toggle.variables : plugin.enabled;
+  const hasMenuBarSetting = usePluginHasMenuBarSetting(plugin.id);
   const hasAvailableSettings =
     plugin.hasSettings ||
     settingsSections.some((section) => section.pluginId === plugin.id);
@@ -601,6 +606,13 @@ function PluginSettingsContent({ plugin }: { plugin: PluginListItem }) {
         {enabled && plugin.enabled && hasAvailableSettings ? (
           <ResourceDetailConfigurationSection label="Configuration">
             <PluginSettingsDetail plugin={plugin} />
+          </ResourceDetailConfigurationSection>
+        ) : null}
+        {enabled && plugin.enabled && hasMenuBarSetting ? (
+          <ResourceDetailConfigurationSection label="Menu bar">
+            <ResourceDetailPanel surface="recessed" className="px-3 py-3">
+              <PluginMenuBarSetting pluginId={plugin.id} />
+            </ResourceDetailPanel>
           </ResourceDetailConfigurationSection>
         ) : null}
         <ResourceDetailOverviewSection label="Plugin details">

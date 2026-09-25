@@ -55,6 +55,7 @@ export const UI_PREFERENCE_KEYS = [
   "sidebar.visiblePluginPanels",
   "sidebar.navigationProvider",
   "sidebar.threadListProvider",
+  "desktop.hiddenMenuBarPlugins",
 ] as const;
 export type UiPreferenceKey = (typeof UI_PREFERENCE_KEYS)[number];
 const uiPreferenceKeySchema = z.enum(UI_PREFERENCE_KEYS);
@@ -174,6 +175,11 @@ export const uiPreferenceDefinitions = {
     uiPreferenceStringSchema,
     "__automatic__",
     "Plugin that renders the sidebar thread list, or __automatic__ / __builtin__.",
+  ),
+  "desktop.hiddenMenuBarPlugins": defineUiPreference(
+    uiPreferenceStringListSchema,
+    [],
+    "Plugin ids whose macOS menu bar item is turned off. A plugin that is not listed shows its item.",
   ),
 } as const satisfies Record<UiPreferenceKey, UiPreferenceDefinition>;
 

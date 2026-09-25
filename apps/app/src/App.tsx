@@ -16,6 +16,7 @@ import { RouteNavigationIndicator } from "./components/ui/route-navigation-indic
 import { AppNavigationUrlHost } from "./lib/url-open-routing";
 import { NativeShellReporter } from "./lib/native-shell";
 import { UiPreferencesSync } from "@/lib/ui-preferences/UiPreferencesSync";
+import { DesktopTrayPreferencesSync } from "@/lib/DesktopTrayPreferencesSync";
 import { AppFileExternalNavigationHost } from "./components/plugin/AppFileExternalNavigationHost";
 import { useAppTheme } from "./hooks/useAppTheme";
 import { useFaviconColorSync } from "./lib/favicon-color-preference";
@@ -435,6 +436,7 @@ export function App() {
               <HashNavigationScroll />
               <NativeShellReporter />
               <UiPreferencesSync />
+              <DesktopTrayPreferencesSync />
               <Routes>
                 <Route
                   path={AUTH_CALLBACK_ROUTE_PATH}
