@@ -1,4 +1,5 @@
 import { useParams } from "react-router-dom";
+import { PluginSlotMount } from "@/components/plugin/PluginSlotMount";
 import { usePluginSlots } from "@/lib/plugin-slots";
 
 export function FloatingWindowView() {
@@ -18,7 +19,14 @@ export function FloatingWindowView() {
   const Component = registration.component;
   return (
     <div className="h-screen w-screen overflow-hidden bg-background">
-      <Component />
+      <PluginSlotMount
+        key={`${registration.pluginId}/${registration.id}/${registration.generation}`}
+        pluginId={registration.pluginId}
+        slotKind="floatingWindow"
+        slotId={registration.id}
+      >
+        <Component />
+      </PluginSlotMount>
     </div>
   );
 }
