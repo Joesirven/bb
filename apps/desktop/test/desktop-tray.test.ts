@@ -231,6 +231,20 @@ describe("createDesktopTrayManager", () => {
     expect(electronMock.FakeTray.instances[8].title).toBe("now fits");
   });
 
+  it("does not remember state for a plugin ignored at the cap", async () => {
+    const { manager } = await createManager();
+
+    for (let index = 0; index < 8; index += 1) {
+      manager.setState(`plugin-${index}`, { title: String(index) });
+    }
+    manager.setState("plugin-8", { title: "ignored" });
+    manager.clear("plugin-0");
+    manager.setState("plugin-8", { tooltip: "later" });
+    const created = electronMock.FakeTray.instances[8];
+    expect(created.title).toBe("");
+    expect(created.tooltip).toBe("later");
+  });
+
   it("does not count a disabled plugin's item toward the cap", async () => {
     const { manager } = await createManager();
 

@@ -13,7 +13,12 @@ export const bbDesktopTrayMenuItemSchema = z
   .strict();
 export type BbDesktopTrayMenuItem = z.infer<typeof bbDesktopTrayMenuItemSchema>;
 
-const bbDesktopTrayPluginIdSchema = z.string().min(1);
+export const BB_DESKTOP_TRAY_MAX_PLUGIN_ID_LENGTH = 200;
+
+const bbDesktopTrayPluginIdSchema = z
+  .string()
+  .min(1)
+  .max(BB_DESKTOP_TRAY_MAX_PLUGIN_ID_LENGTH);
 
 export const bbDesktopTraySetStateRequestSchema = z
   .object({

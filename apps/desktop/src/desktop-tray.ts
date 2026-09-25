@@ -92,15 +92,20 @@ export function createDesktopTrayManager(
   return {
     setState(pluginId, state) {
       const merged = { ...latestStates.get(pluginId), ...state };
-      latestStates.set(pluginId, merged);
-      if (disabledPluginIds.has(pluginId)) return;
+      if (disabledPluginIds.has(pluginId)) {
+        latestStates.set(pluginId, merged);
+        return;
+      }
       const existing = trays.get(pluginId);
       if (existing !== undefined) {
+        latestStates.set(pluginId, merged);
         applyState(pluginId, existing, state);
         return;
       }
       const created = createTray(pluginId);
-      if (created !== null) applyState(pluginId, created, merged);
+      if (created === null) return;
+      latestStates.set(pluginId, merged);
+      applyState(pluginId, created, merged);
     },
     clear(pluginId) {
       latestStates.delete(pluginId);

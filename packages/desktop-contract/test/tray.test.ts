@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BB_DESKTOP_TRAY_MAX_MENU_ITEMS,
+  BB_DESKTOP_TRAY_MAX_PLUGIN_ID_LENGTH,
   bbDesktopTrayActivatedEventSchema,
   bbDesktopTrayClearRequestSchema,
   bbDesktopTraySetEnabledRequestSchema,
@@ -26,6 +27,19 @@ describe("bbDesktopTraySetStateRequestSchema", () => {
         menuItems: [{ id: "pause", label: "Pause" }],
       }).success,
     ).toBe(true);
+  });
+
+  it("rejects a plugin id longer than the maximum length", () => {
+    expect(
+      bbDesktopTraySetStateRequestSchema.safeParse({
+        pluginId: "p".repeat(BB_DESKTOP_TRAY_MAX_PLUGIN_ID_LENGTH),
+      }).success,
+    ).toBe(true);
+    expect(
+      bbDesktopTraySetStateRequestSchema.safeParse({
+        pluginId: "p".repeat(BB_DESKTOP_TRAY_MAX_PLUGIN_ID_LENGTH + 1),
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects unknown keys and oversized menus", () => {
