@@ -283,7 +283,7 @@ projectId, experimental_hostId? }` (nullable fields). The optional host ID
 `experimental_desktopTray(context)` and `experimental_desktopFloatingWindow()`
 are plain factory functions (not hooks — plain content-script code can call
 them too), returning `{ available, ... }`. The tray factory takes the plugin's
-content-script context (only `pluginId` is read) and requires SDK 0.4.108. `available` is `false` on the web
+content-script context (only `pluginId` is read) and requires SDK 0.4.109. `available` is `false` on the web
 build, non-macOS, or an older desktop build whose preload predates the
 bridge, so every method no-ops in that case and call sites never need to
 branch on platform themselves.

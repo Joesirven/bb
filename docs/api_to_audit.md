@@ -3249,7 +3249,7 @@ windowId)` pair can exist. Decide whether that is enough before
 **What it does.** Two plain (non-hook) factory functions a plugin's frontend
 code — including plain content-script code with no React tree — can call to
 drive bb's desktop shell: `experimental_desktopTray(context)` takes the
-plugin's content-script context (only `pluginId` is read; requires SDK 0.4.108)
+plugin's content-script context (only `pluginId` is read; requires SDK 0.4.109)
 and returns a control surface (`setState({ title?, tooltip?, menuItems? })`,
 `clear()`, `onActivate(handler)`) for that plugin's own macOS menu-bar `Tray`
 item. Every plugin gets a separate item, `onActivate` delivers only that
