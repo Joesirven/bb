@@ -8,6 +8,7 @@ import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { uiPreferencesQueryKey } from "@/hooks/queries/query-keys";
 import {
   createFakeDesktopTrayApi,
+  installBbDesktopWithOlderTray,
   installBbDesktopWithTray,
 } from "@/test/bb-desktop-test-utils";
 import { DesktopTrayPreferencesSync } from "./DesktopTrayPreferencesSync";
@@ -69,5 +70,28 @@ describe("DesktopTrayPreferencesSync", () => {
     expect(fake.setEnabledCalls.slice(3)).toEqual([
       { pluginId: "sync-hidden", enabled: true },
     ]);
+  });
+
+  it("does nothing against an older shell whose tray bridge has no setEnabled", () => {
+    const { setEnabled: _setEnabled, ...olderTray } =
+      createFakeDesktopTrayApi();
+    installBbDesktopWithOlderTray("macos", olderTray);
+    const harness = createQueryClientTestHarness();
+    const store = createStore();
+    registerDesktopTrayPlugin("older-shell-plugin");
+    store.set(hiddenMenuBarPluginIdsAtom, ["older-shell-plugin"]);
+    harness.queryClient.setQueryData(uiPreferencesQueryKey(), {
+      preferences: {},
+    });
+
+    expect(() =>
+      render(
+        <QueryClientProvider client={harness.queryClient}>
+          <JotaiProvider store={store}>
+            <DesktopTrayPreferencesSync />
+          </JotaiProvider>
+        </QueryClientProvider>,
+      ),
+    ).not.toThrow();
   });
 });

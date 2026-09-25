@@ -107,3 +107,10 @@ export function installBbDesktopWithTray(
     experimental_tray: tray,
   };
 }
+
+export function installBbDesktopWithOlderTray(
+  platform: BbDesktopInfo["platform"],
+  tray: Omit<BbDesktopTrayApi, "setEnabled">,
+): void {
+  installBbDesktopWithTray(platform, tray as BbDesktopTrayApi);
+}

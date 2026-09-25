@@ -57,17 +57,22 @@ import { useSidebarThreadSplit } from "./plugin-sidebar-split";
 import { useAppNavigationHost } from "./app-navigation-host";
 import { useCodeTheme } from "./plugin-code-theme";
 
-function createDesktopTray({
-  pluginId,
-}: Pick<PluginContentScriptContext, "pluginId">): PluginDesktopTray {
+function createUnavailableDesktopTray(): PluginDesktopTray {
+  return {
+    available: false,
+    setState: () => {},
+    clear: () => {},
+    onActivate: () => () => {},
+  };
+}
+
+function createDesktopTray(
+  context: Pick<PluginContentScriptContext, "pluginId"> | undefined,
+): PluginDesktopTray {
   const api = getDesktopTrayApi();
-  if (api === null) {
-    return {
-      available: false,
-      setState: () => {},
-      clear: () => {},
-      onActivate: () => () => {},
-    };
+  const pluginId: unknown = context?.pluginId;
+  if (api === null || typeof pluginId !== "string" || pluginId === "") {
+    return createUnavailableDesktopTray();
   }
   registerDesktopTrayPlugin(pluginId);
   return {

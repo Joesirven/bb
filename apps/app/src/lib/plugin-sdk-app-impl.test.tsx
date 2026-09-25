@@ -10,6 +10,7 @@ import { resetDeprecatedAliasWarningsForTests } from "./plugin-sdk-deprecated-al
 import { AppNavigationHostProvider } from "./app-navigation-host";
 import {
   createFakeDesktopTrayApi,
+  installBbDesktopWithOlderTray,
   installBbDesktopWithTray,
 } from "@/test/bb-desktop-test-utils";
 
@@ -315,6 +316,37 @@ describe("plugin SDK navigation components", () => {
 });
 
 describe("plugin SDK desktop tray", () => {
+  it("reports unavailable against an older shell whose tray bridge has no setEnabled", () => {
+    const { setEnabled: _setEnabled, ...olderTray } =
+      createFakeDesktopTrayApi();
+    installBbDesktopWithOlderTray("macos", olderTray);
+
+    const tray = pluginSdkAppImplementation.experimental_desktopTray({
+      pluginId: "pomodoro",
+    });
+    tray.setState({ title: "24:00" });
+    tray.clear();
+
+    expect(tray.available).toBe(false);
+    expect(olderTray.setStateCalls).toEqual([]);
+    expect(olderTray.clearCalls).toEqual([]);
+  });
+
+  it("returns the inert tray when a plugin built before the context argument omits it", () => {
+    const fake = createFakeDesktopTrayApi();
+    installBbDesktopWithTray("macos", fake);
+
+    const tray = Reflect.apply(
+      pluginSdkAppImplementation.experimental_desktopTray,
+      pluginSdkAppImplementation,
+      [],
+    );
+    tray.setState({ title: "24:00" });
+
+    expect(tray.available).toBe(false);
+    expect(fake.setStateCalls).toEqual([]);
+  });
+
   it("tags setState and clear with the plugin id of the context it was created for", () => {
     const fake = createFakeDesktopTrayApi();
     installBbDesktopWithTray("macos", fake);
