@@ -2695,7 +2695,7 @@ export interface PluginDesktopTrayMenuItem {
   label: string;
 }
 
-/** Desired state of bb's single macOS menu-bar tray icon. */
+/** Desired state of one plugin's macOS menu-bar tray item. */
 export interface PluginDesktopTrayState {
   /** Menu-bar text next to the icon (macOS `Tray.setTitle`). */
   title?: string;
@@ -2704,17 +2704,20 @@ export interface PluginDesktopTrayState {
 }
 
 /**
- * Control surface for bb's single macOS menu-bar tray icon. The tray is a
- * shared, app-wide resource: the last plugin to call `setState` owns its
- * contents, and `onActivate` delivers clicks back regardless of which plugin
- * is currently subscribed.
+ * Control surface for this plugin's own macOS menu-bar tray item. Every plugin
+ * that calls `experimental_desktopTray` gets a separate item, so plugins never
+ * overwrite each other, and `onActivate` delivers only this plugin's clicks.
+ * The user can turn a plugin's item off under Settings, Show in menu bar; while
+ * it is off, `setState` calls are remembered and applied when it is turned
+ * back on. macOS silently hides menu-bar items that do not fit beside the
+ * notch, so an item can be enabled yet not visible.
  */
 export interface PluginDesktopTray {
   /** False outside bb's macOS desktop app (web, other OS, older desktop build). */
   readonly available: boolean;
   setState(state: PluginDesktopTrayState): void;
   clear(): void;
-  /** Fires when the user clicks a menu item (its `id`) or the tray icon itself (`null`). */
+  /** Fires when the user clicks one of this plugin's menu items (its `id`) or its tray item itself (`null`). */
   onActivate(handler: (itemId: string | null) => void): () => void;
 }
 
@@ -2910,10 +2913,13 @@ export interface PluginSdkApp {
   experimental_Diff: ComponentType<DiffProps>;
   useComposerView(): ComposerView;
   /**
-   * bb's single macOS menu-bar tray icon (see {@link PluginDesktopTray}).
+   * This plugin's own macOS menu-bar tray item (see {@link PluginDesktopTray}).
+   * Pass the plugin's content-script context; only its `pluginId` is read.
    * Experimental: see docs/api_to_audit.md.
    */
-  experimental_desktopTray(): PluginDesktopTray;
+  experimental_desktopTray(
+    context: Pick<PluginContentScriptContext, "pluginId">,
+  ): PluginDesktopTray;
   /**
    * Open/close this plugin's `experimental_floatingWindow` registrations as
    * native always-on-top windows (see {@link PluginDesktopFloatingWindow}).

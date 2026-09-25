@@ -4,6 +4,7 @@ import { useCallback, useMemo } from "react";
 import type {
   MarkdownProps,
   PluginDesktopFloatingWindow,
+  PluginContentScriptContext,
   PluginDesktopTray,
   PluginSdkApp,
 } from "@get-bb/plugin-sdk";
@@ -30,6 +31,7 @@ import {
   getDesktopFloatingWindowApi,
   getDesktopTrayApi,
 } from "./bb-desktop-tray";
+import { registerDesktopTrayPlugin } from "./desktop-tray-plugins";
 import { definePluginApp } from "./plugin-app-definition";
 import { installDeprecatedAliases } from "./plugin-sdk-deprecated-aliases";
 import { getPluginSlotSnapshot } from "./plugin-slots";
@@ -55,7 +57,9 @@ import { useSidebarThreadSplit } from "./plugin-sidebar-split";
 import { useAppNavigationHost } from "./app-navigation-host";
 import { useCodeTheme } from "./plugin-code-theme";
 
-function createDesktopTray(): PluginDesktopTray {
+function createDesktopTray({
+  pluginId,
+}: Pick<PluginContentScriptContext, "pluginId">): PluginDesktopTray {
   const api = getDesktopTrayApi();
   if (api === null) {
     return {
@@ -65,18 +69,23 @@ function createDesktopTray(): PluginDesktopTray {
       onActivate: () => () => {},
     };
   }
+  registerDesktopTrayPlugin(pluginId);
   return {
     available: true,
     setState: (state) => {
       api.setState({
         ...state,
+        pluginId,
         menuItems: state.menuItems ? [...state.menuItems] : undefined,
       });
     },
     clear: () => {
-      api.clear();
+      api.clear({ pluginId });
     },
-    onActivate: (handler) => api.onActivate(handler),
+    onActivate: (handler) =>
+      api.onActivate((activatedPluginId, itemId) => {
+        if (activatedPluginId === pluginId) handler(itemId);
+      }),
   };
 }
 

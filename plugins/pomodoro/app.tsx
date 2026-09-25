@@ -444,8 +444,9 @@ export default definePluginApp((app) => {
   });
   app.contentScripts.register({
     id: "pomodoro-tray-driver",
-    mount({ signal }) {
-      const tray = experimental_desktopTray();
+    mount(context) {
+      const { signal } = context;
+      const tray = experimental_desktopTray(context);
       if (!tray.available) return;
 
       let lastKnown: StatusView | null = null;
