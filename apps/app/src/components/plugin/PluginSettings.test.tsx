@@ -21,6 +21,11 @@ import {
   PluginSettingsForm,
   PluginSettingsPage,
 } from "./PluginSettings";
+import { registerDesktopTrayPlugin } from "@/lib/desktop-tray-plugins";
+import {
+  createFakeDesktopTrayApi,
+  installBbDesktopWithTray,
+} from "@/test/bb-desktop-test-utils";
 import { type PluginListItem } from "@/hooks/queries/plugin-settings-queries";
 import {
   makeInstalledPlugin,
@@ -68,6 +73,7 @@ const SETTINGS_VIEW = {
 
 afterEach(() => {
   cleanup();
+  delete window.bbDesktop;
   resetPluginSlotStoreForTest();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -815,6 +821,29 @@ describe("PluginSettingsPage", () => {
     expect(
       container.querySelectorAll("[data-resource-detail-section]"),
     ).toHaveLength(1);
+  });
+
+  it("shows Show in menu bar for a plugin that used the tray on macOS", async () => {
+    installBbDesktopWithTray("macos", createFakeDesktopTrayApi());
+    registerDesktopTrayPlugin("linear");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonOk({ plugins: [installedPlugin(true, false)] })),
+    );
+
+    const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
+    render(
+      <MemoryRouter>
+        <QueryClientWrapper>
+          <PluginSettingsPage pluginId="linear" />
+        </QueryClientWrapper>
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("switch", { name: "Show in menu bar" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Menu bar" })).toBeTruthy();
   });
 
   it("keeps a section-only plugin in Configuration with a flat surface", async () => {

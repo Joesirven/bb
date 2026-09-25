@@ -273,40 +273,57 @@ projectId, experimental_hostId? }` (nullable fields). The optional host ID
   is an optional `{ width, height }` seed the host uses only when it opens a
   real native window. bb's macOS desktop shell opens this route in a
   secondary, always-on-top `BrowserWindow` when a plugin calls
-  `experimental_desktopTray()` / `experimental_desktopFloatingWindow()`
+  `experimental_desktopTray(context)` / `experimental_desktopFloatingWindow()`
   (below) — `experimental_desktopFloatingWindow().open(id)` — off desktop,
   or against an older desktop build, the route still resolves but nothing
   makes it float. Experimental: see `docs/api_to_audit.md`.
 
 ### Desktop tray and floating windows
 
-`experimental_desktopTray()` and `experimental_desktopFloatingWindow()` are
-plain factory functions (not hooks — plain content-script code can call them
-too), returning `{ available, ... }`. `available` is `false` on the web
+`experimental_desktopTray(context)` and `experimental_desktopFloatingWindow()`
+are plain factory functions (not hooks — plain content-script code can call
+them too), returning `{ available, ... }`. The tray factory takes the plugin's
+content-script context (only `pluginId` is read) and requires SDK 0.4.108. `available` is `false` on the web
 build, non-macOS, or an older desktop build whose preload predates the
 bridge, so every method no-ops in that case and call sites never need to
 branch on platform themselves.
 
 ```ts
-const tray: PluginDesktopTray = experimental_desktopTray();
-tray.setState({
-  title: "23:59",
-  tooltip: "Pomodoro",
-  menuItems: [{ id: "pause", label: "Pause" } satisfies PluginDesktopTrayMenuItem],
-} satisfies PluginDesktopTrayState);
-tray.onActivate((itemId) => {
-  /* itemId is the clicked menu item's id, or null for a plain icon click */
+app.contentScripts.register({
+  id: "tray-driver",
+  mount(context) {
+    const tray: PluginDesktopTray = experimental_desktopTray(context);
+    tray.setState({
+      title: "23:59",
+      tooltip: "Pomodoro",
+      menuItems: [{ id: "pause", label: "Pause" } satisfies PluginDesktopTrayMenuItem],
+    } satisfies PluginDesktopTrayState);
+    const unsubscribe = tray.onActivate((itemId) => {
+      /* itemId is the clicked menu item's id, or null for a plain item click */
+    });
+    return () => {
+      unsubscribe();
+      tray.clear();
+    };
+  },
 });
-tray.clear();
 
 const floating: PluginDesktopFloatingWindow = experimental_desktopFloatingWindow();
 floating.open("timer"); // "timer" matches an experimental_floatingWindow registration's id
 floating.close("timer");
 ```
 
-bb has exactly one shared macOS menu-bar `Tray` icon: whichever plugin last
-called `setState` owns its title/tooltip/menu until it calls `clear()` or
-another plugin overwrites it — there is no per-plugin arbitration yet.
+Every plugin that calls `experimental_desktopTray(context)` gets its own macOS
+menu-bar item, so plugins never overwrite each other and `onActivate` delivers
+only that plugin's clicks. bb allows at most 8 live items and ignores extras
+with a logged warning. The user can turn a plugin's item off in Settings, on the
+plugin's page, with the Show in menu bar switch (macOS desktop app only, and
+only for plugins that have called `experimental_desktopTray`), or with
+`bb settings ui set desktop.hiddenMenuBarPlugins '["<plugin-id>"]'`. While an
+item is off, `setState` calls are remembered and restored when it is turned
+back on. Items are on by default. macOS silently hides menu-bar items that do
+not fit, notably beside the notch on a MacBook, so an enabled item can be
+invisible; do not rely on it as the only way to reach a feature.
 `experimental_desktopFloatingWindow().open` resolves the registering
 plugin's `experimental_floatingWindow` slot registration and asks bb's
 desktop shell to open (or focus, if already open) that route in a real,

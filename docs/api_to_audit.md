@@ -3248,33 +3248,52 @@ windowId)` pair can exist. Decide whether that is enough before
 
 **What it does.** Two plain (non-hook) factory functions a plugin's frontend
 code — including plain content-script code with no React tree — can call to
-drive bb's desktop shell: `experimental_desktopTray()` returns a control
-surface (`setState({ title?, tooltip?, menuItems? })`, `clear()`,
-`onActivate(handler)`) for bb's single, app-wide macOS menu-bar `Tray` icon;
+drive bb's desktop shell: `experimental_desktopTray(context)` takes the
+plugin's content-script context (only `pluginId` is read; requires SDK 0.4.108)
+and returns a control surface (`setState({ title?, tooltip?, menuItems? })`,
+`clear()`, `onActivate(handler)`) for that plugin's own macOS menu-bar `Tray`
+item. Every plugin gets a separate item, `onActivate` delivers only that
+plugin's clicks, and the user can turn a plugin's item off with Settings, Show
+in menu bar (below);
 `experimental_desktopFloatingWindow()` returns `{ open(windowId),
 close(windowId) }` for the floating-window capability above. Both report
-`available: false` with no-op methods outside bb's macOS desktop app or
-against an older desktop build whose preload predates the bridge
+`available: false` with no-op methods outside bb's macOS desktop app, when
+`experimental_desktopTray` is called without a context, or against an older
+desktop build whose preload predates the bridge
 (`apps/app/src/lib/bb-desktop-tray.ts` feature-detects `window.bbDesktop
-.experimental_tray` / `.experimental_floatingWindow`, both optional on
-`BbDesktopApi` for exactly this version-skew reason).
+.experimental_tray` (including its `setEnabled` method, so a shell that only
+has the previous single-item tray also reports unavailable) and
+`.experimental_floatingWindow`, both optional on `BbDesktopApi` for exactly
+this version-skew reason).
 
 Implementation: contract + schemas in `packages/desktop-contract/src/tray.ts`
 and `floating-window.ts`; Electron-side management in
-`apps/desktop/src/desktop-tray.ts` and `desktop-floating-window.ts`, wired in
+`apps/desktop/src/desktop-tray.ts` (one `Tray` per plugin id, at most 8 live
+items, a remembered latest state per plugin so re-enabling restores it) and
+`desktop-floating-window.ts`, wired in
 `apps/desktop/src/main.ts`'s `registerDesktopTrayAndFloatingWindowIpc`; SDK
 surface in `packages/plugin-sdk/src/app-contract.ts` and
 `apps/app/src/lib/plugin-sdk-app-impl.tsx`.
 
+The per-plugin switch is the server-synced user interface preference
+`desktop.hiddenMenuBarPlugins` (a list of plugin ids, empty by default, so
+every plugin's item is on until turned off). It is stored where the `bb`
+command line reaches it (`bb settings ui set desktop.hiddenMenuBarPlugins
+'["pomodoro"]'`), and `apps/app/src/lib/DesktopTrayPreferencesSync.tsx` pushes it
+to the shell through `BbDesktopTrayApi.setEnabled`. The Settings switch shows
+only in the macOS desktop app and only for plugins that have called
+`experimental_desktopTray` in the current app session.
+
 **Audit before stabilizing.**
 
-1. **Single shared Tray, no ownership arbitration.** bb has exactly one
-   macOS menu-bar icon; whichever plugin last called `setState` owns its
-   title/tooltip/menu until it calls `clear()` or another plugin overwrites
-   it. Two plugins both wanting a live Tray presence will visibly fight over
-   it. Decide whether Tray ownership needs an explicit claim/release
-   protocol, or a per-plugin queue/priority, before more than one plugin
-   uses this.
+1. **Menu bar space and the notch.** Each plugin that uses the tray gets its
+   own item, capped at 8 live items (extras are ignored with a logged warning).
+   Two or more items can be visible together only if the menu bar has room. On
+   a MacBook with a notch, macOS silently hides items that do not fit beside
+   it, with no signal to the app, so an item can be enabled yet not visible.
+   Decide whether bb should advise users (for example a hint next to the
+   switch), offer a combined item, or lower the cap before several plugins
+   ship menu bar items.
 2. **No cleanup on plugin disable/reload.** Nothing in this pass clears a
    plugin's Tray state or closes its floating windows when the plugin that
    set them is reloaded, disabled, or uninstalled — a stale title or
@@ -3292,6 +3311,23 @@ surface in `packages/plugin-sdk/src/app-contract.ts` and
    that update rate is fine for a real `Tray.setTitle` call cadence.
 5. **Multi-window desktop assumption.** `desktop-tray.ts` broadcasts
    activation events to every open `BrowserWindow`
-   (`BrowserWindow.getAllWindows()`), which is correct for today's
-   single-main-window desktop shell but would need real targeting if bb's
-   desktop app ever supports multiple independent main windows.
+   (`BrowserWindow.getAllWindows()`) tagged with the owning plugin id, which
+   is correct for today's single-main-window desktop shell but would need real
+   targeting if bb's desktop app ever supports multiple independent main
+   windows.
+6. **Shared preference, shell-local tray.** `desktop.hiddenMenuBarPlugins` is
+   a server-wide preference, so turning an item off applies to every desktop
+   app connected to that server, while the tray exists only on macOS. A
+   per-device preference would need a client-local store the `bb` command line
+   cannot reach. Confirm the shared behavior is acceptable.
+7. **Switch appears only after a plugin asks for a tray.** The app learns which
+   plugins use the tray when their frontend calls `experimental_desktopTray`
+   in the current session, so the switch is absent for a plugin that is
+   disabled or whose frontend has not loaded yet. An item can also flash on
+   for a moment at startup before the saved off state reaches the shell. An
+   older desktop shell that predates per-plugin ids is detected by the missing
+   `setEnabled` method, so the tray reports unavailable and the switch is
+   hidden until the shell is updated. The main process also bounds plugin ids
+   to 200 characters and does not remember state for a plugin ignored at the
+   eight item cap, but any plugin can still drive another plugin's item by
+   passing its id, because the renderer is a shared trust domain.

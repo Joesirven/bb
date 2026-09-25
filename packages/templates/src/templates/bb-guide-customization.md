@@ -309,6 +309,21 @@ are visible by default. Example:
   bb settings ui set sidebar.hiddenFooterItems '["plugin:provider-usage/usage"]'
   bb settings ui reset sidebar.hiddenFooterItems
 
+Plugin menu bar items
+
+In the macOS desktop app every plugin that uses the tray has its own menu bar
+item, up to eight at once, on by default. The plugin's settings page has a Show
+in menu bar switch, visible only in the macOS desktop app and only for a plugin
+that has asked for a tray. It writes the server-wide UI preference
+`desktop.hiddenMenuBarPlugins`, a string list of plugin ids whose item is off.
+The same value is reachable from the CLI:
+
+  bb settings ui set desktop.hiddenMenuBarPlugins '["pomodoro"]'
+  bb settings ui reset desktop.hiddenMenuBarPlugins
+
+macOS silently hides menu bar items that do not fit, most often beside the notch
+on a MacBook, so an item can be on yet not visible.
+
 Client-local UI preferences
 
 Some Settings values live only in the current browser/client. Sidebar width

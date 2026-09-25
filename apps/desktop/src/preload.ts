@@ -50,6 +50,7 @@ import {
 import {
   BB_DESKTOP_TRAY_ACTIVATED_CHANNEL,
   BB_DESKTOP_TRAY_CLEAR_CHANNEL,
+  BB_DESKTOP_TRAY_SET_ENABLED_CHANNEL,
   BB_DESKTOP_TRAY_SET_STATE_CHANNEL,
 } from "./desktop-tray-ipc.js";
 import {
@@ -381,8 +382,11 @@ const bbTrayApi: BbDesktopTrayApi = {
   setState(request): void {
     ipcRenderer.send(BB_DESKTOP_TRAY_SET_STATE_CHANNEL, request);
   },
-  clear(): void {
-    ipcRenderer.send(BB_DESKTOP_TRAY_CLEAR_CHANNEL);
+  clear(request): void {
+    ipcRenderer.send(BB_DESKTOP_TRAY_CLEAR_CHANNEL, request);
+  },
+  setEnabled(request): void {
+    ipcRenderer.send(BB_DESKTOP_TRAY_SET_ENABLED_CHANNEL, request);
   },
   onActivate(listener): BbDesktopTrayUnsubscribe {
     trayActivateListeners.add(listener);
@@ -563,7 +567,7 @@ ipcRenderer.on(
     const parsed = bbDesktopTrayActivatedEventSchema.safeParse(payload);
     if (!parsed.success) return;
     for (const listener of trayActivateListeners) {
-      listener(parsed.data.itemId);
+      listener(parsed.data.pluginId, parsed.data.itemId);
     }
   },
 );

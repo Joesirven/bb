@@ -31,6 +31,8 @@ import {
   bbDesktopFloatingWindowCloseRequestSchema,
   bbDesktopFloatingWindowOpenRequestSchema,
   bbDesktopThemeSchema,
+  bbDesktopTrayClearRequestSchema,
+  bbDesktopTraySetEnabledRequestSchema,
   bbDesktopTraySetStateRequestSchema,
   type BbDesktopInfo,
   type BbDesktopWindowState,
@@ -199,6 +201,7 @@ import {
 import {
   BB_DESKTOP_TRAY_ACTIVATED_CHANNEL,
   BB_DESKTOP_TRAY_CLEAR_CHANNEL,
+  BB_DESKTOP_TRAY_SET_ENABLED_CHANNEL,
   BB_DESKTOP_TRAY_SET_STATE_CHANNEL,
 } from "./desktop-tray-ipc.js";
 import {
@@ -1874,9 +1877,11 @@ function registerDesktopTrayAndFloatingWindowIpc(
 ): void {
   desktopTrayManager = createDesktopTrayManager({
     iconPath,
-    onActivated(itemId) {
+    logger: desktopLogger,
+    onActivated(pluginId, itemId) {
       for (const browserWindow of BrowserWindow.getAllWindows()) {
         browserWindow.webContents.send(BB_DESKTOP_TRAY_ACTIVATED_CHANNEL, {
+          pluginId,
           itemId,
         });
       }
@@ -1890,11 +1895,22 @@ function registerDesktopTrayAndFloatingWindowIpc(
   ipcMain.on(BB_DESKTOP_TRAY_SET_STATE_CHANNEL, (_event, payload: unknown) => {
     const parsed = bbDesktopTraySetStateRequestSchema.safeParse(payload);
     if (!parsed.success) return;
-    desktopTrayManager?.setState(parsed.data);
+    const { pluginId, ...state } = parsed.data;
+    desktopTrayManager?.setState(pluginId, state);
   });
-  ipcMain.on(BB_DESKTOP_TRAY_CLEAR_CHANNEL, () => {
-    desktopTrayManager?.clear();
+  ipcMain.on(BB_DESKTOP_TRAY_CLEAR_CHANNEL, (_event, payload: unknown) => {
+    const parsed = bbDesktopTrayClearRequestSchema.safeParse(payload);
+    if (!parsed.success) return;
+    desktopTrayManager?.clear(parsed.data.pluginId);
   });
+  ipcMain.on(
+    BB_DESKTOP_TRAY_SET_ENABLED_CHANNEL,
+    (_event, payload: unknown) => {
+      const parsed = bbDesktopTraySetEnabledRequestSchema.safeParse(payload);
+      if (!parsed.success) return;
+      desktopTrayManager?.setEnabled(parsed.data.pluginId, parsed.data.enabled);
+    },
+  );
   ipcMain.on(
     BB_DESKTOP_FLOATING_WINDOW_OPEN_CHANNEL,
     (_event, payload: unknown) => {

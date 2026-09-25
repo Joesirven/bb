@@ -1079,10 +1079,11 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         title: "Desktop tray & floating windows",
         tagline: "A menu-bar icon and always-on-top windows",
         summary:
-          "Drives bb's macOS desktop shell through experimental_desktopTray and experimental_desktopFloatingWindow, plain factory functions plain content-script code can call too. With this, a plugin can:",
+          "Drives bb's macOS desktop shell through experimental_desktopTray (given the plugin's content-script context) and experimental_desktopFloatingWindow, plain factory functions plain content-script code can call too. With this, a plugin can:",
         bullets: [
-          "Set bb's single, app-wide macOS menu-bar Tray title, tooltip, and menu items, and clear them",
-          "React to a tray icon or menu-item click through onActivate",
+          "Set the title, tooltip, and menu items of this plugin's own macOS menu-bar Tray item, and clear them; every plugin gets a separate item",
+          "React to a click on this plugin's tray item or its menu items through onActivate, which never delivers another plugin's clicks",
+          "Let the user turn the item off with the Show in menu bar switch in Settings; macOS may hide items that do not fit beside the notch",
           "Register a chrome-free experimental_floatingWindow route rendered with no AppLayout, sidebar, or header",
           "Open or focus that route in a secondary, always-on-top BrowserWindow, and close it",
           "Degrade to available: false with no-op methods on the web build, non-macOS, or an older desktop build whose preload predates the bridge",

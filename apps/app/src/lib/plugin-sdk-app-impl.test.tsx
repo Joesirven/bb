@@ -8,8 +8,16 @@ import { ThreadTimelineNavigationProvider } from "@/components/thread/timeline/T
 import { pluginSdkAppImplementation } from "./plugin-sdk-app-impl";
 import { resetDeprecatedAliasWarningsForTests } from "./plugin-sdk-deprecated-aliases";
 import { AppNavigationHostProvider } from "./app-navigation-host";
+import {
+  createFakeDesktopTrayApi,
+  installBbDesktopWithOlderTray,
+  installBbDesktopWithTray,
+} from "@/test/bb-desktop-test-utils";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  delete window.bbDesktop;
+});
 
 describe("plugin SDK deprecated aliases", () => {
   beforeEach(() => {
@@ -304,5 +312,106 @@ describe("plugin SDK navigation components", () => {
       },
       location: null,
     });
+  });
+});
+
+describe("plugin SDK desktop tray", () => {
+  it("reports unavailable against an older shell whose tray bridge has no setEnabled", () => {
+    const { setEnabled: _setEnabled, ...olderTray } =
+      createFakeDesktopTrayApi();
+    installBbDesktopWithOlderTray("macos", olderTray);
+
+    const tray = pluginSdkAppImplementation.experimental_desktopTray({
+      pluginId: "pomodoro",
+    });
+    tray.setState({ title: "24:00" });
+    tray.clear();
+
+    expect(tray.available).toBe(false);
+    expect(olderTray.setStateCalls).toEqual([]);
+    expect(olderTray.clearCalls).toEqual([]);
+  });
+
+  it("returns the inert tray when a plugin built before the context argument omits it", () => {
+    const fake = createFakeDesktopTrayApi();
+    installBbDesktopWithTray("macos", fake);
+
+    const tray = Reflect.apply(
+      pluginSdkAppImplementation.experimental_desktopTray,
+      pluginSdkAppImplementation,
+      [],
+    );
+    tray.setState({ title: "24:00" });
+
+    expect(tray.available).toBe(false);
+    expect(fake.setStateCalls).toEqual([]);
+  });
+
+  it("tags setState and clear with the plugin id of the context it was created for", () => {
+    const fake = createFakeDesktopTrayApi();
+    installBbDesktopWithTray("macos", fake);
+
+    const first = pluginSdkAppImplementation.experimental_desktopTray({
+      pluginId: "pomodoro",
+    });
+    const second = pluginSdkAppImplementation.experimental_desktopTray({
+      pluginId: "timers",
+    });
+    expect(first.available).toBe(true);
+
+    first.setState({ title: "24:00", menuItems: [{ id: "a", label: "A" }] });
+    second.setState({ tooltip: "Timers" });
+    first.clear();
+    second.clear();
+
+    expect(fake.setStateCalls).toEqual([
+      {
+        pluginId: "pomodoro",
+        title: "24:00",
+        menuItems: [{ id: "a", label: "A" }],
+      },
+      { pluginId: "timers", tooltip: "Timers", menuItems: undefined },
+    ]);
+    expect(fake.clearCalls).toEqual([
+      { pluginId: "pomodoro" },
+      { pluginId: "timers" },
+    ]);
+  });
+
+  it("delivers a click only to the plugin that owns the item and stops after unsubscribe", () => {
+    const fake = createFakeDesktopTrayApi();
+    installBbDesktopWithTray("macos", fake);
+    const pomodoroHandler = vi.fn();
+    const timersHandler = vi.fn();
+
+    const unsubscribe = pluginSdkAppImplementation
+      .experimental_desktopTray({ pluginId: "pomodoro" })
+      .onActivate(pomodoroHandler);
+    pluginSdkAppImplementation
+      .experimental_desktopTray({ pluginId: "timers" })
+      .onActivate(timersHandler);
+
+    fake.emitActivated("timers", "stop");
+    fake.emitActivated("pomodoro", null);
+    expect(pomodoroHandler.mock.calls).toEqual([[null]]);
+    expect(timersHandler.mock.calls).toEqual([["stop"]]);
+
+    unsubscribe();
+    fake.emitActivated("pomodoro", "pause");
+    expect(pomodoroHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it("is unavailable and inert outside the macOS desktop app", () => {
+    const fake = createFakeDesktopTrayApi();
+    installBbDesktopWithTray("linux", fake);
+    const tray = pluginSdkAppImplementation.experimental_desktopTray({
+      pluginId: "pomodoro",
+    });
+
+    tray.setState({ title: "24:00" });
+    tray.clear();
+    expect(tray.available).toBe(false);
+    expect(fake.setStateCalls).toEqual([]);
+    expect(fake.clearCalls).toEqual([]);
   });
 });
