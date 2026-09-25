@@ -48,17 +48,7 @@ export type BbDesktopCloseWindowRequestHandler = () => boolean;
 
 export interface BbDesktopApi extends BbDesktopInfo {
   browser: BbDesktopBrowserApi;
-  /**
-   * Control surface for per-plugin macOS menu-bar tray items. Optional for
-   * version skew with desktop shells that predate this bridge; callers must
-   * feature-detect and treat its absence as unavailable.
-   */
   experimental_tray?: BbDesktopTrayApi;
-  /**
-   * Control surface for opening/closing plugin floating windows. Optional for
-   * version skew with desktop shells that predate this bridge; callers must
-   * feature-detect and treat its absence as unavailable.
-   */
   experimental_floatingWindow?: BbDesktopFloatingWindowApi;
   checkForUpdates(): Promise<BbDesktopInfo>;
   getInfo(): Promise<BbDesktopInfo>;
