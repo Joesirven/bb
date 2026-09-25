@@ -207,6 +207,14 @@ restores visibility and drag-reorders actions. CLI example:
 `bb settings ui set sidebar.hiddenFooterItems '["plugin:provider-usage/usage"]'`.
 Use `bb settings ui reset sidebar.hiddenFooterItems` to show everything again.
 
+In the macOS desktop app every plugin that uses the tray has its own menu bar
+item (up to 8), on by default. The Show in menu bar switch on the plugin's
+settings page writes `desktop.hiddenMenuBarPlugins`, a string list of plugin ids
+whose item is off, shared across clients of the server:
+`bb settings ui set desktop.hiddenMenuBarPlugins '["pomodoro"]'`, and
+`bb settings ui reset desktop.hiddenMenuBarPlugins` turns every item back on.
+macOS hides menu bar items that do not fit beside the notch.
+
 Disable anonymous usage telemetry with `bb settings general telemetryEnabled false`
 or Settings → General → Privacy & diagnostics → Share anonymous usage data. This server-wide preference
 applies immediately and persists across restarts. `BB_TELEMETRY=false` overrides it.

@@ -698,6 +698,7 @@ client wrote first, so a stale window cannot silently clobber a newer value.
 | `sidebar.visiblePluginPanels`     | Navigation entries shown, or `null` for every entry |
 | `sidebar.navigationProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
+| `desktop.hiddenMenuBarPlugins`    | Plugin ids whose macOS menu bar item is turned off  |
 
 Custom (`chronological`) is the default for `sidebar.organizationMode` when no
 value is saved. Existing server and legacy browser choices are preserved.
@@ -762,6 +763,26 @@ bb settings ui set sidebar.hiddenFooterItems '["builtin:report-bug"]'
 bb settings ui set sidebar.footerOrder '["builtin:report-bug","builtin:settings"]'
 bb settings ui reset sidebar.hiddenFooterItems
 ```
+
+### Plugin menu bar items
+
+In the macOS desktop app each plugin that uses the tray gets its own menu bar
+item, up to 8 at once. Settings → Plugins → the plugin's page has a Show in menu
+bar switch, shown only in the macOS desktop app and only for a plugin that has
+asked for a tray in the current session. Items are on by default. The switch
+writes the UI preference `desktop.hiddenMenuBarPlugins`, a string list of plugin
+ids whose item is off; the same server-wide value is reachable from the CLI and
+SDK, so a change applies to every desktop app connected to that server:
+
+```sh
+bb settings ui set desktop.hiddenMenuBarPlugins '["pomodoro"]'
+bb settings ui reset desktop.hiddenMenuBarPlugins
+```
+
+While an item is off, the plugin keeps updating and the latest state returns
+when it is turned back on. Unknown and uninstalled plugin ids are retained. macOS
+silently hides menu bar items that do not fit, most often beside the notch on a
+MacBook, so an item can be on yet not visible.
 
 ## Thread splits
 
