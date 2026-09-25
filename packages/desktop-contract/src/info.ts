@@ -49,7 +49,7 @@ export type BbDesktopCloseWindowRequestHandler = () => boolean;
 export interface BbDesktopApi extends BbDesktopInfo {
   browser: BbDesktopBrowserApi;
   /**
-   * Control surface for bb's single macOS menu-bar tray icon. Optional for
+   * Control surface for per-plugin macOS menu-bar tray items. Optional for
    * version skew with desktop shells that predate this bridge; callers must
    * feature-detect and treat its absence as unavailable.
    */
