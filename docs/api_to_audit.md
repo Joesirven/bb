@@ -3257,11 +3257,14 @@ plugin's clicks, and the user can turn a plugin's item off with Settings, Show
 in menu bar (below);
 `experimental_desktopFloatingWindow()` returns `{ open(windowId),
 close(windowId) }` for the floating-window capability above. Both report
-`available: false` with no-op methods outside bb's macOS desktop app or
-against an older desktop build whose preload predates the bridge
+`available: false` with no-op methods outside bb's macOS desktop app, when
+`experimental_desktopTray` is called without a context, or against an older
+desktop build whose preload predates the bridge
 (`apps/app/src/lib/bb-desktop-tray.ts` feature-detects `window.bbDesktop
-.experimental_tray` / `.experimental_floatingWindow`, both optional on
-`BbDesktopApi` for exactly this version-skew reason).
+.experimental_tray` (including its `setEnabled` method, so a shell that only
+has the previous single-item tray also reports unavailable) and
+`.experimental_floatingWindow`, both optional on `BbDesktopApi` for exactly
+this version-skew reason).
 
 Implementation: contract + schemas in `packages/desktop-contract/src/tray.ts`
 and `floating-window.ts`; Electron-side management in
@@ -3322,5 +3325,9 @@ only in the macOS desktop app and only for plugins that have called
    in the current session, so the switch is absent for a plugin that is
    disabled or whose frontend has not loaded yet. An item can also flash on
    for a moment at startup before the saved off state reaches the shell. An
-   older desktop shell that predates per-plugin ids rejects the new request
-   shape, so its tray stops updating until the shell is updated.
+   older desktop shell that predates per-plugin ids is detected by the missing
+   `setEnabled` method, so the tray reports unavailable and the switch is
+   hidden until the shell is updated. The main process also bounds plugin ids
+   to 200 characters and does not remember state for a plugin ignored at the
+   eight item cap, but any plugin can still drive another plugin's item by
+   passing its id, because the renderer is a shared trust domain.
