@@ -66,6 +66,7 @@ function savedAccount(authenticated: ClaudeOAuthAccount): Account {
     rateLimitTier: authenticated.rateLimitTier,
     enabled: true,
     priority: 100,
+    assignedHostId: null,
     createdAt: 1,
     lastUsedAt: null,
     lastUsedHostId: null,

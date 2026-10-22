@@ -455,7 +455,9 @@ export class AccountPoolHub {
     let failure: FailureSummary | null = null;
     let usageRefreshed = false;
     const accounts = (await this.options.accounts.list()).filter(
-      (account) => account.provider === adapter.provider,
+      (account) =>
+        account.provider === adapter.provider &&
+        (account.assignedHostId === null || account.assignedHostId === hostId),
     );
     const candidateIds = new Set(accounts.map((account) => account.id));
     const parsed = adapter.parseRequest(body, request.headers);
@@ -473,6 +475,7 @@ export class AccountPoolHub {
         signal.throwIfAborted();
         const selected = await this.select(
           adapter.provider,
+          hostId,
           candidateIds,
           attempted,
           family,
@@ -877,6 +880,7 @@ export class AccountPoolHub {
 
   private async select(
     provider: PoolProvider,
+    hostId: string,
     candidateIds: ReadonlySet<string>,
     attempted: ReadonlySet<string>,
     family: ModelFamily,
@@ -893,7 +897,13 @@ export class AccountPoolHub {
     const now = this.options.now();
     const threshold = this.options.getSettings().switchThreshold;
     const available = accounts
-      .filter((account) => account.provider === provider && account.enabled)
+      .filter(
+        (account) =>
+          account.provider === provider &&
+          account.enabled &&
+          (account.assignedHostId === null ||
+            account.assignedHostId === hostId),
+      )
       .map((account) => ({
         account,
         quota: this.options.quotas.get(account.id),
@@ -972,8 +982,14 @@ export class AccountPoolHub {
         candidates.find((candidate) => candidate.account.id === account.id),
       )
       .find((candidate) => candidate !== undefined);
+    const preferred = candidates.find(
+      ({ account }) => account.assignedHostId === hostId,
+    );
     const selected =
-      bound !== undefined && isUnattempted(bound)
+      preferred ??
+      (bound !== undefined &&
+      isUnattempted(bound) &&
+      (bound.account.assignedHostId === null || candidates.includes(bound))
         ? bound
         : (inherited ??
           (boundAccountId === null &&
@@ -982,7 +998,7 @@ export class AccountPoolHub {
           unattempted.includes(activeAccount)
             ? activeAccount
             : next) ??
-          null);
+          null));
     if (selected === null) return null;
     if (routing.active === null)
       routing.pinnedAccountId = boundAccountId ?? inherited?.account.id ?? null;
@@ -1341,6 +1357,7 @@ export class AccountPoolHub {
   async retryAvailability(
     provider: PoolProvider,
     family: ModelFamily,
+    hostId: string | null,
   ): Promise<RetryAvailability> {
     const parent = this.options.getParentRoute();
     if (parent !== null) {
@@ -1361,7 +1378,9 @@ export class AccountPoolHub {
       return { kind: "unavailable", reason: "source-unavailable" };
     }
     const accounts = (await this.options.accounts.list()).filter(
-      (account) => account.provider === provider,
+      (account) =>
+        account.provider === provider &&
+        (account.assignedHostId === null || account.assignedHostId === hostId),
     );
     return this.accountAvailability(accounts, family);
   }

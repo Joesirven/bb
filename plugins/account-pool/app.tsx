@@ -490,6 +490,9 @@ function AccountRow({
                 </span>
               )}
               <SettingsBadge>{tier(account)}</SettingsBadge>
+              {account.assignedHostId !== null ? (
+                <SettingsBadge>Reserved for one machine</SettingsBadge>
+              ) : null}
               {account.extraUsage?.status === "allowed" ? (
                 <SettingsBadge>Extra usage available</SettingsBadge>
               ) : null}
@@ -540,7 +543,7 @@ function AccountRow({
               onSelect={() => onAction("priority")}
             >
               <Icon name="ListView" />
-              Set priority…
+              Account routing…
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={pending}
@@ -927,6 +930,7 @@ function AccountPoolSettings() {
   const [pastedCode, setPastedCode] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [priority, setPriority] = useState("100");
+  const [assignedMachine, setAssignedMachine] = useState("");
   const [countdown, setCountdown] = useState(0);
   const mounted = useRef(true);
   const threshold =
@@ -1148,6 +1152,12 @@ function AccountPoolSettings() {
   ): Promise<void> {
     if (action === "priority") {
       setPriority(String(account.priority));
+      setAssignedMachine(
+        status?.hosts.find((host) => host.hostId === account.assignedHostId)
+          ?.hostName ??
+          account.assignedHostId ??
+          "",
+      );
       setDialog({ kind: "priority", accountId: account.id });
       return;
     }
@@ -1511,7 +1521,7 @@ function AccountPoolSettings() {
         ) : null}
         {dialog?.kind === "priority" && selectedAccount !== null ? (
           <DialogFrame
-            title="Set priority"
+            title="Account routing"
             footer={
               <>
                 <span className="flex-1" />
@@ -1529,6 +1539,10 @@ function AccountPoolSettings() {
                         accountId: selectedAccount.id,
                         priority: Number(priority),
                       });
+                      await rpc.call("account.setMachine", {
+                        accountId: selectedAccount.id,
+                        machine: assignedMachine || null,
+                      });
                       setDialog(null);
                     })
                   }
@@ -1540,7 +1554,33 @@ function AccountPoolSettings() {
           >
             <p className="text-sm text-muted-foreground">
               Lower numbers come first in the failover order. Ties follow the
-              order accounts were added. Existing conversations stay pinned.
+              order accounts were added. Existing conversations stay pinned
+              unless a reserved account takes priority.
+            </p>
+            <label className="flex flex-col gap-2 text-sm">
+              Reserved machine
+              <Input
+                aria-label="Reserved machine"
+                placeholder="All machines"
+                list="account-pool-machines"
+                value={assignedMachine}
+                onChange={(event) => setAssignedMachine(event.target.value)}
+              />
+              <datalist id="account-pool-machines">
+                {status?.hosts.map((host) => (
+                  <option
+                    key={host.hostId}
+                    value={host.hostName ?? host.hostId}
+                  >
+                    {host.hostName ?? host.hostId}
+                  </option>
+                ))}
+              </datalist>
+            </label>
+            <p className="text-sm text-muted-foreground">
+              A reserved account is used first on its machine. Other accounts
+              provide fallback when it is unavailable. Other machines cannot use
+              it.
             </p>
             <Input
               type="number"
