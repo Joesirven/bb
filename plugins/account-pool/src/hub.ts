@@ -917,7 +917,10 @@ export class AccountPoolHub {
         now - parent.lastUsedAt < AFFINITY_IDLE_TTL_MS
       ) {
         inherited = unattempted.find(
-          ({ account }) => account.id === parent.accountId,
+          (candidate) =>
+            candidate.account.id === parent.accountId &&
+            (candidate.account.assignedHostId === null ||
+              candidates.includes(candidate)),
         );
       }
     }
@@ -951,7 +954,9 @@ export class AccountPoolHub {
           (boundAccountId === null &&
           previousAccountId === null &&
           activeAccount !== undefined &&
-          unattempted.includes(activeAccount)
+          unattempted.includes(activeAccount) &&
+          (activeAccount.account.assignedHostId === null ||
+            candidates.includes(activeAccount))
             ? activeAccount
             : next) ??
           null));
