@@ -594,19 +594,52 @@ function TiptapEditor({
   );
 }
 
+/**
+ * Delay before a pending switch paints its skeleton, so a vault that lists in
+ * a few milliseconds swaps in place instead of flashing placeholder rows.
+ */
+const VAULT_PENDING_DELAY_MS = 150;
+
+function useDelayedFlag(active: boolean, delayMs: number): boolean {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setVisible(false);
+      return;
+    }
+    const timer = setTimeout(() => setVisible(true), delayMs);
+    return () => clearTimeout(timer);
+  }, [active, delayMs]);
+  return visible;
+}
+
 function useNotebook(vaultId: string | null, projectId: string | null) {
   const rpc = useRpc<typeof docsRpcContract>();
   const [data, setData] = useState<NotesData | null>(null);
+  const [loading, setLoading] = useState(true);
+  // The rpc client has no AbortSignal, so responses are sequenced instead:
+  // switching A -> B -> C must not let B's slow reply overwrite C's.
+  const requestRef = useRef(0);
   const refresh = useCallback(() => {
     const input = vaultId
       ? { vaultId }
       : projectId
         ? { projectId }
         : {};
+    const requestId = requestRef.current + 1;
+    requestRef.current = requestId;
+    setLoading(true);
     void rpc
       .call("listNotes", input)
-      .then((value) => setData(parseNotesData(value)))
+      .then((value) => {
+        const parsed = parseNotesData(value);
+        if (requestRef.current !== requestId) return;
+        setData(parsed);
+        setLoading(false);
+      })
       .catch((error: unknown) => {
+        if (requestRef.current !== requestId) return;
+        setLoading(false);
         setData((current) =>
           current
             ? {
@@ -618,8 +651,28 @@ function useNotebook(vaultId: string | null, projectId: string | null) {
       });
   }, [projectId, rpc, vaultId]);
   useEffect(refresh, [refresh]);
-  useRealtime("vault-changed", refresh);
-  return { data, refresh };
+
+  // `vault-changed` is published both scoped (`{ vaultId }`) and unscoped
+  // (`{}`, from the polling watcher). Only the unscoped form and changes to a
+  // vault this panel is showing or loading should force a refetch.
+  const loadedVaultId = data?.vault.id ?? null;
+  const onVaultChanged = useCallback(
+    (payload: unknown) => {
+      const changed =
+        isRecord(payload) && typeof payload.vaultId === "string"
+          ? payload.vaultId
+          : null;
+      if (changed && changed !== loadedVaultId && changed !== vaultId) return;
+      refresh();
+    },
+    [loadedVaultId, refresh, vaultId],
+  );
+  useRealtime("vault-changed", onVaultChanged);
+
+  // A switch is in flight when the loaded tree is not the vault the user
+  // picked. A plain refresh of the same vault keeps the tree on screen.
+  const switching = loading && data !== null && vaultId !== null && vaultId !== loadedVaultId;
+  return { data, refresh, switching };
 }
 
 function DocumentSkeleton() {
@@ -657,6 +710,34 @@ function DocumentSkeleton() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+const VAULT_TREE_SKELETON_ROWS = [
+  "w-4/5",
+  "w-3/5",
+  "w-11/12",
+  "w-2/3",
+  "w-3/4",
+  "w-1/2",
+  "w-5/6",
+] as const;
+
+function VaultTreeSkeleton() {
+  return (
+    <div role="status" aria-label="Loading vault" className="grid gap-2 p-1.5">
+      <span className="sr-only">Loading vault…</span>
+      {VAULT_TREE_SKELETON_ROWS.map((width, index) => (
+        <div
+          className="flex items-center gap-2"
+          key={width}
+          style={{ paddingLeft: index % 3 === 2 ? 16 : 0 }}
+        >
+          <Skeleton className="size-4 shrink-0" />
+          <Skeleton className={cn("h-4", width)} />
+        </div>
+      ))}
     </div>
   );
 }
@@ -1498,6 +1579,8 @@ function Tree({
   onVaultChange,
   onAddVault,
   sidebarKey,
+  selectedVaultId,
+  pending,
 }: {
   data: NotesData;
   selectedPath: string | null;
@@ -1514,6 +1597,10 @@ function Tree({
   onVaultChange(vaultId: string): void;
   onAddVault(): void;
   sidebarKey: string;
+  /** The vault the user picked, which leads `data.vault` during a switch. */
+  selectedVaultId: string;
+  /** A switch to `selectedVaultId` is in flight and slow enough to show. */
+  pending: boolean;
 }) {
   const portalScopeProps = usePortalScopeProps();
   const [query, setQuery] = useState("");
@@ -1752,6 +1839,10 @@ function Tree({
     window.addEventListener("blur", cleanup);
   };
 
+  // The previous vault's rows must not stay on screen labelled as the new
+  // vault; the skeleton replaces them for the duration of the switch.
+  const treeEntries = pending ? [] : visible;
+
   if (sidebarCollapsed) {
     return (
       <aside
@@ -1824,10 +1915,11 @@ function Tree({
         aria-label="Notes"
         className="relative min-h-0 flex-1 overflow-y-auto p-1.5"
       >
-        {data.error ? (
+        {pending ? <VaultTreeSkeleton /> : null}
+        {!pending && data.error ? (
           <div className="p-3 text-xs text-destructive">{data.error}</div>
         ) : null}
-        {visible.map((entry) => {
+        {treeEntries.map((entry) => {
           const depth = entry.path.split("/").length - 1;
           const label =
             notesByPath.get(entry.path)?.title ??
@@ -1944,7 +2036,7 @@ function Tree({
             </ContextMenuPrimitive.Root>
           );
         })}
-        {data.truncated ? (
+        {!pending && data.truncated ? (
           <div className="p-2 text-xs text-muted-foreground">
             Tree truncated at 5,000 entries.
           </div>
@@ -1952,10 +2044,15 @@ function Tree({
       </nav>
       <div className="grid gap-1.5 border-t border-border p-2">
         <div className="flex items-center gap-1">
-          <Select value={data.vault.id} onValueChange={onVaultChange}>
+          <Select
+            value={selectedVaultId}
+            onValueChange={onVaultChange}
+            disabled={pending}
+          >
             <SelectTrigger
               className="min-w-0 flex-1 border-transparent px-2 shadow-none hover:bg-state-hover"
               aria-label="Vault"
+              aria-busy={pending}
             >
               <SelectValue />
             </SelectTrigger>
@@ -1984,7 +2081,7 @@ function Tree({
             <HugeiconsIcon icon={PlusSignIcon} />
           </Button>
         </div>
-        {hostUnavailable ? (
+        {!pending && hostUnavailable ? (
           <div
             className="flex items-center gap-1.5 px-1 text-xs text-destructive"
             role="status"
@@ -2040,7 +2137,8 @@ function NotesPanel({ subPath }: PluginNavPanelProps) {
   const [vaultRootPath, setVaultRootPath] = useState("");
   const [vaultHostId, setVaultHostId] = useState("primary");
   const [vaultError, setVaultError] = useState<string | null>(null);
-  const { data, refresh } = useNotebook(vaultId, projectId);
+  const { data, refresh, switching } = useNotebook(vaultId, projectId);
+  const pending = useDelayedFlag(switching, VAULT_PENDING_DELAY_MS);
   const activeVaultId = data?.vault.id ?? vaultId;
   const filePath =
     route.vaultId === null || route.vaultId === activeVaultId
@@ -2231,6 +2329,8 @@ function NotesPanel({ subPath }: PluginNavPanelProps) {
           }}
           onAddVault={() => setVaultDialogOpen(true)}
           sidebarKey={route.vaultId ?? ""}
+          selectedVaultId={vaultId ?? data.vault.id}
+          pending={pending}
         />
         {filePath && /\.md$/i.test(filePath) ? (
           <NotePane
