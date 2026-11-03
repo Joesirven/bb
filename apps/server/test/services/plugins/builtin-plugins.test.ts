@@ -309,6 +309,7 @@ describe("builtin plugin reconciliation", () => {
       ["provider-retry", "ArrowReloadHorizontal"],
       ["provider-usage", "ChartColumn"],
       ["push-notifications", "BellDot"],
+      ["pomodoro", "Timer"],
       ["drafts", "EditFile"],
       ["scheduled-send", "Calendar"],
       ["secrets", "Lock"],

@@ -143,6 +143,11 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: true,
   },
   {
+    name: "pomodoro",
+    pluginId: "pomodoro",
+    defaultEnabled: true,
+  },
+  {
     name: "secrets",
     pluginId: "secrets",
     defaultEnabled: true,
