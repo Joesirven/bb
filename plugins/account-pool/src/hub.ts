@@ -961,7 +961,9 @@ export class AccountPoolHub {
         inherited = pinnable.find(
           (candidate) =>
             candidate.account.id === parent.accountId &&
-            isUnattempted(candidate),
+            isUnattempted(candidate) &&
+            (candidate.account.assignedHostId === null ||
+              candidates.includes(candidate)),
         );
       }
     }
@@ -995,7 +997,9 @@ export class AccountPoolHub {
           (boundAccountId === null &&
           previousAccountId === null &&
           activeAccount !== undefined &&
-          unattempted.includes(activeAccount)
+          unattempted.includes(activeAccount) &&
+          (activeAccount.account.assignedHostId === null ||
+            candidates.includes(activeAccount))
             ? activeAccount
             : next) ??
           null));

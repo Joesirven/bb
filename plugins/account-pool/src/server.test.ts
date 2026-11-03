@@ -7454,6 +7454,60 @@ describe("sequential pool recovery", () => {
     expect(await send(otherToken)).toBe(200);
   });
 
+  it.each(["fresh", "child"] as const)(
+    "uses shared fallback for a %s conversation while its reserved account is held",
+    async (kind) => {
+      const attempts: Array<string | null> = [];
+      let limited = false;
+      const fixture = await createFixture({
+        upstreamUrl: "https://upstream.example",
+        apiKey: "sk-reserved",
+        options: {
+          fetch: async (_input, init) => {
+            const key = new Headers(init?.headers).get("x-api-key");
+            attempts.push(key);
+            return limited && key === "sk-reserved"
+              ? Response.json(
+                  {},
+                  { status: 429, headers: { "retry-after": "60" } },
+                )
+              : Response.json({});
+          },
+        },
+      });
+      await addApiAccount(fixture, "sk-shared", 100);
+      await fixture.host.harness.behavior.callRpc("account.setMachine", {
+        accountId: fixture.account.id,
+        machine: "host-one",
+      });
+      const send = async (session: string, parent: string | null) => {
+        const response = await fixture.host.harness.behavior.fetchHttp(
+          "POST",
+          "/v1/messages",
+          {
+            headers: authHeaders(fixture.key),
+            body: JSON.stringify({
+              metadata: {
+                user_id: JSON.stringify({
+                  session_id: session,
+                  ...(parent === null ? {} : { parent_session_id: parent }),
+                }),
+              },
+            }),
+          },
+        );
+        await response.text();
+        return response.status;
+      };
+      expect(await send("parent", null)).toBe(200);
+      limited = true;
+      expect(await send("parent", null)).toBe(429);
+      attempts.length = 0;
+      expect(await send(kind, kind === "child" ? "parent" : null)).toBe(200);
+      expect(attempts).toEqual(["sk-shared"]);
+    },
+  );
+
   it("applies reordered failover atomically without moving current conversations", async () => {
     const attempts: Array<string | null> = [];
     let rejectFirst = false;
